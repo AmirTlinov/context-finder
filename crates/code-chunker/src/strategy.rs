@@ -7,7 +7,7 @@ pub struct StrategyExecutor {
 }
 
 impl StrategyExecutor {
-    pub fn new(config: ChunkerConfig) -> Self {
+    pub const fn new(config: ChunkerConfig) -> Self {
         Self { config }
     }
 
@@ -157,7 +157,7 @@ mod tests {
     fn create_test_content() -> String {
         let mut lines = Vec::new();
         for i in 0..100 {
-            lines.push(format!("fn test_function_{}() {{ }}", i));
+            lines.push(format!("fn test_function_{i}() {{ }}"));
         }
         lines.join("\n")
     }
@@ -218,7 +218,7 @@ mod tests {
             };
             let executor = StrategyExecutor::new(config);
             let chunks = executor.execute(&content, "test.rs", "rust");
-            assert!(!chunks.is_empty(), "Strategy {:?} produced no chunks", strategy);
+            assert!(!chunks.is_empty(), "Strategy {strategy:?} produced no chunks");
         }
     }
 }

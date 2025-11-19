@@ -7,6 +7,7 @@ pub struct FuzzySearch {
 }
 
 impl FuzzySearch {
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             matcher: Matcher::new(nucleo_matcher::Config::DEFAULT),
@@ -14,7 +15,7 @@ impl FuzzySearch {
     }
 
     /// Search chunks by fuzzy matching against paths and symbol names
-    /// Returns (chunk_index, score) sorted by score descending
+    /// Returns (`chunk_index`, score) sorted by score descending
     pub fn search(&mut self, query: &str, chunks: &[CodeChunk], limit: usize) -> Vec<(usize, f32)> {
         let pattern = Pattern::parse(
             query,
@@ -67,7 +68,7 @@ impl FuzzySearch {
         scored.truncate(limit);
 
         // Normalize scores to 0-1 range (nucleo scores are u32)
-        let max_score = scored.first().map(|(_, s)| *s as f32).unwrap_or(1.0);
+        let max_score = scored.first().map_or(1.0, |(_, s)| *s as f32);
 
         scored
             .into_iter()

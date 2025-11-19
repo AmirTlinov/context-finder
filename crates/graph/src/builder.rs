@@ -1,5 +1,5 @@
 use crate::error::{GraphError, Result};
-use crate::types::*;
+use crate::types::{CodeGraph, GraphNode, GraphEdge, RelationshipType, Symbol, SymbolType};
 use context_code_chunker::CodeChunk;
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
@@ -33,7 +33,7 @@ impl GraphBuilder {
 
         parser
             .set_language(&ts_lang)
-            .map_err(|e| GraphError::BuildError(format!("Failed to set language: {}", e)))?;
+            .map_err(|e| GraphError::BuildError(format!("Failed to set language: {e}")))?;
 
         Ok(Self { language, parser })
     }

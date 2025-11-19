@@ -21,8 +21,7 @@ impl ProjectIndexer {
 
         if !root.exists() {
             return Err(IndexerError::InvalidPath(format!(
-                "Path does not exist: {:?}",
-                root
+                "Path does not exist: {root:?}"
             )));
         }
 
@@ -73,7 +72,7 @@ impl ProjectIndexer {
                     (store, Some(mtimes))
                 }
                 Err(e) => {
-                    log::warn!("Failed to load existing index: {}, starting fresh", e);
+                    log::warn!("Failed to load existing index: {e}, starting fresh");
                     (VectorStore::new(&self.store_path).await?, None)
                 }
             }
@@ -105,7 +104,7 @@ impl ProjectIndexer {
                 if let Ok(modified) = metadata.modified() {
                     if let Ok(duration) = modified.duration_since(SystemTime::UNIX_EPOCH) {
                         current_mtimes.insert(
-                            file_path.strip_prefix(&self.root).unwrap_or(&file_path).to_string_lossy().to_string(),
+                            file_path.strip_prefix(&self.root).unwrap_or(file_path).to_string_lossy().to_string(),
                             duration.as_secs()
                         );
                     }
@@ -126,7 +125,7 @@ impl ProjectIndexer {
                         store.add_chunks(chunks).await?;
                     }
                     Err(e) => {
-                        log::warn!("Failed to process file: {}", e);
+                        log::warn!("Failed to process file: {e}");
                         stats.add_error(e);
                     }
                 }
@@ -138,7 +137,7 @@ impl ProjectIndexer {
         self.save_mtimes(&current_mtimes).await?;
 
         stats.time_ms = start.elapsed().as_millis() as u64;
-        log::info!("Indexing completed: {:?}", stats);
+        log::info!("Indexing completed: {stats:?}");
 
         Ok(stats)
     }
@@ -165,8 +164,7 @@ impl ProjectIndexer {
 
             let is_changed = existing_mtimes
                 .get(&relative_path)
-                .map(|&old_mtime| mtime > old_mtime)
-                .unwrap_or(true); // New file
+                .is_none_or(|&old_mtime| mtime > old_mtime); // New file
 
             if is_changed {
                 changed.push(file_path.clone());
@@ -206,7 +204,7 @@ impl ProjectIndexer {
 
         let mut tasks = Vec::new();
 
-        for file_chunk in files.chunks(MAX_CONCURRENT) {
+        if let Some(file_chunk) = files.chunks(MAX_CONCURRENT).next() {
             for file_path in file_chunk {
                 let file_path = file_path.clone();
                 let task = tokio::spawn(async move {
@@ -236,12 +234,12 @@ impl ProjectIndexer {
                                 }
                             }
                             Err(e) => {
-                                batch_results.push(Err(format!("{:?}: {}", file_path, e)));
+                                batch_results.push(Err(format!("{file_path:?}: {e}")));
                             }
                         }
                     }
                     Ok(Err(e)) => batch_results.push(Err(e)),
-                    Err(e) => batch_results.push(Err(format!("Task panicked: {}", e))),
+                    Err(e) => batch_results.push(Err(format!("Task panicked: {e}"))),
                 }
             }
 
@@ -257,7 +255,7 @@ impl ProjectIndexer {
     ) -> std::result::Result<(PathBuf, String, usize), String> {
         let content = tokio::fs::read_to_string(&file_path)
             .await
-            .map_err(|e| format!("{:?}: {}", file_path, e))?;
+            .map_err(|e| format!("{file_path:?}: {e}"))?;
 
         let lines = content.lines().count();
 
@@ -271,7 +269,7 @@ impl ProjectIndexer {
         store: &mut VectorStore,
         stats: &mut IndexStats,
     ) -> Result<()> {
-        log::debug!("Processing file: {:?}", file_path);
+        log::debug!("Processing file: {file_path:?}");
 
         let content = tokio::fs::read_to_string(file_path).await?;
         let lines = content.lines().count();
@@ -299,6 +297,7 @@ impl ProjectIndexer {
     }
 
     /// Get store path
+    #[must_use] 
     pub fn store_path(&self) -> &Path {
         &self.store_path
     }

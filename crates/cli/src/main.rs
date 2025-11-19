@@ -218,7 +218,7 @@ async fn cmd_search(query: &str, limit: usize, project: &Path) -> Result<()> {
                 chunk_type: r.chunk.metadata.chunk_type.map(|ct| ct.as_str().to_string()),
                 score: r.score,
                 content: r.chunk.content.clone(),
-                context: r.chunk.metadata.context_imports.clone(),
+                context: r.chunk.metadata.context_imports,
             })
             .collect(),
     };
@@ -299,9 +299,7 @@ async fn cmd_list_symbols(file: &str, project: &Path) -> Result<()> {
             let name = chunk.metadata.symbol_name.clone()?;
             let symbol_type = chunk
                 .metadata
-                .chunk_type
-                .map(|ct| ct.as_str().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+                .chunk_type.map_or_else(|| "unknown".to_string(), |ct| ct.as_str().to_string());
 
             Some(SymbolInfo {
                 name,

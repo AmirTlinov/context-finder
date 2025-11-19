@@ -23,6 +23,7 @@ pub struct IndexStats {
 }
 
 impl IndexStats {
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             files: 0,
@@ -40,7 +41,7 @@ impl IndexStats {
         *self.languages.entry(language.to_string()).or_insert(0) += 1;
     }
 
-    pub fn add_chunks(&mut self, count: usize) {
+    pub const fn add_chunks(&mut self, count: usize) {
         self.chunks += count;
     }
 

@@ -23,19 +23,19 @@ impl Language {
     /// Detect language from file extension
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
-            "rs" => Language::Rust,
-            "py" | "pyw" => Language::Python,
-            "js" | "mjs" | "cjs" => Language::JavaScript,
-            "ts" | "tsx" => Language::TypeScript,
-            "go" => Language::Go,
-            "java" => Language::Java,
-            "c" | "h" => Language::C,
-            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Language::Cpp,
-            "cs" => Language::CSharp,
-            "rb" => Language::Ruby,
-            "swift" => Language::Swift,
-            "kt" | "kts" => Language::Kotlin,
-            _ => Language::Unknown,
+            "rs" => Self::Rust,
+            "py" | "pyw" => Self::Python,
+            "js" | "mjs" | "cjs" => Self::JavaScript,
+            "ts" | "tsx" => Self::TypeScript,
+            "go" => Self::Go,
+            "java" => Self::Java,
+            "c" | "h" => Self::C,
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Self::Cpp,
+            "cs" => Self::CSharp,
+            "rb" => Self::Ruby,
+            "swift" => Self::Swift,
+            "kt" | "kts" => Self::Kotlin,
+            _ => Self::Unknown,
         }
     }
 
@@ -44,47 +44,46 @@ impl Language {
         path.as_ref()
             .extension()
             .and_then(|ext| ext.to_str())
-            .map(Self::from_extension)
-            .unwrap_or(Language::Unknown)
+            .map_or(Self::Unknown, Self::from_extension)
     }
 
     /// Get language name as string
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Language::Rust => "rust",
-            Language::Python => "python",
-            Language::JavaScript => "javascript",
-            Language::TypeScript => "typescript",
-            Language::Go => "go",
-            Language::Java => "java",
-            Language::C => "c",
-            Language::Cpp => "cpp",
-            Language::CSharp => "csharp",
-            Language::Ruby => "ruby",
-            Language::Swift => "swift",
-            Language::Kotlin => "kotlin",
-            Language::Unknown => "unknown",
+            Self::Rust => "rust",
+            Self::Python => "python",
+            Self::JavaScript => "javascript",
+            Self::TypeScript => "typescript",
+            Self::Go => "go",
+            Self::Java => "java",
+            Self::C => "c",
+            Self::Cpp => "cpp",
+            Self::CSharp => "csharp",
+            Self::Ruby => "ruby",
+            Self::Swift => "swift",
+            Self::Kotlin => "kotlin",
+            Self::Unknown => "unknown",
         }
     }
 
     /// Check if this language is supported for AST parsing
-    pub fn supports_ast(self) -> bool {
+    pub const fn supports_ast(self) -> bool {
         matches!(
             self,
-            Language::Rust
-                | Language::Python
-                | Language::JavaScript
-                | Language::TypeScript
+            Self::Rust
+                | Self::Python
+                | Self::JavaScript
+                | Self::TypeScript
         )
     }
 
     /// Get Tree-sitter language instance
     pub fn tree_sitter_language(self) -> Result<tree_sitter::Language> {
         match self {
-            Language::Rust => Ok(tree_sitter_rust::LANGUAGE.into()),
-            Language::Python => Ok(tree_sitter_python::LANGUAGE.into()),
-            Language::JavaScript => Ok(tree_sitter_javascript::LANGUAGE.into()),
-            Language::TypeScript => {
+            Self::Rust => Ok(tree_sitter_rust::LANGUAGE.into()),
+            Self::Python => Ok(tree_sitter_python::LANGUAGE.into()),
+            Self::JavaScript => Ok(tree_sitter_javascript::LANGUAGE.into()),
+            Self::TypeScript => {
                 Ok(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             }
             _ => Err(ChunkerError::unsupported_language(self.as_str())),
@@ -94,52 +93,49 @@ impl Language {
     /// Get typical comment prefixes for this language
     pub fn comment_prefixes(self) -> Vec<&'static str> {
         match self {
-            Language::Rust
-            | Language::JavaScript
-            | Language::TypeScript
-            | Language::Go
-            | Language::Java
-            | Language::C
-            | Language::Cpp
-            | Language::CSharp
-            | Language::Swift
-            | Language::Kotlin => vec!["//", "/*", "///", "/**"],
-            Language::Python | Language::Ruby => vec!["#", "\"\"\"", "'''"],
-            Language::Unknown => vec![],
+            Self::Rust
+            | Self::JavaScript
+            | Self::TypeScript
+            | Self::Go
+            | Self::Java
+            | Self::C
+            | Self::Cpp
+            | Self::CSharp
+            | Self::Swift
+            | Self::Kotlin => vec!["//", "/*", "///", "/**"],
+            Self::Python | Self::Ruby => vec!["#", "\"\"\"", "'''"],
+            Self::Unknown => vec![],
         }
     }
 
     /// Get import/use statement patterns for this language
     pub fn import_patterns(self) -> Vec<&'static str> {
         match self {
-            Language::Rust => vec!["use ", "extern crate "],
-            Language::Python => vec!["import ", "from "],
-            Language::JavaScript | Language::TypeScript => vec!["import ", "require("],
-            Language::Go => vec!["import "],
-            Language::Java => vec!["import "],
-            Language::CSharp => vec!["using "],
-            Language::Ruby => vec!["require ", "include "],
-            Language::Swift => vec!["import "],
-            Language::Kotlin => vec!["import "],
-            Language::C | Language::Cpp => vec!["#include "],
-            Language::Unknown => vec![],
+            Self::Rust => vec!["use ", "extern crate "],
+            Self::Python => vec!["import ", "from "],
+            Self::JavaScript | Self::TypeScript => vec!["import ", "require("],
+            Self::Go | Self::Java | Self::Swift | Self::Kotlin => vec!["import "],
+            Self::CSharp => vec!["using "],
+            Self::Ruby => vec!["require ", "include "],
+            Self::C | Self::Cpp => vec!["#include "],
+            Self::Unknown => vec![],
         }
     }
 
     /// Get typical file size thresholds for this language
-    pub fn size_limits(self) -> LanguageSizeLimits {
+    pub const fn size_limits(self) -> LanguageSizeLimits {
         match self {
-            Language::Python | Language::Ruby => LanguageSizeLimits {
+            Self::Python | Self::Ruby => LanguageSizeLimits {
                 typical_lines: 200,
                 large_lines: 500,
                 huge_lines: 1000,
             },
-            Language::Rust | Language::Go => LanguageSizeLimits {
+            Self::Rust | Self::Go => LanguageSizeLimits {
                 typical_lines: 300,
                 large_lines: 600,
                 huge_lines: 1200,
             },
-            Language::JavaScript | Language::TypeScript => LanguageSizeLimits {
+            Self::JavaScript | Self::TypeScript => LanguageSizeLimits {
                 typical_lines: 150,
                 large_lines: 400,
                 huge_lines: 800,
@@ -155,6 +151,7 @@ impl Language {
 
 /// Size thresholds for language files
 #[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_field_names)]
 pub struct LanguageSizeLimits {
     pub typical_lines: usize,
     pub large_lines: usize,
@@ -163,7 +160,7 @@ pub struct LanguageSizeLimits {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::Language;
 
     #[test]
     fn test_from_extension() {

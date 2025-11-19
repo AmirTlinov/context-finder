@@ -6,10 +6,10 @@ use std::collections::HashMap;
 /// Symbol in code (function, class, method, etc.)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Symbol {
-    /// Symbol name (e.g., "authenticate", "User::new")
+    /// Symbol name (e.g., "authenticate", "`User::new`")
     pub name: String,
 
-    /// Fully qualified name (e.g., "auth::service::AuthService::authenticate")
+    /// Fully qualified name (e.g., "`auth::service::AuthService::authenticate`")
     pub qualified_name: Option<String>,
 
     /// File path
@@ -87,14 +87,15 @@ pub struct CodeGraph {
     /// Directed graph (symbol -> symbol with relationships)
     pub graph: DiGraph<GraphNode, GraphEdge>,
 
-    /// Symbol name -> NodeIndex mapping for fast lookup
+    /// Symbol name -> `NodeIndex` mapping for fast lookup
     pub symbol_index: HashMap<String, NodeIndex>,
 
-    /// Chunk ID -> NodeIndex mapping
+    /// Chunk ID -> `NodeIndex` mapping
     pub chunk_index: HashMap<String, Vec<NodeIndex>>,
 }
 
 impl CodeGraph {
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             graph: DiGraph::new(),
@@ -114,7 +115,7 @@ impl CodeGraph {
         self.symbol_index.insert(symbol_name, idx);
         self.chunk_index
             .entry(chunk_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(idx);
 
         idx
@@ -126,11 +127,13 @@ impl CodeGraph {
     }
 
     /// Find node by symbol name
+    #[must_use] 
     pub fn find_node(&self, symbol_name: &str) -> Option<NodeIndex> {
         self.symbol_index.get(symbol_name).copied()
     }
 
     /// Find nodes by chunk ID
+    #[must_use] 
     pub fn find_nodes_by_chunk(&self, chunk_id: &str) -> Vec<NodeIndex> {
         self.chunk_index
             .get(chunk_id)
@@ -139,6 +142,7 @@ impl CodeGraph {
     }
 
     /// Get node data
+    #[must_use] 
     pub fn get_node(&self, idx: NodeIndex) -> Option<&GraphNode> {
         self.graph.node_weight(idx)
     }
@@ -151,11 +155,13 @@ impl CodeGraph {
     }
 
     /// Get node count
+    #[must_use] 
     pub fn node_count(&self) -> usize {
         self.graph.node_count()
     }
 
     /// Get edge count
+    #[must_use] 
     pub fn edge_count(&self) -> usize {
         self.graph.edge_count()
     }

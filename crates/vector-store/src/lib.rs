@@ -5,7 +5,7 @@
 //! ## Features
 //!
 //! - **Fast ANN search** via HNSW (Hierarchical Navigable Small World)
-//! - **Efficient embeddings** using FastEmbed
+//! - **Efficient embeddings** using `FastEmbed`
 //! - **Persistent storage** with JSON serialization
 //! - **Incremental updates** for dynamic codebases
 //! - **Batch operations** for optimal performance

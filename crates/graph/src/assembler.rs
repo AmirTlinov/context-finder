@@ -1,8 +1,6 @@
 use crate::error::Result;
 use crate::types::{CodeGraph, RelationshipType};
 use context_code_chunker::CodeChunk;
-use petgraph::graph::NodeIndex;
-use std::collections::{HashMap, HashSet};
 
 /// Smart context assembler for AI agents
 ///
@@ -49,7 +47,8 @@ pub struct RelatedChunk {
 }
 
 impl ContextAssembler {
-    pub fn new(graph: CodeGraph) -> Self {
+    #[must_use] 
+    pub const fn new(graph: CodeGraph) -> Self {
         Self { graph }
     }
 
@@ -168,6 +167,7 @@ impl ContextAssembler {
     }
 
     /// Get statistics about assembled context
+    #[must_use] 
     pub fn get_stats(&self) -> ContextStats {
         ContextStats {
             total_nodes: self.graph.node_count(),
@@ -176,6 +176,7 @@ impl ContextAssembler {
     }
 
     /// Batch assemble contexts for multiple symbols
+    #[must_use] 
     pub fn assemble_batch(
         &self,
         symbol_names: &[&str],

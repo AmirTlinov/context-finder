@@ -12,7 +12,8 @@ pub struct RRFFusion {
 }
 
 impl RRFFusion {
-    pub fn new(semantic_weight: f32, fuzzy_weight: f32, k: f32) -> Self {
+    #[must_use] 
+    pub const fn new(semantic_weight: f32, fuzzy_weight: f32, k: f32) -> Self {
         Self {
             k,
             semantic_weight,
@@ -23,8 +24,9 @@ impl RRFFusion {
     /// Fuse semantic and fuzzy results using RRF with adaptive weights based on query type
     ///
     /// Query classification:
-    /// - Exact name: CamelCase, snake_case, single word → fuzzy-heavy (30/70)
+    /// - Exact name: CamelCase, `snake_case`, single word → fuzzy-heavy (30/70)
     /// - Conceptual: multi-word, descriptive → semantic-heavy (70/30)
+    #[must_use] 
     pub fn fuse_adaptive(
         &self,
         query: &str,
@@ -45,9 +47,10 @@ impl RRFFusion {
 
     /// Fuse semantic and fuzzy results using RRF
     ///
-    /// RRF formula: score(d) = Σ weight_i / (k + rank_i(d))
+    /// RRF formula: score(d) = Σ `weight_i` / (k + `rank_i(d)`)
     ///
-    /// Returns (chunk_index, fused_score) sorted by score descending
+    /// Returns (`chunk_index`, `fused_score`) sorted by score descending
+    #[must_use] 
     pub fn fuse(
         &self,
         semantic_results: Vec<(usize, f32)>,
@@ -96,8 +99,8 @@ impl RRFFusion {
 
         // Check for exact name patterns
         let is_single_word = !query_trimmed.contains(' ') && !query_trimmed.contains('_');
-        let has_camel_case = query_trimmed.chars().any(|c| c.is_uppercase())
-            && query_trimmed.chars().any(|c| c.is_lowercase());
+        let has_camel_case = query_trimmed.chars().any(char::is_uppercase)
+            && query_trimmed.chars().any(char::is_lowercase);
         let has_snake_case = query_trimmed.contains('_');
 
         // Exact name query: prioritize fuzzy matching
@@ -128,12 +131,13 @@ pub struct AstBooster;
 impl AstBooster {
     /// Boost scores based on chunk type priority
     /// Functions/Methods get higher boost than variables
+    #[must_use] 
     pub fn boost(chunks: &[CodeChunk], results: Vec<(usize, f32)>) -> Vec<(usize, f32)> {
         results
             .into_iter()
             .map(|(idx, score)| {
                 let boost = if let Some(chunk) = chunks.get(idx) {
-                    Self::compute_boost(&chunk)
+                    Self::compute_boost(chunk)
                 } else {
                     1.0
                 };
@@ -146,8 +150,7 @@ impl AstBooster {
         let type_boost = chunk
             .metadata
             .chunk_type
-            .map(|ct| ct.priority() as f32 / 100.0)
-            .unwrap_or(1.0);
+            .map_or(1.0, |ct| f32::from(ct.priority()) / 100.0);
 
         // Additional boost for chunks with documentation
         let doc_boost = if chunk.metadata.documentation.is_some() {

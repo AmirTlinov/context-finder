@@ -25,7 +25,7 @@ impl AstAnalyzer {
         let mut parser = Parser::new();
         parser
             .set_language(&ts_language)
-            .map_err(|e| ChunkerError::tree_sitter(format!("Failed to set language: {}", e)))?;
+            .map_err(|e| ChunkerError::tree_sitter(format!("Failed to set language: {e}")))?;
 
         Ok(Self {
             config,
@@ -50,7 +50,7 @@ impl AstAnalyzer {
         let mut chunks = Vec::new();
 
         // Extract top-level declarations
-        self.extract_chunks(content, file_path, root, &mut chunks)?;
+        self.extract_chunks(content, file_path, root, &mut chunks);
 
         // If no chunks were extracted, fallback to simple chunking
         if chunks.is_empty() {
@@ -67,14 +67,14 @@ impl AstAnalyzer {
         file_path: &str,
         node: Node,
         chunks: &mut Vec<CodeChunk>,
-    ) -> Result<()> {
+    ) {
         match self.language {
             Language::Rust => self.extract_rust_chunks(content, file_path, node, chunks),
             Language::Python => self.extract_python_chunks(content, file_path, node, chunks),
             Language::JavaScript | Language::TypeScript => {
-                self.extract_js_chunks(content, file_path, node, chunks)
+                self.extract_js_chunks(content, file_path, node, chunks);
             }
-            _ => Ok(()),
+            _ => {}
         }
     }
 
@@ -85,7 +85,7 @@ impl AstAnalyzer {
         file_path: &str,
         node: Node,
         chunks: &mut Vec<CodeChunk>,
-    ) -> Result<()> {
+    ) {
         let mut cursor = node.walk();
         let children: Vec<_> = node.children(&mut cursor).collect();
 
@@ -106,15 +106,14 @@ impl AstAnalyzer {
             if let Some(chunk_type) = chunk_type {
                 // For impl blocks, extract methods separately
                 if kind == "impl_item" {
-                    self.extract_impl_methods(content, file_path, child, chunks)?;
+                    self.extract_impl_methods(content, file_path, child, chunks);
                 } else {
-                    let chunk = self.node_to_chunk(content, file_path, child, chunk_type)?;
+                    let chunk = self.node_to_chunk(content, file_path, child, chunk_type);
                     chunks.push(chunk);
                 }
             }
         }
 
-        Ok(())
     }
 
     /// Extract methods from impl block
@@ -124,9 +123,9 @@ impl AstAnalyzer {
         file_path: &str,
         impl_node: Node,
         chunks: &mut Vec<CodeChunk>,
-    ) -> Result<()> {
+    ) {
         // Get impl target name (struct/trait being implemented)
-        let impl_target = self.extract_impl_target(content, impl_node);
+        let impl_target = Self::extract_impl_target(content, impl_node);
 
         // Find declaration_list (contains methods in Rust)
         let mut cursor = impl_node.walk();
@@ -139,7 +138,7 @@ impl AstAnalyzer {
 
                     // Extract methods and associated functions
                     if kind == "function_item" {
-                        let mut chunk = self.node_to_chunk(content, file_path, method_node, ChunkType::Method)?;
+                        let mut chunk = self.node_to_chunk(content, file_path, method_node, ChunkType::Method);
 
                         // Set parent scope and build qualified name
                         if let Some(ref target) = impl_target {
@@ -147,7 +146,7 @@ impl AstAnalyzer {
 
                             // Build qualified name: "EmbeddingModel::embed"
                             if let Some(ref method_name) = chunk.metadata.symbol_name {
-                                chunk.metadata.qualified_name = Some(format!("{}::{}", target, method_name));
+                                chunk.metadata.qualified_name = Some(format!("{target}::{method_name}"));
                             }
                         }
 
@@ -160,7 +159,7 @@ impl AstAnalyzer {
                             ChunkType::Impl // Type aliases in impl
                         };
 
-                        let mut chunk = self.node_to_chunk(content, file_path, method_node, chunk_type)?;
+                        let mut chunk = self.node_to_chunk(content, file_path, method_node, chunk_type);
 
                         if let Some(ref target) = impl_target {
                             chunk.metadata.parent_scope = Some(target.clone());
@@ -171,12 +170,10 @@ impl AstAnalyzer {
                 }
             }
         }
-
-        Ok(())
     }
 
     /// Extract the target of an impl block (struct/trait name)
-    fn extract_impl_target(&self, content: &str, impl_node: Node) -> Option<String> {
+    fn extract_impl_target(content: &str, impl_node: Node) -> Option<String> {
         let mut cursor = impl_node.walk();
         for child in impl_node.children(&mut cursor) {
             // Look for type_identifier (the struct/enum being implemented for)
@@ -196,7 +193,7 @@ impl AstAnalyzer {
         file_path: &str,
         node: Node,
         chunks: &mut Vec<CodeChunk>,
-    ) -> Result<()> {
+    ) {
         let mut cursor = node.walk();
         let children: Vec<_> = node.children(&mut cursor).collect();
 
@@ -211,15 +208,14 @@ impl AstAnalyzer {
             if let Some(chunk_type) = chunk_type {
                 // For classes, extract methods separately
                 if kind == "class_definition" {
-                    self.extract_python_class_methods(content, file_path, child, chunks)?;
+                    self.extract_python_class_methods(content, file_path, child, chunks);
                 } else {
-                    let chunk = self.node_to_chunk(content, file_path, child, chunk_type)?;
+                    let chunk = self.node_to_chunk(content, file_path, child, chunk_type);
                     chunks.push(chunk);
                 }
             }
         }
 
-        Ok(())
     }
 
     /// Extract methods from Python class
@@ -229,9 +225,9 @@ impl AstAnalyzer {
         file_path: &str,
         class_node: Node,
         chunks: &mut Vec<CodeChunk>,
-    ) -> Result<()> {
+    ) {
         // Get class name
-        let class_name = self.extract_symbol_name(content, class_node);
+        let class_name = Self::extract_symbol_name(content, class_node);
 
         // Find the class body (block node)
         let mut cursor = class_node.walk();
@@ -246,7 +242,7 @@ impl AstAnalyzer {
                             file_path,
                             method_node,
                             ChunkType::Method,
-                        )?;
+                        );
 
                         // Set parent scope and build qualified name
                         if let Some(ref name) = class_name {
@@ -254,7 +250,7 @@ impl AstAnalyzer {
 
                             // Build qualified name: "MyClass.method"
                             if let Some(ref method_name) = chunk.metadata.symbol_name {
-                                chunk.metadata.qualified_name = Some(format!("{}.{}", name, method_name));
+                                chunk.metadata.qualified_name = Some(format!("{name}.{method_name}"));
                             }
                         }
 
@@ -263,8 +259,6 @@ impl AstAnalyzer {
                 }
             }
         }
-
-        Ok(())
     }
 
     /// Extract chunks from JavaScript/TypeScript code
@@ -274,7 +268,7 @@ impl AstAnalyzer {
         file_path: &str,
         node: Node,
         chunks: &mut Vec<CodeChunk>,
-    ) -> Result<()> {
+    ) {
         let mut cursor = node.walk();
         let children: Vec<_> = node.children(&mut cursor).collect();
 
@@ -292,15 +286,14 @@ impl AstAnalyzer {
             if let Some(chunk_type) = chunk_type {
                 // For classes, extract methods separately
                 if kind == "class_declaration" {
-                    self.extract_js_class_methods(content, file_path, child, chunks)?;
+                    self.extract_js_class_methods(content, file_path, child, chunks);
                 } else {
-                    let chunk = self.node_to_chunk(content, file_path, child, chunk_type)?;
+                    let chunk = self.node_to_chunk(content, file_path, child, chunk_type);
                     chunks.push(chunk);
                 }
             }
         }
 
-        Ok(())
     }
 
     /// Extract methods from JavaScript/TypeScript class
@@ -310,9 +303,9 @@ impl AstAnalyzer {
         file_path: &str,
         class_node: Node,
         chunks: &mut Vec<CodeChunk>,
-    ) -> Result<()> {
+    ) {
         // Get class name
-        let class_name = self.extract_symbol_name(content, class_node);
+        let class_name = Self::extract_symbol_name(content, class_node);
 
         // Find the class body
         let mut cursor = class_node.walk();
@@ -339,7 +332,7 @@ impl AstAnalyzer {
                             file_path,
                             method_node,
                             chunk_type,
-                        )?;
+                        );
 
                         // Set parent scope to class name
                         if let Some(ref name) = class_name {
@@ -351,8 +344,6 @@ impl AstAnalyzer {
                 }
             }
         }
-
-        Ok(())
     }
 
     /// Convert AST node to code chunk with enhanced context
@@ -362,7 +353,7 @@ impl AstAnalyzer {
         file_path: &str,
         node: Node,
         chunk_type: ChunkType,
-    ) -> Result<CodeChunk> {
+    ) -> CodeChunk {
         // Extract docstrings/comments before the node
         let doc_comments = self.extract_doc_comments(content, node);
 
@@ -373,7 +364,7 @@ impl AstAnalyzer {
         let start_line = node.start_position().row + 1;
         let end_line = node.end_position().row + 1;
 
-        let symbol_name = self.extract_symbol_name(content, node);
+        let symbol_name = Self::extract_symbol_name(content, node);
 
         // Build qualified name (will be updated with parent_scope later if method)
         let qualified_name = symbol_name.clone();
@@ -404,20 +395,20 @@ impl AstAnalyzer {
         let metadata = ChunkMetadata {
             language: Some(self.language.as_str().to_string()),
             chunk_type: Some(chunk_type),
-            symbol_name: symbol_name.clone(),
+            symbol_name,
             context_imports: relevant_imports,
             qualified_name,
             estimated_tokens,
             ..Default::default()
         };
 
-        Ok(CodeChunk::new(
+        CodeChunk::new(
             file_path.to_string(),
             start_line,
             end_line,
             enhanced_content,
             metadata,
-        ))
+        )
     }
 
     /// Filter imports to only those relevant to this chunk
@@ -527,7 +518,7 @@ impl AstAnalyzer {
                 }
                 Language::JavaScript | Language::TypeScript => {
                     // JS/TS doc comments: //, /* */
-                    line.starts_with("//") || line.starts_with("/*") || line.starts_with("*")
+                    line.starts_with("//") || line.starts_with("/*") || line.starts_with('*')
                 }
                 _ => false,
             };
@@ -589,7 +580,7 @@ impl AstAnalyzer {
     }
 
     /// Extract symbol name from AST node
-    fn extract_symbol_name(&self, content: &str, node: Node) -> Option<String> {
+    fn extract_symbol_name(content: &str, node: Node) -> Option<String> {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             // Different languages use different node kinds for names

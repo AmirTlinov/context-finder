@@ -72,7 +72,7 @@ impl VectorStore {
 
     /// Search for similar chunks using semantic similarity
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        log::debug!("Searching for: '{}' (limit: {})", query, limit);
+        log::debug!("Searching for: '{query}' (limit: {limit})");
 
         // Embed query
         let query_vector = self.embedder.embed(query).await?;
@@ -134,27 +134,31 @@ impl VectorStore {
         Ok(all_results)
     }
 
-    /// Find chunk by numeric ID using id_map
+    /// Find chunk by numeric ID using `id_map`
     fn find_chunk_by_numeric_id(&self, id: usize) -> Option<&StoredChunk> {
         self.id_map.get(&id).and_then(|string_id| self.chunks.get(string_id))
     }
 
     /// Get chunk by string ID
+    #[must_use] 
     pub fn get_chunk(&self, id: &str) -> Option<&StoredChunk> {
         self.chunks.get(id)
     }
 
     /// Get all chunk IDs
+    #[must_use] 
     pub fn chunk_ids(&self) -> Vec<String> {
         self.chunks.keys().cloned().collect()
     }
 
     /// Get total number of chunks
+    #[must_use] 
     pub fn len(&self) -> usize {
         self.chunks.len()
     }
 
     /// Check if store is empty
+    #[must_use] 
     pub fn is_empty(&self) -> bool {
         self.chunks.is_empty()
     }

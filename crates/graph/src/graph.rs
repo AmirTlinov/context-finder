@@ -1,12 +1,13 @@
-use crate::types::{CodeGraph, GraphEdge, GraphNode, RelationshipType};
+use crate::types::{CodeGraph, RelationshipType};
 use crate::error::Result;
 use petgraph::algo::dijkstra;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 impl CodeGraph {
     /// Find all nodes that current node calls (outgoing Calls edges)
+    #[must_use] 
     pub fn get_callees(&self, node: NodeIndex) -> Vec<NodeIndex> {
         self.graph
             .edges(node)
@@ -16,6 +17,7 @@ impl CodeGraph {
     }
 
     /// Find all nodes that call current node (incoming Calls edges)
+    #[must_use] 
     pub fn get_callers(&self, node: NodeIndex) -> Vec<NodeIndex> {
         self.graph
             .node_indices()
@@ -28,6 +30,7 @@ impl CodeGraph {
     }
 
     /// Find all nodes that current node uses (outgoing Uses edges)
+    #[must_use] 
     pub fn get_dependencies(&self, node: NodeIndex) -> Vec<NodeIndex> {
         self.graph
             .edges(node)
@@ -37,7 +40,8 @@ impl CodeGraph {
     }
 
     /// Find all nodes related to current node within given depth
-    /// Returns (NodeIndex, distance, relationship_path)
+    /// Returns (`NodeIndex`, distance, `relationship_path`)
+    #[must_use] 
     pub fn get_related_nodes(
         &self,
         node: NodeIndex,
@@ -75,6 +79,7 @@ impl CodeGraph {
     }
 
     /// Find shortest path between two nodes
+    #[must_use] 
     pub fn find_path(&self, from: NodeIndex, to: NodeIndex) -> Option<Vec<NodeIndex>> {
         let distances = dijkstra(&self.graph, from, Some(to), |e| e.weight().weight as i32);
 
@@ -87,6 +92,7 @@ impl CodeGraph {
     }
 
     /// Get nodes by relationship type
+    #[must_use] 
     pub fn get_nodes_by_relationship(
         &self,
         node: NodeIndex,

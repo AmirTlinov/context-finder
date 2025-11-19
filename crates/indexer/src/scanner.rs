@@ -21,13 +21,12 @@ impl FileScanner {
         for result in WalkBuilder::new(&self.root).hidden(false).build() {
             match result {
                 Ok(entry) => {
-                    if entry.file_type().map_or(false, |ft| ft.is_file()) {
-                        if Self::is_source_file(&entry.path()) {
+                    if entry.file_type().is_some_and(|ft| ft.is_file())
+                        && Self::is_source_file(entry.path()) {
                             files.push(entry.path().to_path_buf());
                         }
-                    }
                 }
-                Err(e) => log::warn!("Failed to read entry: {}", e),
+                Err(e) => log::warn!("Failed to read entry: {e}"),
             }
         }
 
@@ -39,7 +38,6 @@ impl FileScanner {
     fn is_source_file(path: &Path) -> bool {
         path.extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| matches!(ext, "rs" | "py" | "js" | "ts" | "tsx" | "jsx"))
-            .unwrap_or(false)
+            .is_some_and(|ext| matches!(ext, "rs" | "py" | "js" | "ts" | "tsx" | "jsx"))
     }
 }

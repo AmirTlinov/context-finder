@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A semantic code chunk with metadata
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodeChunk {
     /// Source file path
     pub file_path: String,
@@ -21,7 +21,8 @@ pub struct CodeChunk {
 
 impl CodeChunk {
     /// Create a new code chunk
-    pub fn new(
+    #[must_use] 
+    pub const fn new(
         file_path: String,
         start_line: usize,
         end_line: usize,
@@ -38,23 +39,26 @@ impl CodeChunk {
     }
 
     /// Get the number of lines in this chunk
-    pub fn line_count(&self) -> usize {
+    #[must_use] 
+    pub const fn line_count(&self) -> usize {
         self.end_line.saturating_sub(self.start_line) + 1
     }
 
     /// Get estimated token count
-    pub fn estimated_tokens(&self) -> usize {
+    #[must_use] 
+    pub const fn estimated_tokens(&self) -> usize {
         self.metadata.estimated_tokens
     }
 
     /// Check if chunk contains a specific line
-    pub fn contains_line(&self, line: usize) -> bool {
+    #[must_use] 
+    pub const fn contains_line(&self, line: usize) -> bool {
         line >= self.start_line && line <= self.end_line
     }
 }
 
 /// Metadata about a code chunk
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChunkMetadata {
     /// Programming language
     pub language: Option<String>,
@@ -94,36 +98,42 @@ impl ChunkMetadata {
     }
 
     /// Builder: set chunk type
-    pub fn chunk_type(mut self, chunk_type: ChunkType) -> Self {
+    #[must_use] 
+    pub const fn chunk_type(mut self, chunk_type: ChunkType) -> Self {
         self.chunk_type = Some(chunk_type);
         self
     }
 
     /// Builder: set symbol name
+    #[must_use]
     pub fn symbol_name(mut self, name: impl Into<String>) -> Self {
         self.symbol_name = Some(name.into());
         self
     }
 
     /// Builder: set parent scope
+    #[must_use]
     pub fn parent_scope(mut self, scope: impl Into<String>) -> Self {
         self.parent_scope = Some(scope.into());
         self
     }
 
     /// Builder: add import
+    #[must_use]
     pub fn add_import(mut self, import: impl Into<String>) -> Self {
         self.context_imports.push(import.into());
         self
     }
 
     /// Builder: set estimated tokens
-    pub fn estimated_tokens(mut self, tokens: usize) -> Self {
+    #[must_use] 
+    pub const fn estimated_tokens(mut self, tokens: usize) -> Self {
         self.estimated_tokens = tokens;
         self
     }
 
     /// Estimate tokens from content (rough heuristic: ~0.75 tokens per word)
+    #[must_use] 
     pub fn estimate_tokens_from_content(content: &str) -> usize {
         let chars = content.len();
         // Rough estimate: 4 chars per token on average for code
@@ -166,55 +176,59 @@ pub enum ChunkType {
 
 impl ChunkType {
     /// Get priority for chunking (higher = more important to keep intact)
-    pub fn priority(self) -> u8 {
+    #[must_use] 
+    pub const fn priority(self) -> u8 {
         match self {
-            ChunkType::Function | ChunkType::Method => 100,
-            ChunkType::Class | ChunkType::Struct => 90,
-            ChunkType::Enum | ChunkType::Interface => 85,
-            ChunkType::Impl => 80,
-            ChunkType::Type => 70,
-            ChunkType::Module => 60,
-            ChunkType::Const | ChunkType::Variable => 50,
-            ChunkType::Import => 40,
-            ChunkType::Comment => 20,
-            ChunkType::Other => 10,
+            Self::Function | Self::Method => 100,
+            Self::Class | Self::Struct => 90,
+            Self::Enum | Self::Interface => 85,
+            Self::Impl => 80,
+            Self::Type => 70,
+            Self::Module => 60,
+            Self::Const | Self::Variable => 50,
+            Self::Import => 40,
+            Self::Comment => 20,
+            Self::Other => 10,
         }
     }
 
     /// Check if this chunk type should include contextual imports
-    pub fn needs_context(self) -> bool {
+    #[must_use] 
+    pub const fn needs_context(self) -> bool {
         matches!(
             self,
-            ChunkType::Function
-                | ChunkType::Method
-                | ChunkType::Class
-                | ChunkType::Struct
-                | ChunkType::Impl
+            Self::Function
+                | Self::Method
+                | Self::Class
+                | Self::Struct
+                | Self::Impl
         )
     }
 
     /// Check if this is a declaration type (vs usage)
-    pub fn is_declaration(self) -> bool {
-        !matches!(self, ChunkType::Import | ChunkType::Comment | ChunkType::Other)
+    #[must_use] 
+    pub const fn is_declaration(self) -> bool {
+        !matches!(self, Self::Import | Self::Comment | Self::Other)
     }
 
     /// Get human-readable name
-    pub fn as_str(self) -> &'static str {
+    #[must_use] 
+    pub const fn as_str(self) -> &'static str {
         match self {
-            ChunkType::Function => "function",
-            ChunkType::Method => "method",
-            ChunkType::Class => "class",
-            ChunkType::Struct => "struct",
-            ChunkType::Enum => "enum",
-            ChunkType::Interface => "interface",
-            ChunkType::Module => "module",
-            ChunkType::Impl => "impl",
-            ChunkType::Type => "type",
-            ChunkType::Const => "const",
-            ChunkType::Variable => "variable",
-            ChunkType::Import => "import",
-            ChunkType::Comment => "comment",
-            ChunkType::Other => "other",
+            Self::Function => "function",
+            Self::Method => "method",
+            Self::Class => "class",
+            Self::Struct => "struct",
+            Self::Enum => "enum",
+            Self::Interface => "interface",
+            Self::Module => "module",
+            Self::Impl => "impl",
+            Self::Type => "type",
+            Self::Const => "const",
+            Self::Variable => "variable",
+            Self::Import => "import",
+            Self::Comment => "comment",
+            Self::Other => "other",
         }
     }
 }

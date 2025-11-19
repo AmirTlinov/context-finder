@@ -13,16 +13,12 @@ pub struct Chunker {
 
 impl Chunker {
     /// Create a new chunker with configuration
+    #[must_use]
     pub fn new(config: ChunkerConfig) -> Self {
         config
             .validate()
             .expect("Invalid chunker configuration provided");
         Self { config }
-    }
-
-    /// Create chunker with default configuration
-    pub fn default() -> Self {
-        Self::new(ChunkerConfig::default())
     }
 
     /// Chunk code from a string
@@ -74,7 +70,7 @@ impl Chunker {
             match self.chunk_with_ast(content, file_path, language) {
                 Ok(chunks) => return Ok(self.post_process_chunks(chunks)),
                 Err(e) => {
-                    log::warn!("AST chunking failed, falling back to strategy-based: {}", e);
+                    log::warn!("AST chunking failed, falling back to strategy-based: {e}");
                 }
             }
         }
@@ -122,32 +118,40 @@ impl Chunker {
     }
 
     /// Get configuration
-    pub fn config(&self) -> &ChunkerConfig {
+    #[must_use]
+    pub const fn config(&self) -> &ChunkerConfig {
         &self.config
     }
 
     /// Get statistics about chunking
+    #[must_use]
     pub fn get_stats(chunks: &[CodeChunk]) -> ChunkingStats {
         ChunkingStats {
             total_chunks: chunks.len(),
-            total_lines: chunks.iter().map(|c| c.line_count()).sum(),
-            total_tokens: chunks.iter().map(|c| c.estimated_tokens()).sum(),
+            total_lines: chunks.iter().map(CodeChunk::line_count).sum(),
+            total_tokens: chunks.iter().map(CodeChunk::estimated_tokens).sum(),
             avg_tokens_per_chunk: if chunks.is_empty() {
                 0
             } else {
-                chunks.iter().map(|c| c.estimated_tokens()).sum::<usize>() / chunks.len()
+                chunks.iter().map(CodeChunk::estimated_tokens).sum::<usize>() / chunks.len()
             },
             min_tokens: chunks
                 .iter()
-                .map(|c| c.estimated_tokens())
+                .map(CodeChunk::estimated_tokens)
                 .min()
                 .unwrap_or(0),
             max_tokens: chunks
                 .iter()
-                .map(|c| c.estimated_tokens())
+                .map(CodeChunk::estimated_tokens)
                 .max()
                 .unwrap_or(0),
         }
+    }
+}
+
+impl Default for Chunker {
+    fn default() -> Self {
+        Self::new(ChunkerConfig::default())
     }
 }
 

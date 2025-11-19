@@ -32,11 +32,11 @@ impl HybridSearch {
             return Err(SearchError::EmptyQuery);
         }
 
-        log::debug!("Hybrid search: query='{}', limit={}", query, limit);
+        log::debug!("Hybrid search: query='{query}', limit={limit}");
 
         // Expand query with synonyms and variants
         let expanded_query = self.expander.expand_to_query(query);
-        log::debug!("Expanded query: '{}'", expanded_query);
+        log::debug!("Expanded query: '{expanded_query}'");
 
         // Candidate pool size (retrieve more for fusion)
         let candidate_pool = limit * 5;
@@ -131,7 +131,7 @@ impl HybridSearch {
             .collect();
 
         // 2. Batch semantic search with expanded queries
-        let expanded_refs: Vec<&str> = expanded_queries.iter().map(|s| s.as_str()).collect();
+        let expanded_refs: Vec<&str> = expanded_queries.iter().map(std::string::String::as_str).collect();
         let semantic_results_batch = self.store.search_batch(&expanded_refs, candidate_pool).await?;
         log::debug!("Semantic batch: {} queries processed", semantic_results_batch.len());
 
@@ -196,6 +196,7 @@ impl HybridSearch {
     }
 
     /// Get chunk by ID
+    #[must_use] 
     pub fn get_chunk(&self, id: &str) -> Option<&CodeChunk> {
         self.chunks.iter().find(|c| {
             let chunk_id = format!("{}:{}:{}", c.file_path, c.start_line, c.end_line);
@@ -204,6 +205,7 @@ impl HybridSearch {
     }
 
     /// Get all chunks
+    #[must_use] 
     pub fn chunks(&self) -> &[CodeChunk] {
         &self.chunks
     }

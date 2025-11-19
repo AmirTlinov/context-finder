@@ -10,18 +10,18 @@ pub struct EmbeddingModel {
 }
 
 impl EmbeddingModel {
-    /// Create new embedding model (FastEmbed - all-MiniLM-L6-v2)
+    /// Create new embedding model (`FastEmbed` - all-MiniLM-L6-v2)
     pub async fn new() -> Result<Self> {
         log::info!("Initializing FastEmbed model...");
 
         let model = TextEmbedding::try_new(Default::default())
         .map_err(|e| {
-            VectorStoreError::EmbeddingError(format!("Failed to initialize FastEmbed: {}", e))
+            VectorStoreError::EmbeddingError(format!("Failed to initialize FastEmbed: {e}"))
         })?;
 
         let dimension = 384; // all-MiniLM-L6-v2 produces 384d vectors
 
-        log::info!("FastEmbed model loaded (dimension: {})", dimension);
+        log::info!("FastEmbed model loaded (dimension: {dimension})");
 
         Ok(Self {
             model: Arc::new(Mutex::new(model)),
@@ -30,7 +30,8 @@ impl EmbeddingModel {
     }
 
     /// Get vector dimension
-    pub fn dimension(&self) -> usize {
+    #[must_use] 
+    pub const fn dimension(&self) -> usize {
         self.dimension
     }
 
@@ -52,13 +53,14 @@ impl EmbeddingModel {
         let model = self.model.lock().await;
 
         let embeddings = model
-            .embed(texts.to_vec(), None)
-            .map_err(|e| VectorStoreError::EmbeddingError(format!("Embedding failed: {}", e)))?;
+            .embed(texts.clone(), None)
+            .map_err(|e| VectorStoreError::EmbeddingError(format!("Embedding failed: {e}")))?;
 
         Ok(embeddings)
     }
 
     /// Compute cosine similarity between two vectors
+    #[must_use] 
     pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         if a.len() != b.len() {
             return 0.0;

@@ -53,6 +53,7 @@ impl Default for ChunkerConfig {
 
 impl ChunkerConfig {
     /// Create config optimized for embeddings (smaller, focused chunks)
+    #[must_use]
     pub fn for_embeddings() -> Self {
         Self {
             target_chunk_tokens: 384,
@@ -64,6 +65,7 @@ impl ChunkerConfig {
     }
 
     /// Create config optimized for LLM context (larger, comprehensive chunks)
+    #[must_use]
     pub fn for_llm_context() -> Self {
         Self {
             target_chunk_tokens: 1024,
@@ -76,6 +78,7 @@ impl ChunkerConfig {
     }
 
     /// Create config optimized for speed (simpler chunking)
+    #[must_use]
     pub fn for_speed() -> Self {
         Self {
             strategy: ChunkingStrategy::LineCount,
@@ -176,11 +179,12 @@ mod tests {
 
     #[test]
     fn test_config_validation() {
-        let mut config = ChunkerConfig::default();
-
         // Invalid: min > target
-        config.min_chunk_tokens = 1000;
-        config.target_chunk_tokens = 500;
+        let mut config = ChunkerConfig {
+            min_chunk_tokens: 1000,
+            target_chunk_tokens: 500,
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
 
         // Invalid: target > max

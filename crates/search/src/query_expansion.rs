@@ -134,6 +134,7 @@ impl QueryExpander {
     }
 
     /// Expand query with synonyms and variants
+    #[must_use] 
     pub fn expand(&self, query: &str) -> Vec<String> {
         let mut expansions = vec![query.to_string()];
 
@@ -166,7 +167,7 @@ impl QueryExpander {
     }
 
     /// Tokenize query into words
-    /// Handles: spaces, underscores, camelCase, PascalCase
+    /// Handles: spaces, underscores, camelCase, `PascalCase`
     fn tokenize(&self, query: &str) -> Vec<String> {
         let mut tokens = Vec::new();
 
@@ -184,7 +185,7 @@ impl QueryExpander {
         tokens
     }
 
-    /// Split camelCase or PascalCase into words
+    /// Split camelCase or `PascalCase` into words
     fn split_camel_case(&self, word: &str) -> Vec<String> {
         let mut tokens = Vec::new();
         let mut current = String::new();
@@ -218,6 +219,7 @@ impl QueryExpander {
 
     /// Expand query and create weighted query string
     /// Format: "term1 term2 synonym1 synonym2..."
+    #[must_use] 
     pub fn expand_to_query(&self, query: &str) -> String {
         let expansions = self.expand(query);
         expansions.join(" ")

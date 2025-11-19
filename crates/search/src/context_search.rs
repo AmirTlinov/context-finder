@@ -2,10 +2,9 @@ use crate::error::Result;
 use crate::hybrid::HybridSearch;
 use context_code_chunker::CodeChunk;
 use context_graph::{
-    AssembledContext, AssemblyStrategy, CodeGraph, ContextAssembler, GraphBuilder, GraphLanguage,
+    AssemblyStrategy, ContextAssembler, GraphBuilder, GraphLanguage,
 };
 use context_vector_store::SearchResult;
-use std::collections::HashSet;
 
 /// Context-aware search with automatic related code assembly
 ///
@@ -91,20 +90,17 @@ impl ContextSearch {
         let results = self.hybrid.search(query, limit).await?;
 
         // If no graph, return non-enriched results
-        let assembler = match &self.assembler {
-            Some(a) => a,
-            None => {
-                log::warn!("No graph available, returning non-enriched results");
-                return Ok(results
-                    .into_iter()
-                    .map(|r| EnrichedResult {
-                        total_lines: r.chunk.line_count(),
-                        primary: r,
-                        related: vec![],
-                        strategy: strategy.clone(),
-                    })
-                    .collect());
-            }
+        let assembler = if let Some(a) = &self.assembler { a } else {
+            log::warn!("No graph available, returning non-enriched results");
+            return Ok(results
+                .into_iter()
+                .map(|r| EnrichedResult {
+                    total_lines: r.chunk.line_count(),
+                    primary: r,
+                    related: vec![],
+                    strategy: strategy.clone(),
+                })
+                .collect());
         };
 
         // Enrich each result with context
@@ -123,7 +119,7 @@ impl ContextSearch {
                             relationship_path: rc
                                 .relationship
                                 .iter()
-                                .map(|r| format!("{:?}", r))
+                                .map(|r| format!("{r:?}"))
                                 .collect(),
                             distance: rc.distance,
                             relevance_score: rc.relevance_score,
@@ -138,7 +134,7 @@ impl ContextSearch {
                     });
                 }
                 Err(e) => {
-                    log::warn!("Failed to assemble context for {}: {}", chunk_id, e);
+                    log::warn!("Failed to assemble context for {chunk_id}: {e}");
                     // Fallback to non-enriched result
                     enriched.push(EnrichedResult {
                         total_lines: result.chunk.line_count(),
@@ -177,6 +173,7 @@ impl ContextSearch {
     }
 
     /// Get graph statistics
+    #[must_use] 
     pub fn graph_stats(&self) -> Option<(usize, usize)> {
         self.assembler.as_ref().map(|a| {
             let stats = a.get_stats();
@@ -185,14 +182,15 @@ impl ContextSearch {
     }
 
     /// Check if graph is available
-    pub fn has_graph(&self) -> bool {
+    #[must_use] 
+    pub const fn has_graph(&self) -> bool {
         self.assembler.is_some()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
 
     #[test]
     fn test_context_search_creation() {
