@@ -40,7 +40,7 @@ pub struct RelatedContext {
 
 impl ContextSearch {
     /// Create new context-aware search (without graph initially)
-    pub async fn new(hybrid: HybridSearch) -> Result<Self> {
+    pub const fn new(hybrid: HybridSearch) -> Result<Self> {
         Ok(Self {
             hybrid,
             assembler: None,
@@ -80,6 +80,7 @@ impl ContextSearch {
     /// Search with automatic context assembly (flagship feature)
     ///
     /// Returns search results with related code automatically gathered
+    #[allow(clippy::similar_names)]
     pub async fn search_with_context(
         &mut self,
         query: &str,
@@ -90,7 +91,7 @@ impl ContextSearch {
         let results = self.hybrid.search(query, limit).await?;
 
         // If no graph, return non-enriched results
-        let assembler = if let Some(a) = &self.assembler { a } else {
+        let Some(assembler) = &self.assembler else {
             log::warn!("No graph available, returning non-enriched results");
             return Ok(results
                 .into_iter()
@@ -98,7 +99,7 @@ impl ContextSearch {
                     total_lines: r.chunk.line_count(),
                     primary: r,
                     related: vec![],
-                    strategy: strategy.clone(),
+                    strategy,
                 })
                 .collect());
         };
@@ -109,7 +110,7 @@ impl ContextSearch {
             let chunk_id = &result.id;
 
             // Assemble context for this chunk
-            match assembler.assemble_for_chunk(chunk_id, strategy.clone()) {
+            match assembler.assemble_for_chunk(chunk_id, strategy) {
                 Ok(assembled) => {
                     let related = assembled
                         .related_chunks
@@ -130,7 +131,7 @@ impl ContextSearch {
                         total_lines: assembled.total_lines,
                         primary: result,
                         related,
-                        strategy: strategy.clone(),
+                        strategy,
                     });
                 }
                 Err(e) => {
@@ -140,7 +141,7 @@ impl ContextSearch {
                         total_lines: result.chunk.line_count(),
                         primary: result,
                         related: vec![],
-                        strategy: strategy.clone(),
+                        strategy,
                     });
                 }
             }
@@ -165,7 +166,7 @@ impl ContextSearch {
         let mut all_enriched = Vec::new();
 
         for query in queries {
-            let enriched = self.search_with_context(query, limit, strategy.clone()).await?;
+            let enriched = self.search_with_context(query, limit, strategy).await?;
             all_enriched.push(enriched);
         }
 

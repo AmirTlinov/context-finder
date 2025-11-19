@@ -21,7 +21,7 @@ impl ProjectIndexer {
 
         if !root.exists() {
             return Err(IndexerError::InvalidPath(format!(
-                "Path does not exist: {root:?}"
+                "Path does not exist: {}", root.display()
             )));
         }
 
@@ -52,15 +52,16 @@ impl ProjectIndexer {
     }
 
     /// Index with specified mode
+    #[allow(clippy::cognitive_complexity)]
     async fn index_with_mode(&self, force_full: bool) -> Result<IndexStats> {
         let start = Instant::now();
         let mut stats = IndexStats::new();
 
-        log::info!("Indexing project at {:?}", self.root);
+        log::info!("Indexing project at {}", self.root.display());
 
         // 1. Scan for files
         let scanner = FileScanner::new(&self.root);
-        let files = scanner.scan()?;
+        let files = scanner.scan();
 
         // 2. Load or create vector store
         let (mut store, existing_mtimes) = if !force_full && self.store_path.exists() {
@@ -73,11 +74,11 @@ impl ProjectIndexer {
                 }
                 Err(e) => {
                     log::warn!("Failed to load existing index: {e}, starting fresh");
-                    (VectorStore::new(&self.store_path).await?, None)
+                    (VectorStore::new(&self.store_path)?, None)
                 }
             }
         } else {
-            (VectorStore::new(&self.store_path).await?, None)
+            (VectorStore::new(&self.store_path)?, None)
         };
 
         // 3. Determine which files to process
@@ -136,7 +137,10 @@ impl ProjectIndexer {
         store.save().await?;
         self.save_mtimes(&current_mtimes).await?;
 
-        stats.time_ms = start.elapsed().as_millis() as u64;
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            stats.time_ms = start.elapsed().as_millis() as u64;
+        }
         log::info!("Indexing completed: {stats:?}");
 
         Ok(stats)
@@ -215,7 +219,7 @@ impl ProjectIndexer {
 
             // Wait for this batch and process with chunker
             let mut batch_results = Vec::new();
-            for task in tasks.drain(..) {
+            for task in tasks {
                 match task.await {
                     Ok(Ok((file_path, content, lines))) => {
                         // Process with chunker (CPU bound, sequential per batch)
@@ -234,7 +238,7 @@ impl ProjectIndexer {
                                 }
                             }
                             Err(e) => {
-                                batch_results.push(Err(format!("{file_path:?}: {e}")));
+                                batch_results.push(Err(format!("{}: {e}", file_path.display())));
                             }
                         }
                     }
@@ -255,7 +259,7 @@ impl ProjectIndexer {
     ) -> std::result::Result<(PathBuf, String, usize), String> {
         let content = tokio::fs::read_to_string(&file_path)
             .await
-            .map_err(|e| format!("{file_path:?}: {e}"))?;
+            .map_err(|e| format!("{}: {e}", file_path.display()))?;
 
         let lines = content.lines().count();
 
@@ -263,13 +267,14 @@ impl ProjectIndexer {
     }
 
     /// Process single file (legacy method, kept for compatibility)
+    #[allow(dead_code)]
     async fn process_file(
         &self,
         file_path: &Path,
         store: &mut VectorStore,
         stats: &mut IndexStats,
     ) -> Result<()> {
-        log::debug!("Processing file: {file_path:?}");
+        log::debug!("Processing file: {}", file_path.display());
 
         let content = tokio::fs::read_to_string(file_path).await?;
         let lines = content.lines().count();
@@ -309,7 +314,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    #[ignore] // Requires FastEmbed model
+    #[ignore = "Requires FastEmbed model"]
     async fn test_indexing() {
         let temp_dir = TempDir::new().unwrap();
         let test_file = temp_dir.path().join("test.rs");

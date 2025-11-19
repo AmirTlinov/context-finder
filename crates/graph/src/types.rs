@@ -37,7 +37,7 @@ pub enum SymbolType {
 }
 
 /// Type of relationship between symbols
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RelationshipType {
     /// A calls B (function call)
     Calls,

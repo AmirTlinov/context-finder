@@ -68,7 +68,7 @@ impl CodeGraph {
                     let target = edge.target();
                     if !visited.contains(&target) {
                         let mut new_path = path.clone();
-                        new_path.push(edge.weight().relationship.clone());
+                        new_path.push(edge.weight().relationship);
                         queue.push((target, depth + 1, new_path));
                     }
                 }
@@ -81,6 +81,7 @@ impl CodeGraph {
     /// Find shortest path between two nodes
     #[must_use] 
     pub fn find_path(&self, from: NodeIndex, to: NodeIndex) -> Option<Vec<NodeIndex>> {
+        #[allow(clippy::cast_possible_truncation)]
         let distances = dijkstra(&self.graph, from, Some(to), |e| e.weight().weight as i32);
 
         if distances.contains_key(&to) {

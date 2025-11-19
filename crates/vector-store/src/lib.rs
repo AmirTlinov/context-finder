@@ -33,7 +33,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     let mut store = VectorStore::new("vectors.json").await?;
+//!     let mut store = VectorStore::new("vectors.json")?;
 //!
 //!     // Add chunks
 //!     let chunks = vec![/* CodeChunk instances */];

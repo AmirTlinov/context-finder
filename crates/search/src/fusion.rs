@@ -30,8 +30,8 @@ impl RRFFusion {
     pub fn fuse_adaptive(
         &self,
         query: &str,
-        semantic_results: Vec<(usize, f32)>,
-        fuzzy_results: Vec<(usize, f32)>,
+        semantic_results: &[(usize, f32)],
+        fuzzy_results: &[(usize, f32)],
     ) -> Vec<(usize, f32)> {
         let (semantic_weight, fuzzy_weight) = Self::adaptive_weights(query);
 
@@ -53,8 +53,8 @@ impl RRFFusion {
     #[must_use] 
     pub fn fuse(
         &self,
-        semantic_results: Vec<(usize, f32)>,
-        fuzzy_results: Vec<(usize, f32)>,
+        semantic_results: &[(usize, f32)],
+        fuzzy_results: &[(usize, f32)],
     ) -> Vec<(usize, f32)> {
         self.fuse_with_weights(
             semantic_results,
@@ -65,10 +65,11 @@ impl RRFFusion {
     }
 
     /// Fuse with explicit weights
+    #[allow(clippy::cast_precision_loss)]
     fn fuse_with_weights(
         &self,
-        semantic_results: Vec<(usize, f32)>,
-        fuzzy_results: Vec<(usize, f32)>,
+        semantic_results: &[(usize, f32)],
+        fuzzy_results: &[(usize, f32)],
         semantic_weight: f32,
         fuzzy_weight: f32,
     ) -> Vec<(usize, f32)> {
@@ -136,11 +137,7 @@ impl AstBooster {
         results
             .into_iter()
             .map(|(idx, score)| {
-                let boost = if let Some(chunk) = chunks.get(idx) {
-                    Self::compute_boost(chunk)
-                } else {
-                    1.0
-                };
+                let boost = chunks.get(idx).map_or(1.0, Self::compute_boost);
                 (idx, score * boost)
             })
             .collect()
@@ -183,7 +180,7 @@ mod tests {
         let semantic = vec![(0, 0.9), (1, 0.8), (2, 0.7)];
         let fuzzy = vec![(2, 0.95), (0, 0.85), (3, 0.75)];
 
-        let fused = fusion.fuse(semantic, fuzzy);
+        let fused = fusion.fuse(&semantic, &fuzzy);
 
         // Chunk 0 should rank high (in both lists)
         // Chunk 2 should rank high (high in fuzzy, present in semantic)
@@ -203,7 +200,7 @@ mod tests {
         let semantic = vec![(0, 0.9)];
         let fuzzy = vec![(1, 0.9)];
 
-        let fused = fusion_semantic.fuse(semantic, fuzzy);
+        let fused = fusion_semantic.fuse(&semantic, &fuzzy);
 
         // Chunk 0 (semantic) should rank higher due to weight
         assert_eq!(fused[0].0, 0);

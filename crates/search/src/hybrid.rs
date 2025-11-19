@@ -16,7 +16,7 @@ pub struct HybridSearch {
 
 impl HybridSearch {
     /// Create new hybrid search engine
-    pub async fn new(store: VectorStore, chunks: Vec<CodeChunk>) -> Result<Self> {
+    pub fn new(store: VectorStore, chunks: Vec<CodeChunk>) -> Result<Self> {
         Ok(Self {
             store,
             chunks,
@@ -68,7 +68,7 @@ impl HybridSearch {
         log::debug!("Fuzzy: {} results", fuzzy_scores.len());
 
         // 3. RRF Fusion with adaptive weights based on query type
-        let fused_scores = self.fusion.fuse_adaptive(query, semantic_scores, fuzzy_scores);
+        let fused_scores = self.fusion.fuse_adaptive(query, &semantic_scores, &fuzzy_scores);
         log::debug!("Fused: {} results", fused_scores.len());
 
         // 4. AST-aware boosting
@@ -154,7 +154,7 @@ impl HybridSearch {
             let fuzzy_scores = self.fuzzy.search(query, &self.chunks, candidate_pool);
 
             // RRF Fusion with adaptive weights
-            let fused_scores = self.fusion.fuse_adaptive(query, semantic_scores, fuzzy_scores);
+            let fused_scores = self.fusion.fuse_adaptive(query, &semantic_scores, &fuzzy_scores);
 
             // AST-aware boosting
             let boosted_scores = AstBooster::boost(&self.chunks, fused_scores);
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires FastEmbed model
+    #[ignore = "Requires FastEmbed model"]
     async fn test_hybrid_search() {
         let temp_dir = TempDir::new().unwrap();
         let store_path = temp_dir.path().join("store.json");
@@ -241,17 +241,17 @@ mod tests {
             create_test_chunk("main.rs", 50, "main", "fn main() { println!(\"hello\"); }"),
         ];
 
-        let mut store = VectorStore::new(&store_path).await.unwrap();
+        let mut store = VectorStore::new(&store_path).unwrap();
         store.add_chunks(chunks.clone()).await.unwrap();
 
-        let mut search = HybridSearch::new(store, chunks).await.unwrap();
+        let mut search = HybridSearch::new(store, chunks).unwrap();
 
         let results = search.search("error handling", 5).await.unwrap();
         assert!(!results.is_empty());
     }
 
     #[tokio::test]
-    #[ignore] // Requires FastEmbed model
+    #[ignore = "Requires FastEmbed model"]
     async fn test_batch_search() {
         let temp_dir = TempDir::new().unwrap();
         let store_path = temp_dir.path().join("store.json");
@@ -263,10 +263,10 @@ mod tests {
             create_test_chunk("db.rs", 100, "query_db", "async fn query_db(sql: &str) -> Result<Vec<Row>> {}"),
         ];
 
-        let mut store = VectorStore::new(&store_path).await.unwrap();
+        let mut store = VectorStore::new(&store_path).unwrap();
         store.add_chunks(chunks.clone()).await.unwrap();
 
-        let mut search = HybridSearch::new(store, chunks).await.unwrap();
+        let mut search = HybridSearch::new(store, chunks).unwrap();
 
         // Batch search with 3 queries
         let queries = vec!["error handling", "parse data", "database query"];

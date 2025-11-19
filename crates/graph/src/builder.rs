@@ -46,7 +46,7 @@ impl GraphBuilder {
         let mut chunk_to_node: HashMap<String, NodeIndex> = HashMap::new();
 
         for chunk in chunks {
-            let symbol = self.extract_symbol(chunk)?;
+            let symbol = Self::extract_symbol(chunk);
             let chunk_id = format!("{}:{}:{}", chunk.file_path, chunk.start_line, chunk.end_line);
 
             let node = GraphNode {
@@ -100,33 +100,32 @@ impl GraphBuilder {
     }
 
     /// Extract symbol from chunk
-    fn extract_symbol(&self, chunk: &CodeChunk) -> Result<Symbol> {
+    fn extract_symbol(chunk: &CodeChunk) -> Symbol {
         let symbol_name = chunk
             .metadata
             .symbol_name
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
 
-        let symbol_type = match chunk.metadata.chunk_type {
-            Some(ref ct) => match ct {
-                context_code_chunker::ChunkType::Function => SymbolType::Function,
+        let symbol_type = chunk.metadata.chunk_type.as_ref().map_or(
+            SymbolType::Function,
+            |ct| match ct {
                 context_code_chunker::ChunkType::Method => SymbolType::Method,
                 context_code_chunker::ChunkType::Class => SymbolType::Class,
                 context_code_chunker::ChunkType::Struct => SymbolType::Struct,
                 context_code_chunker::ChunkType::Variable => SymbolType::Variable,
                 _ => SymbolType::Function,
             },
-            None => SymbolType::Function,
-        };
+        );
 
-        Ok(Symbol {
+        Symbol {
             name: symbol_name,
             qualified_name: chunk.metadata.qualified_name.clone(),
             file_path: chunk.file_path.clone(),
             start_line: chunk.start_line,
             end_line: chunk.end_line,
             symbol_type,
-        })
+        }
     }
 
     /// Extract function calls from chunk (simplified)
@@ -150,15 +149,16 @@ impl GraphBuilder {
 
         // Language-specific call patterns
         let is_call = match self.language {
-            GraphLanguage::Rust => kind == "call_expression",
             GraphLanguage::Python => kind == "call",
-            GraphLanguage::JavaScript | GraphLanguage::TypeScript => kind == "call_expression",
+            GraphLanguage::Rust | GraphLanguage::JavaScript | GraphLanguage::TypeScript => {
+                kind == "call_expression"
+            }
         };
 
         if is_call {
             // Extract function name from call
             if let Some(function_node) = node.child_by_field_name("function") {
-                let name = self.extract_identifier(function_node, content);
+                let name = Self::extract_identifier(function_node, content);
                 if !name.is_empty() {
                     calls.push(name);
                 }
@@ -173,7 +173,7 @@ impl GraphBuilder {
     }
 
     /// Extract identifier name from node
-    fn extract_identifier(&self, node: Node, content: &str) -> String {
+    fn extract_identifier(node: Node, content: &str) -> String {
         match node.kind() {
             "identifier" | "field_expression" => {
                 let start = node.start_byte();

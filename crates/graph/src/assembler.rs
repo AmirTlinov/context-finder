@@ -10,7 +10,7 @@ pub struct ContextAssembler {
 }
 
 /// Context assembly strategy
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum AssemblyStrategy {
     /// Include direct dependencies only (depth=1)
     Direct,
@@ -90,7 +90,7 @@ impl ContextAssembler {
         for (rel_node, distance, path) in related_nodes {
             if let Some(node_data) = self.graph.get_node(rel_node) {
                 if let Some(chunk) = &node_data.chunk {
-                    let relevance = self.calculate_relevance(distance, &path);
+                    let relevance = Self::calculate_relevance(distance, &path);
                     related_chunks.push(RelatedChunk {
                         chunk: chunk.clone(),
                         relationship: path,
@@ -145,7 +145,8 @@ impl ContextAssembler {
     }
 
     /// Calculate relevance score based on distance and relationship path
-    fn calculate_relevance(&self, distance: usize, path: &[RelationshipType]) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    fn calculate_relevance(distance: usize, path: &[RelationshipType]) -> f32 {
         // Base score decreases with distance
         let distance_score = 1.0 / (distance as f32 + 1.0);
 
@@ -184,7 +185,7 @@ impl ContextAssembler {
     ) -> Vec<Result<AssembledContext>> {
         symbol_names
             .iter()
-            .map(|name| self.assemble_for_symbol(name, strategy.clone()))
+            .map(|name| self.assemble_for_symbol(name, strategy))
             .collect()
     }
 }
@@ -201,14 +202,14 @@ mod tests {
 
     #[test]
     fn test_calculate_relevance() {
-        let assembler = ContextAssembler::new(CodeGraph::new());
+        let _assembler = ContextAssembler::new(CodeGraph::new());
 
         // Direct call (distance=1)
-        let score1 = assembler.calculate_relevance(1, &[RelationshipType::Calls]);
+        let score1 = ContextAssembler::calculate_relevance(1, &[RelationshipType::Calls]);
         assert!(score1 > 0.4);
 
         // Distant relationship (distance=3)
-        let score2 = assembler.calculate_relevance(
+        let score2 = ContextAssembler::calculate_relevance(
             3,
             &[
                 RelationshipType::Calls,

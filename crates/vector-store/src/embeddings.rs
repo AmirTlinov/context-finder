@@ -1,5 +1,5 @@
 use crate::error::{Result, VectorStoreError};
-use fastembed::TextEmbedding;
+use fastembed::{InitOptions, TextEmbedding};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -11,10 +11,10 @@ pub struct EmbeddingModel {
 
 impl EmbeddingModel {
     /// Create new embedding model (`FastEmbed` - all-MiniLM-L6-v2)
-    pub async fn new() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         log::info!("Initializing FastEmbed model...");
 
-        let model = TextEmbedding::try_new(Default::default())
+        let model = TextEmbedding::try_new(InitOptions::default())
         .map_err(|e| {
             VectorStoreError::EmbeddingError(format!("Failed to initialize FastEmbed: {e}"))
         })?;
@@ -50,11 +50,12 @@ impl EmbeddingModel {
             return Ok(vec![]);
         }
 
-        let model = self.model.lock().await;
-
-        let embeddings = model
-            .embed(texts.clone(), None)
-            .map_err(|e| VectorStoreError::EmbeddingError(format!("Embedding failed: {e}")))?;
+        let embeddings = {
+            let model = self.model.lock().await;
+            model
+                .embed(texts.clone(), None)
+                .map_err(|e| VectorStoreError::EmbeddingError(format!("Embedding failed: {e}")))?
+        };
 
         Ok(embeddings)
     }
@@ -83,17 +84,17 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore] // Requires model download
+    #[ignore = "Requires model download"]
     async fn test_embed_single() {
-        let model = EmbeddingModel::new().await.unwrap();
+        let model = EmbeddingModel::new().unwrap();
         let embedding = model.embed("hello world").await.unwrap();
         assert_eq!(embedding.len(), 384);
     }
 
     #[tokio::test]
-    #[ignore] // Requires model download
+    #[ignore = "Requires model download"]
     async fn test_embed_batch() {
-        let model = EmbeddingModel::new().await.unwrap();
+        let model = EmbeddingModel::new().unwrap();
         let texts = vec!["hello world", "foo bar", "test"];
         let embeddings = model.embed_batch(texts).await.unwrap();
         assert_eq!(embeddings.len(), 3);

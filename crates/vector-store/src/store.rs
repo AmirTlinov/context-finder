@@ -16,9 +16,9 @@ pub struct VectorStore {
 }
 
 impl VectorStore {
-    pub async fn new(path: impl AsRef<Path>) -> Result<Self> {
-        log::info!("Initializing VectorStore at {:?}", path.as_ref());
-        let embedder = EmbeddingModel::new().await?;
+    pub fn new(path: impl AsRef<Path>) -> Result<Self> {
+        log::info!("Initializing VectorStore at {}", path.as_ref().display());
+        let embedder = EmbeddingModel::new()?;
         let dimension = embedder.dimension();
         let index = HnswIndex::new(dimension);
 
@@ -165,7 +165,7 @@ impl VectorStore {
 
     /// Save store to disk
     pub async fn save(&self) -> Result<()> {
-        log::info!("Saving VectorStore to {:?}", self.path);
+        log::info!("Saving VectorStore to {}", self.path.display());
 
         // Save both chunks and id_map
         let save_data = serde_json::json!({
@@ -181,9 +181,9 @@ impl VectorStore {
     }
 
     /// Load store from disk
-    pub async fn load(path: impl AsRef<Path>) -> Result<Self> {
-        log::info!("Loading VectorStore from {:?}", path.as_ref());
-        let data = tokio::fs::read_to_string(&path).await?;
+    pub async fn load(path: &Path) -> Result<Self> {
+        log::info!("Loading VectorStore from {}", path.display());
+        let data = tokio::fs::read_to_string(path).await?;
         let save_data: serde_json::Value = serde_json::from_str(&data)?;
 
         // Load chunks and id_map
@@ -191,9 +191,10 @@ impl VectorStore {
             serde_json::from_value(save_data["chunks"].clone())?;
         let id_map: HashMap<usize, String> =
             serde_json::from_value(save_data["id_map"].clone())?;
+        #[allow(clippy::cast_possible_truncation)]
         let next_id: usize = save_data["next_id"].as_u64().unwrap_or(0) as usize;
 
-        let embedder = EmbeddingModel::new().await?;
+        let embedder = EmbeddingModel::new()?;
         let dimension = embedder.dimension();
         let mut index = HnswIndex::new(dimension);
 
@@ -210,7 +211,7 @@ impl VectorStore {
             chunks,
             index,
             embedder,
-            path: path.as_ref().to_path_buf(),
+            path: path.to_path_buf(),
             next_id,
             id_map,
         })
@@ -234,11 +235,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires model download
+    #[ignore = "Requires model download"]
     async fn test_add_and_search() {
         let temp_dir = TempDir::new().unwrap();
         let store_path = temp_dir.path().join("store.json");
-        let mut store = VectorStore::new(&store_path).await.unwrap();
+        let mut store = VectorStore::new(&store_path).unwrap();
 
         let chunks = vec![
             create_test_chunk("test.rs", "fn hello() { println!(\"hello\"); }", 1),

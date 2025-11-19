@@ -16,6 +16,7 @@ impl FuzzySearch {
 
     /// Search chunks by fuzzy matching against paths and symbol names
     /// Returns (`chunk_index`, score) sorted by score descending
+    #[allow(clippy::cast_precision_loss)]
     pub fn search(&mut self, query: &str, chunks: &[CodeChunk], limit: usize) -> Vec<(usize, f32)> {
         let pattern = Pattern::parse(
             query,

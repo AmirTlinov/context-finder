@@ -8,6 +8,7 @@ pub struct QueryExpander {
 
 impl QueryExpander {
     /// Create new query expander with built-in code synonyms
+    #[allow(clippy::too_many_lines)]
     pub fn new() -> Self {
         let mut synonyms = HashMap::new();
 
@@ -139,7 +140,7 @@ impl QueryExpander {
         let mut expansions = vec![query.to_string()];
 
         // Tokenize query (split by space, underscore, camelCase)
-        let tokens = self.tokenize(query);
+        let tokens = Self::tokenize(query);
 
         // Add each token
         for token in &tokens {
@@ -168,7 +169,7 @@ impl QueryExpander {
 
     /// Tokenize query into words
     /// Handles: spaces, underscores, camelCase, `PascalCase`
-    fn tokenize(&self, query: &str) -> Vec<String> {
+    fn tokenize(query: &str) -> Vec<String> {
         let mut tokens = Vec::new();
 
         // Split by space and underscore
@@ -178,7 +179,7 @@ impl QueryExpander {
             }
 
             // Split camelCase/PascalCase
-            let camel_tokens = self.split_camel_case(word);
+            let camel_tokens = Self::split_camel_case(word);
             tokens.extend(camel_tokens);
         }
 
@@ -186,7 +187,7 @@ impl QueryExpander {
     }
 
     /// Split camelCase or `PascalCase` into words
-    fn split_camel_case(&self, word: &str) -> Vec<String> {
+    fn split_camel_case(word: &str) -> Vec<String> {
         let mut tokens = Vec::new();
         let mut current = String::new();
         let mut prev_upper = false;
@@ -238,18 +239,18 @@ mod tests {
 
     #[test]
     fn test_tokenize() {
-        let expander = QueryExpander::new();
+        let _expander = QueryExpander::new();
 
-        let tokens = expander.tokenize("error handling");
+        let tokens = QueryExpander::tokenize("error handling");
         assert_eq!(tokens, vec!["error", "handling"]);
 
-        let tokens = expander.tokenize("error_handling");
+        let tokens = QueryExpander::tokenize("error_handling");
         assert_eq!(tokens, vec!["error", "handling"]);
 
-        let tokens = expander.tokenize("errorHandling");
+        let tokens = QueryExpander::tokenize("errorHandling");
         assert_eq!(tokens, vec!["error", "Handling"]);
 
-        let tokens = expander.tokenize("ErrorHandling");
+        let tokens = QueryExpander::tokenize("ErrorHandling");
         assert_eq!(tokens, vec!["Error", "Handling"]);
     }
 
@@ -274,6 +275,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)]
     fn test_expand_to_query() {
         let expander = QueryExpander::new();
 

@@ -58,16 +58,19 @@ impl HnswIndex {
     }
 
     /// Get number of vectors in index
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.vectors.len()
     }
 
     /// Check if index is empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.vectors.is_empty()
     }
 
     /// Clear all vectors
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.vectors.clear();
     }

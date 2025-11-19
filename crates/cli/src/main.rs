@@ -196,7 +196,6 @@ async fn cmd_search(query: &str, limit: usize, project: &Path) -> Result<()> {
 
     // Create hybrid search
     let mut search = HybridSearch::new(store, chunks)
-        .await
         .context("Failed to create search engine")?;
 
     // Search

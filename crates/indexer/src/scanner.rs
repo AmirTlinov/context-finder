@@ -1,4 +1,3 @@
-use crate::error::Result;
 use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
 
@@ -15,7 +14,7 @@ impl FileScanner {
     }
 
     /// Scan directory for source files (.gitignore aware)
-    pub fn scan(&self) -> Result<Vec<PathBuf>> {
+    pub fn scan(&self) -> Vec<PathBuf> {
         let mut files = Vec::new();
 
         for result in WalkBuilder::new(&self.root).hidden(false).build() {
@@ -31,7 +30,7 @@ impl FileScanner {
         }
 
         log::info!("Found {} source files", files.len());
-        Ok(files)
+        files
     }
 
     /// Check if file is a source code file
