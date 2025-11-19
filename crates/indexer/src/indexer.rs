@@ -3,8 +3,9 @@ use crate::scanner::FileScanner;
 use crate::stats::IndexStats;
 use context_code_chunker::{Chunker, ChunkerConfig};
 use context_vector_store::VectorStore;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 /// Project indexer that scans, chunks, and indexes code
 pub struct ProjectIndexer {
@@ -41,8 +42,18 @@ impl ProjectIndexer {
         })
     }
 
-    /// Index the project
+    /// Index the project (with incremental support)
     pub async fn index(&self) -> Result<IndexStats> {
+        self.index_with_mode(false).await
+    }
+
+    /// Index the project in full mode (skip incremental check)
+    pub async fn index_full(&self) -> Result<IndexStats> {
+        self.index_with_mode(true).await
+    }
+
+    /// Index with specified mode
+    async fn index_with_mode(&self, force_full: bool) -> Result<IndexStats> {
         let start = Instant::now();
         let mut stats = IndexStats::new();
 
@@ -52,28 +63,128 @@ impl ProjectIndexer {
         let scanner = FileScanner::new(&self.root);
         let files = scanner.scan()?;
 
-        // 2. Create vector store
-        let mut store = VectorStore::new(&self.store_path).await?;
-
-        // 3. Process files
-        for file_path in files {
-            match self.process_file(&file_path, &mut store, &mut stats).await {
-                Ok(_) => {}
+        // 2. Load or create vector store
+        let (mut store, existing_mtimes) = if !force_full && self.store_path.exists() {
+            log::info!("Loading existing index for incremental update");
+            match VectorStore::load(&self.store_path).await {
+                Ok(store) => {
+                    // Load mtimes from metadata file if exists
+                    let mtimes = self.load_mtimes().await.unwrap_or_default();
+                    (store, Some(mtimes))
+                }
                 Err(e) => {
-                    let error_msg = format!("{:?}: {}", file_path, e);
-                    log::warn!("Failed to process file: {}", error_msg);
-                    stats.add_error(error_msg);
+                    log::warn!("Failed to load existing index: {}, starting fresh", e);
+                    (VectorStore::new(&self.store_path).await?, None)
+                }
+            }
+        } else {
+            (VectorStore::new(&self.store_path).await?, None)
+        };
+
+        // 3. Determine which files to process
+        let files_to_process = if let Some(ref mtimes_map) = existing_mtimes {
+            self.filter_changed_files(&files, mtimes_map).await?
+        } else {
+            files.clone()
+        };
+
+        if existing_mtimes.is_some() {
+            log::info!(
+                "Incremental: processing {} of {} files",
+                files_to_process.len(),
+                files.len()
+            );
+        }
+
+        // 4. Process files
+        let mut current_mtimes = HashMap::new();
+        for file_path in files {
+            // Get mtime for tracking
+            if let Ok(metadata) = tokio::fs::metadata(&file_path).await {
+                if let Ok(modified) = metadata.modified() {
+                    if let Ok(duration) = modified.duration_since(SystemTime::UNIX_EPOCH) {
+                        current_mtimes.insert(
+                            file_path.strip_prefix(&self.root).unwrap_or(&file_path).to_string_lossy().to_string(),
+                            duration.as_secs()
+                        );
+                    }
+                }
+            }
+
+            // Process if in changed list
+            if files_to_process.contains(&file_path) {
+                match self.process_file(&file_path, &mut store, &mut stats).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let error_msg = format!("{:?}: {}", file_path, e);
+                        log::warn!("Failed to process file: {}", error_msg);
+                        stats.add_error(error_msg);
+                    }
                 }
             }
         }
 
-        // 4. Save store
+        // 5. Save store and mtimes
         store.save().await?;
+        self.save_mtimes(&current_mtimes).await?;
 
         stats.time_ms = start.elapsed().as_millis() as u64;
         log::info!("Indexing completed: {:?}", stats);
 
         Ok(stats)
+    }
+
+    /// Filter files that have changed since last index
+    async fn filter_changed_files(
+        &self,
+        files: &[PathBuf],
+        existing_mtimes: &HashMap<String, u64>,
+    ) -> Result<Vec<PathBuf>> {
+        let mut changed = Vec::new();
+
+        for file_path in files {
+            let relative_path = file_path
+                .strip_prefix(&self.root)
+                .unwrap_or(file_path)
+                .to_string_lossy()
+                .to_string();
+
+            // Check if file is new or modified
+            let metadata = tokio::fs::metadata(file_path).await?;
+            let modified = metadata.modified()?;
+            let mtime = modified.duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+
+            let is_changed = existing_mtimes
+                .get(&relative_path)
+                .map(|&old_mtime| mtime > old_mtime)
+                .unwrap_or(true); // New file
+
+            if is_changed {
+                changed.push(file_path.clone());
+            }
+        }
+
+        Ok(changed)
+    }
+
+    /// Save file mtimes for incremental indexing
+    async fn save_mtimes(&self, mtimes: &HashMap<String, u64>) -> Result<()> {
+        let mtimes_path = self.store_path.parent().unwrap().join("mtimes.json");
+        let json = serde_json::to_string_pretty(mtimes)?;
+        tokio::fs::write(&mtimes_path, json).await?;
+        Ok(())
+    }
+
+    /// Load file mtimes from previous index
+    async fn load_mtimes(&self) -> Result<HashMap<String, u64>> {
+        let mtimes_path = self.store_path.parent().unwrap().join("mtimes.json");
+        if !mtimes_path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let json = tokio::fs::read_to_string(&mtimes_path).await?;
+        let mtimes: HashMap<String, u64> = serde_json::from_str(&json)?;
+        Ok(mtimes)
     }
 
     /// Process single file

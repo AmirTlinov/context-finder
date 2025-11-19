@@ -16,6 +16,12 @@ pub enum IndexerError {
     #[error("Invalid project path: {0}")]
     InvalidPath(String),
 
+    #[error("System time error: {0}")]
+    SystemTimeError(#[from] std::time::SystemTimeError),
+
+    #[error("JSON error: {0}")]
+    JsonError(#[from] serde_json::Error),
+
     #[error("{0}")]
     Other(String),
 }
