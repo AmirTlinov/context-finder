@@ -10,6 +10,8 @@ pub struct AstAnalyzer {
     config: ChunkerConfig,
     parser: Parser,
     language: Language,
+    /// Cached imports for current file
+    file_imports: Vec<String>,
 }
 
 impl AstAnalyzer {
@@ -29,6 +31,7 @@ impl AstAnalyzer {
             config,
             parser,
             language,
+            file_imports: Vec::new(),
         })
     }
 
@@ -40,6 +43,10 @@ impl AstAnalyzer {
             .ok_or_else(|| ChunkerError::parse("Failed to parse source code"))?;
 
         let root = tree.root_node();
+
+        // Extract imports first for context
+        self.file_imports = self.extract_imports(content, root);
+
         let mut chunks = Vec::new();
 
         // Extract top-level declarations
@@ -134,9 +141,14 @@ impl AstAnalyzer {
                     if kind == "function_item" {
                         let mut chunk = self.node_to_chunk(content, file_path, method_node, ChunkType::Method)?;
 
-                        // Set parent scope to impl target
+                        // Set parent scope and build qualified name
                         if let Some(ref target) = impl_target {
                             chunk.metadata.parent_scope = Some(target.clone());
+
+                            // Build qualified name: "EmbeddingModel::embed"
+                            if let Some(ref method_name) = chunk.metadata.symbol_name {
+                                chunk.metadata.qualified_name = Some(format!("{}::{}", target, method_name));
+                            }
                         }
 
                         chunks.push(chunk);
@@ -236,9 +248,14 @@ impl AstAnalyzer {
                             ChunkType::Method,
                         )?;
 
-                        // Set parent scope to class name
+                        // Set parent scope and build qualified name
                         if let Some(ref name) = class_name {
                             chunk.metadata.parent_scope = Some(name.clone());
+
+                            // Build qualified name: "MyClass.method"
+                            if let Some(ref method_name) = chunk.metadata.symbol_name {
+                                chunk.metadata.qualified_name = Some(format!("{}.{}", name, method_name));
+                            }
                         }
 
                         chunks.push(chunk);
@@ -338,7 +355,7 @@ impl AstAnalyzer {
         Ok(())
     }
 
-    /// Convert AST node to code chunk with docstrings
+    /// Convert AST node to code chunk with enhanced context
     fn node_to_chunk(
         &self,
         content: &str,
@@ -353,23 +370,43 @@ impl AstAnalyzer {
         let end_byte = node.end_byte();
         let code_content = &content[start_byte..end_byte];
 
-        // Combine docstrings with code content for richer embeddings
-        let chunk_content = if doc_comments.is_empty() {
-            code_content.to_string()
-        } else {
-            format!("{}\n{}", doc_comments, code_content)
-        };
-
         let start_line = node.start_position().row + 1;
         let end_line = node.end_position().row + 1;
 
         let symbol_name = self.extract_symbol_name(content, node);
-        let estimated_tokens = ChunkMetadata::estimate_tokens_from_content(&chunk_content);
+
+        // Build qualified name (will be updated with parent_scope later if method)
+        let qualified_name = symbol_name.clone();
+
+        // Select relevant imports (filter by what's used in this chunk)
+        let relevant_imports = self.filter_relevant_imports(code_content);
+
+        // Build enhanced content for embedding: imports + docstrings + code
+        let mut enhanced_content = String::new();
+
+        // Add relevant imports for context
+        if !relevant_imports.is_empty() {
+            enhanced_content.push_str(&relevant_imports.join("\n"));
+            enhanced_content.push_str("\n\n");
+        }
+
+        // Add docstrings
+        if !doc_comments.is_empty() {
+            enhanced_content.push_str(&doc_comments);
+            enhanced_content.push('\n');
+        }
+
+        // Add code
+        enhanced_content.push_str(code_content);
+
+        let estimated_tokens = ChunkMetadata::estimate_tokens_from_content(&enhanced_content);
 
         let metadata = ChunkMetadata {
             language: Some(self.language.as_str().to_string()),
             chunk_type: Some(chunk_type),
-            symbol_name,
+            symbol_name: symbol_name.clone(),
+            context_imports: relevant_imports,
+            qualified_name,
             estimated_tokens,
             ..Default::default()
         };
@@ -378,9 +415,86 @@ impl AstAnalyzer {
             file_path.to_string(),
             start_line,
             end_line,
-            chunk_content,
+            enhanced_content,
             metadata,
         ))
+    }
+
+    /// Filter imports to only those relevant to this chunk
+    fn filter_relevant_imports(&self, code_content: &str) -> Vec<String> {
+        let mut relevant = Vec::new();
+
+        for import in &self.file_imports {
+            // Extract identifiers from import
+            let identifiers = self.extract_identifiers_from_import(import);
+
+            // Check if any identifier is used in code
+            for ident in identifiers {
+                if code_content.contains(&ident) {
+                    relevant.push(import.clone());
+                    break;
+                }
+            }
+
+            // Limit to avoid bloat
+            if relevant.len() >= 5 {
+                break;
+            }
+        }
+
+        relevant
+    }
+
+    /// Extract identifiers from import statement
+    fn extract_identifiers_from_import(&self, import: &str) -> Vec<String> {
+        let mut identifiers = Vec::new();
+
+        match self.language {
+            Language::Rust => {
+                // use std::collections::HashMap -> HashMap
+                // use crate::error::{Result, Error} -> Result, Error
+                if let Some(last_part) = import.split("::").last() {
+                    // Handle {A, B, C}
+                    if last_part.contains('{') {
+                        let inner = last_part
+                            .trim_start_matches('{')
+                            .trim_end_matches('}');
+                        for ident in inner.split(',') {
+                            identifiers.push(ident.trim().to_string());
+                        }
+                    } else {
+                        identifiers.push(last_part.trim().to_string());
+                    }
+                }
+            }
+            Language::Python => {
+                // from x import A, B -> A, B
+                // import x -> x
+                if import.contains("import") {
+                    if let Some(after_import) = import.split("import").nth(1) {
+                        for ident in after_import.split(',') {
+                            identifiers.push(ident.trim().to_string());
+                        }
+                    }
+                }
+            }
+            Language::JavaScript | Language::TypeScript => {
+                // import { A, B } from 'x' -> A, B
+                if import.contains('{') {
+                    if let Some(inner_start) = import.find('{') {
+                        if let Some(inner_end) = import.find('}') {
+                            let inner = &import[inner_start + 1..inner_end];
+                            for ident in inner.split(',') {
+                                identifiers.push(ident.trim().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        identifiers
     }
 
     /// Extract documentation comments/docstrings before a node
@@ -431,6 +545,48 @@ impl AstAnalyzer {
         doc_lines.join("\n")
     }
 
+
+    /// Extract imports/dependencies from file for context
+    fn extract_imports(&self, content: &str, root: Node) -> Vec<String> {
+        let mut imports = Vec::new();
+        let mut cursor = root.walk();
+
+        for child in root.children(&mut cursor) {
+            let kind = child.kind();
+
+            // Language-specific import nodes
+            let is_import = match self.language {
+                Language::Rust => kind == "use_declaration",
+                Language::Python => kind == "import_statement" || kind == "import_from_statement",
+                Language::JavaScript | Language::TypeScript => {
+                    kind == "import_statement" || kind == "import"
+                }
+                _ => false,
+            };
+
+            if is_import {
+                let start = child.start_byte();
+                let end = child.end_byte();
+                let import_text = content[start..end].trim().to_string();
+
+                // Clean up import text (remove trailing semicolons, etc.)
+                let cleaned = import_text
+                    .trim_end_matches(';')
+                    .lines()
+                    .next()
+                    .unwrap_or(&import_text)
+                    .to_string();
+
+                if !cleaned.is_empty() {
+                    imports.push(cleaned);
+                }
+            }
+        }
+
+        // Limit imports to avoid bloat
+        imports.truncate(20);
+        imports
+    }
 
     /// Extract symbol name from AST node
     fn extract_symbol_name(&self, content: &str, node: Node) -> Option<String> {

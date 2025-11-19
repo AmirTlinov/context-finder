@@ -39,8 +39,13 @@ impl FuzzySearch {
                         pattern.score(symbol_haystack.slice(..), &mut self.matcher)
                     });
 
+                // Safe Unicode truncation: find char boundary at or before 200 bytes
                 let content_preview = if chunk.content.len() > 200 {
-                    &chunk.content[..200]
+                    let mut boundary = 200.min(chunk.content.len());
+                    while boundary > 0 && !chunk.content.is_char_boundary(boundary) {
+                        boundary -= 1;
+                    }
+                    &chunk.content[..boundary]
                 } else {
                     &chunk.content
                 };
