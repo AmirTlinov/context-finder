@@ -97,6 +97,43 @@ impl VectorStore {
         Ok(results)
     }
 
+    /// Batch search for multiple queries (more efficient than sequential searches)
+    /// Returns results for each query in the same order
+    pub async fn search_batch(&self, queries: &[&str], limit: usize) -> Result<Vec<Vec<SearchResult>>> {
+        if queries.is_empty() {
+            return Ok(vec![]);
+        }
+
+        log::debug!("Batch searching {} queries (limit: {})", queries.len(), limit);
+
+        // Batch embed all queries (much more efficient)
+        let query_vectors = self.embedder.embed_batch(queries.to_vec()).await?;
+
+        // Search for each query vector
+        let mut all_results = Vec::with_capacity(queries.len());
+        for (i, query_vector) in query_vectors.iter().enumerate() {
+            log::debug!("Searching query {}/{}", i + 1, queries.len());
+
+            let neighbors = self.index.search(query_vector, limit)?;
+
+            let mut results = Vec::new();
+            for (chunk_id, score) in neighbors {
+                if let Some(stored) = self.find_chunk_by_numeric_id(chunk_id) {
+                    results.push(SearchResult {
+                        chunk: stored.chunk.clone(),
+                        score,
+                        id: stored.id.clone(),
+                    });
+                }
+            }
+
+            all_results.push(results);
+        }
+
+        log::debug!("Batch search completed: {} queries processed", queries.len());
+        Ok(all_results)
+    }
+
     /// Find chunk by numeric ID using id_map
     fn find_chunk_by_numeric_id(&self, id: usize) -> Option<&StoredChunk> {
         self.id_map.get(&id).and_then(|string_id| self.chunks.get(string_id))
