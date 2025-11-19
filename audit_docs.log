@@ -1,0 +1,20 @@
+    Checking tokio-util v0.7.17
+    Checking tokio-native-tls v0.3.1
+    Checking tower v0.5.2
+    Checking h2 v0.4.12
+    Checking tower-http v0.6.6
+    Checking hyper v1.8.1
+    Checking hyper-util v0.1.18
+    Checking hyper-tls v0.6.0
+    Checking reqwest v0.12.24
+    Checking hf-hub v0.4.3
+    Checking fastembed v4.9.1
+    Checking context-vector-store v0.1.0 (/home/amir/Документы/PROJECTS/skills/apply_context/context-finder/crates/vector-store)
+ Documenting context-vector-store v0.1.0 (/home/amir/Документы/PROJECTS/skills/apply_context/context-finder/crates/vector-store)
+    Checking context-search v0.1.0 (/home/amir/Документы/PROJECTS/skills/apply_context/context-finder/crates/search)
+    Checking context-indexer v0.1.0 (/home/amir/Документы/PROJECTS/skills/apply_context/context-finder/crates/indexer)
+ Documenting context-search v0.1.0 (/home/amir/Документы/PROJECTS/skills/apply_context/context-finder/crates/search)
+ Documenting context-indexer v0.1.0 (/home/amir/Документы/PROJECTS/skills/apply_context/context-finder/crates/indexer)
+ Documenting context-finder-cli v0.1.0 (/home/amir/Документы/PROJECTS/skills/apply_context/context-finder/crates/cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.79s
+   Generated /home/amir/Документы/PROJECTS/skills/apply_context/context-finder/target/doc/context_code_chunker/index.html and 5 other files

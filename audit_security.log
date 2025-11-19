@@ -1,0 +1,2 @@
+[0m[0m[1m[32m    Fetching[0m advisory database from `https://github.com/RustSec/advisory-db.git`
+[0m[0m[1m[31merror:[0m couldn't fetch advisory database: git operation failed: failed to fetch: Object fb0d06e8e2cc04c9aa359e51ffa0a09e3bf58822 as referred to by "refs/heads/main" could not be found

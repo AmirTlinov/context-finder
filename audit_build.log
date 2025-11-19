@@ -1,0 +1,9 @@
+   Compiling context-code-chunker v0.1.0 (/home/amir/Документы/PROJECTS/skills/apply_context/context-finder/crates/code-chunker)
+   Compiling fixedbitset v0.4.2
+   Compiling petgraph v0.6.5
+   Compiling context-vector-store v0.1.0 (/home/amir/Документы/PROJECTS/skills/apply_context/context-finder/crates/vector-store)
+   Compiling context-indexer v0.1.0 (/home/amir/Документы/PROJECTS/skills/apply_context/context-finder/crates/indexer)
+   Compiling context-graph v0.1.0 (/home/amir/Документы/PROJECTS/skills/apply_context/context-finder/crates/graph)
+   Compiling context-search v0.1.0 (/home/amir/Документы/PROJECTS/skills/apply_context/context-finder/crates/search)
+   Compiling context-finder-cli v0.1.0 (/home/amir/Документы/PROJECTS/skills/apply_context/context-finder/crates/cli)
+    Finished `release` profile [optimized] target(s) in 35.01s
