@@ -1,0 +1,473 @@
+{
+  "generated_at": "20251122T201854Z",
+  "cli": "target/release/context-finder",
+  "limit": 10,
+  "k": 5,
+  "profile": "general",
+  "repos": [
+    {
+      "name": "RLM",
+      "path": "/home/amir/Документы/PROJECTS/RLM",
+      "files": 23866,
+      "language_count": 21,
+      "index": null,
+      "queries": [
+        {
+          "query": "flash decode benchmark script",
+          "type": "benchmark",
+          "difficulty": "medium",
+          "expected_snippet": "Python bench entrypoints for flash decode pipelines",
+          "metrics": {
+            "time_ms": 2000.9483409812674,
+            "max_rss_kb": 1038988,
+            "precision_at_k": 1.0,
+            "hits": [
+              "tools/bench/run_flash_decode.py",
+              "tools/bench/run_flash_decode.py",
+              "tools/bench/run_flash_decode.py",
+              "tools/bench/run_flash_decode.py",
+              "tools/bench/run_flash_decode.py"
+            ],
+            "top_files": [
+              "tools/bench/run_flash_decode.py",
+              "tools/bench/run_flash_decode.py",
+              "tools/bench/run_flash_decode.py",
+              "tools/bench/run_flash_decode.py",
+              "tools/bench/run_flash_decode.py"
+            ],
+            "returncode": 0
+          }
+        },
+        {
+          "query": "kv allocator bench",
+          "type": "benchmark",
+          "difficulty": "hard",
+          "expected_snippet": "Allocator benchmarks for KV cache",
+          "metrics": {
+            "time_ms": 2000.813470047433,
+            "max_rss_kb": 1043352,
+            "precision_at_k": 0.4,
+            "hits": [
+              "tools/kv/bench_allocator.py",
+              "tools/kv/bench_allocator.py"
+            ],
+            "top_files": [
+              "runtime/src/bench_e2e_latency.cpp",
+              "specs/examples/bench_plan.yaml",
+              "tools/bench/run_matrix.py",
+              "tools/kv/bench_allocator.py",
+              "tools/kv/bench_allocator.py"
+            ],
+            "returncode": 0
+          }
+        },
+        {
+          "query": "quant gemm benchmark",
+          "type": "benchmark",
+          "difficulty": "medium",
+          "expected_snippet": "Quantization GEMM perf harness",
+          "metrics": {
+            "time_ms": 2000.6770819891244,
+            "max_rss_kb": 1037668,
+            "precision_at_k": 1.0,
+            "hits": [
+              "tools/quant/bench_gemm.py",
+              "tools/quant/bench_gemm.py",
+              "tools/quant/bench_gemm.py",
+              "tools/quant/bench_gemm.py"
+            ],
+            "top_files": [
+              "tools/quant/bench_gemm.py",
+              "tools/quant/bench_gemm.py",
+              "tools/quant/bench_gemm.py",
+              "tools/quant/bench_gemm.py"
+            ],
+            "returncode": 0
+          }
+        }
+      ],
+      "negative_examples": [
+        {
+          "query": "marketing landing page",
+          "reason": "HTML лендинги не должны появляться в ответе для инженерных бенчмарков.",
+          "metrics": {
+            "time_ms": 2000.9303409606218,
+            "max_rss_kb": 1040304,
+            "false_positive": true,
+            "top_files": [
+              "tools/kv/bench_allocator.py",
+              "tools/kv/bench_allocator.py",
+              "tools/kv/bench_allocator.py",
+              "tools/scheduler/bench.py",
+              "transformer_engine_wheel/transformer_engine/debug/features/utils/__init__.py"
+            ],
+            "returncode": 0
+          }
+        },
+        {
+          "query": "vendor transformerengine setup",
+          "reason": "Вендорские setup.py в vendor/ должны быть понижены, чтобы проверить устойчивость.",
+          "metrics": {
+            "time_ms": 2000.889102986548,
+            "max_rss_kb": 1039732,
+            "false_positive": true,
+            "top_files": [
+              "runtime/src/flash_gpu_dispatch_utils.h",
+              "transformer_engine_wheel/transformer_engine/jax/__init__.py",
+              "transformer_engine_wheel/transformer_engine/jax/flax/module.py",
+              "transformer_engine_wheel/transformer_engine/jax/setup.py",
+              "transformer_engine_wheel/transformer_engine/pytorch/distributed.py"
+            ],
+            "returncode": 0
+          }
+        }
+      ],
+      "summary": {
+        "avg_precision_at_k": 0.7999999999999999,
+        "query_count": 3,
+        "negative_fp": 2,
+        "alert": "precision<0.9; false positives"
+      },
+      "alert": "precision<0.9; false positives"
+    },
+    {
+      "name": "Venorus",
+      "path": "/home/amir/Документы/PROJECTS/Venorus",
+      "files": 16533,
+      "language_count": 16,
+      "index": null,
+      "queries": [
+        {
+          "query": "personal tags utility functions",
+          "type": "frontend",
+          "difficulty": "easy",
+          "expected_snippet": "Helpers around personal tag management",
+          "metrics": {
+            "time_ms": 4001.2989079696126,
+            "max_rss_kb": 1885572,
+            "precision_at_k": 1.0,
+            "hits": [
+              "Venorus-Legacy/packages/utils/index.ts",
+              "Venorus-Legacy/packages/utils/personal-tags.ts"
+            ],
+            "top_files": [
+              "Venorus-Legacy/packages/utils/index.ts",
+              "Venorus-Legacy/packages/utils/personal-tags.ts"
+            ],
+            "returncode": 0
+          }
+        },
+        {
+          "query": "selection tables helper",
+          "type": "frontend",
+          "difficulty": "medium",
+          "expected_snippet": "Selection table builder exported from utils",
+          "metrics": {
+            "time_ms": 4001.250715984497,
+            "max_rss_kb": 1887200,
+            "precision_at_k": 1.0,
+            "hits": [
+              "Venorus-Legacy/packages/utils/selection-tables.ts"
+            ],
+            "top_files": [
+              "Venorus-Legacy/packages/utils/selection-tables.ts"
+            ],
+            "returncode": 0
+          }
+        },
+        {
+          "query": "pnpm workspace layout",
+          "type": "infrastructure",
+          "difficulty": "easy",
+          "expected_snippet": "pnpm workspace definition describing package graph",
+          "metrics": {
+            "time_ms": 4001.1838090140373,
+            "max_rss_kb": 1885316,
+            "precision_at_k": 0.5,
+            "hits": [
+              "Venorus-Legacy/pnpm-workspace.yaml"
+            ],
+            "top_files": [
+              "Venorus-Legacy/pnpm-workspace.yaml",
+              "Venorus/pnpm-workspace.yaml"
+            ],
+            "returncode": 0
+          }
+        }
+      ],
+      "negative_examples": [
+        {
+          "query": "generic roadmap",
+          "reason": "Документы roadmap/README не должны замещать конкретные утилиты.",
+          "metrics": {
+            "time_ms": 4001.024550991133,
+            "max_rss_kb": 1887460,
+            "false_positive": false,
+            "top_files": [],
+            "returncode": 0
+          }
+        },
+        {
+          "query": "docker compose override",
+          "reason": "Для проверки устойчивости ищем, чтобы DevOps YAML не вытеснял фронтовые файлы.",
+          "metrics": {
+            "time_ms": 3501.449559989851,
+            "max_rss_kb": 1886676,
+            "false_positive": false,
+            "top_files": [],
+            "returncode": 0
+          }
+        }
+      ],
+      "summary": {
+        "avg_precision_at_k": 0.8333333333333334,
+        "query_count": 3,
+        "negative_fp": 0,
+        "alert": "precision<0.9"
+      },
+      "alert": "precision<0.9"
+    },
+    {
+      "name": "idea_a",
+      "path": "/home/amir/Документы/PROJECTS/AI/idea_a",
+      "files": 69017,
+      "language_count": 27,
+      "index": null,
+      "queries": [
+        {
+          "query": "streaming kv runtime config",
+          "type": "config",
+          "difficulty": "medium",
+          "expected_snippet": "YAML definition of streaming_kv settings consumed by runtime",
+          "metrics": {
+            "time_ms": 3001.083463022951,
+            "max_rss_kb": 1573228,
+            "precision_at_k": 0.6,
+            "hits": [
+              "configs/orchestrator.yaml",
+              "configs/orchestrator.yaml",
+              "configs/streaming_kv.yaml"
+            ],
+            "top_files": [
+              "configs/memory_index_runtime.yaml",
+              "configs/model.yaml",
+              "configs/orchestrator.yaml",
+              "configs/orchestrator.yaml",
+              "configs/streaming_kv.yaml"
+            ],
+            "returncode": 0
+          }
+        },
+        {
+          "query": "train stage A sft roles schedule",
+          "type": "training",
+          "difficulty": "hard",
+          "expected_snippet": "Stage A schedule with role weights for SFT",
+          "metrics": {
+            "time_ms": 3001.299488998484,
+            "max_rss_kb": 1571596,
+            "precision_at_k": 0.2,
+            "hits": [
+              "configs/train_stage_A_sft_roles.yaml"
+            ],
+            "top_files": [
+              "configs/train_stage_A_sft_roles.yaml",
+              "configs/train_stage_C_tool_sft.yaml",
+              "src/training/sft_roles.py",
+              "src/training/sft_roles.py",
+              "src/training/sft_roles.py"
+            ],
+            "returncode": 0
+          }
+        },
+        {
+          "query": "memory index runtime tuning",
+          "type": "ops",
+          "difficulty": "medium",
+          "expected_snippet": "Runtime overrides for memory index service",
+          "metrics": {
+            "time_ms": 3001.1213009711355,
+            "max_rss_kb": 1572024,
+            "precision_at_k": 0.2,
+            "hits": [
+              "configs/memory_index_runtime.yaml"
+            ],
+            "top_files": [
+              "configs/memory_index_runtime.yaml",
+              "src/adapters/memory/index_runtime.py",
+              "src/adapters/memory/index_runtime.py",
+              "src/adapters/memory/index_runtime.py",
+              "src/adapters/memory/index_runtime.py"
+            ],
+            "returncode": 0
+          }
+        }
+      ],
+      "negative_examples": [
+        {
+          "query": "deprecated orchestrator.ini",
+          "reason": "Должно игнорировать старые ini-конфиги и фокусироваться на YAML из configs/.",
+          "metrics": {
+            "time_ms": 3000.966112012975,
+            "max_rss_kb": 1571676,
+            "false_positive": true,
+            "top_files": [
+              "configs/orchestrator.yaml",
+              "configs/orchestrator.yaml",
+              "configs/orchestrator.yaml"
+            ],
+            "returncode": 0
+          }
+        },
+        {
+          "query": "nightly hotpatch readme",
+          "reason": "Запрос на общие README не должен перекрывать специализированные конфиги benchmarks.",
+          "metrics": {
+            "time_ms": 3001.090836012736,
+            "max_rss_kb": 1571420,
+            "false_positive": false,
+            "top_files": [],
+            "returncode": 0
+          }
+        }
+      ],
+      "summary": {
+        "avg_precision_at_k": 0.3333333333333333,
+        "query_count": 3,
+        "negative_fp": 1,
+        "alert": "precision<0.9; false positives"
+      },
+      "alert": "precision<0.9; false positives"
+    },
+    {
+      "name": "memory",
+      "path": "/home/amir/Документы/PROJECTS/mcp/memory",
+      "files": 121196,
+      "language_count": 29,
+      "index": null,
+      "queries": [
+        {
+          "query": "memory orchestrator prompt template",
+          "type": "runtime",
+          "difficulty": "medium",
+          "expected_snippet": "Prompt builder definitions for orchestrator flows",
+          "metrics": {
+            "time_ms": 2001.0357910068706,
+            "max_rss_kb": 999756,
+            "precision_at_k": 0.0,
+            "hits": [],
+            "top_files": [
+              "embedding_server.py",
+              "embedding_server.py",
+              "src/memory.rs",
+              "src/memory.rs",
+              "src/memory.rs"
+            ],
+            "returncode": 0
+          }
+        },
+        {
+          "query": "mcp aggregate event sourcing",
+          "type": "domain",
+          "difficulty": "hard",
+          "expected_snippet": "Aggregate and events definitions for MCP domain",
+          "metrics": {
+            "time_ms": 2000.9184230002575,
+            "max_rss_kb": 995172,
+            "precision_at_k": 1.0,
+            "hits": [
+              "src/domain/mcp/aggregate.rs",
+              "src/domain/mcp/aggregate.rs",
+              "src/domain/mcp/aggregate.rs",
+              "src/domain/mcp/aggregate.rs",
+              "src/domain/mcp/events.rs"
+            ],
+            "top_files": [
+              "src/domain/mcp/aggregate.rs",
+              "src/domain/mcp/aggregate.rs",
+              "src/domain/mcp/aggregate.rs",
+              "src/domain/mcp/aggregate.rs",
+              "src/domain/mcp/events.rs"
+            ],
+            "returncode": 0
+          }
+        },
+        {
+          "query": "watch service timeline model",
+          "type": "domain",
+          "difficulty": "medium",
+          "expected_snippet": "Data model for watch service timeline entries",
+          "metrics": {
+            "time_ms": 2000.8025229908526,
+            "max_rss_kb": 1000928,
+            "precision_at_k": 0.0,
+            "hits": [],
+            "top_files": [
+              "embedding_server.py",
+              "src/domain/mod.rs",
+              "src/memory.rs",
+              "src/memory.rs",
+              "src/memory.rs"
+            ],
+            "returncode": 0
+          }
+        }
+      ],
+      "negative_examples": [
+        {
+          "query": "memory old proto schema",
+          "reason": "Проверяет, что поиск не ловит удалённые proto-файлы в artifacts/.",
+          "metrics": {
+            "time_ms": 2000.8438169606961,
+            "max_rss_kb": 996608,
+            "false_positive": true,
+            "top_files": [
+              "src/domain/mcp/aggregate.rs",
+              "src/domain/mcp/aggregate.rs",
+              "src/domain/mcp/aggregate.rs",
+              "src/memory.rs",
+              "src/memory.rs"
+            ],
+            "returncode": 0
+          }
+        },
+        {
+          "query": "generic README",
+          "reason": "README верхнего уровня не должен заменять целевой доменный код.",
+          "metrics": {
+            "time_ms": 2000.9553809650242,
+            "max_rss_kb": 1001276,
+            "false_positive": true,
+            "top_files": [
+              "src/domain/mcp/aggregate.rs",
+              "src/domain/mcp/value_object.rs",
+              "src/domain/mcp/value_object.rs",
+              "src/memory.rs",
+              "src/memory.rs"
+            ],
+            "returncode": 0
+          }
+        }
+      ],
+      "summary": {
+        "avg_precision_at_k": 0.3333333333333333,
+        "query_count": 3,
+        "negative_fp": 2,
+        "alert": "precision<0.9; false positives"
+      },
+      "alert": "precision<0.9; false positives"
+    }
+  ],
+  "embedding_model": null,
+  "summary": {
+    "repo_count": 4,
+    "avg_precision_at_k": 0.575,
+    "total_negative_fp": 5,
+    "alerts": [
+      "RLM",
+      "Venorus",
+      "idea_a",
+      "memory"
+    ]
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "name": "general",
+  "description": "Generic relevance profile without project-specific paths. Boost source/lib/utils/configs/tools while penalizing obvious noise.",
+  "paths": {
+    "boost": [
+      { "pattern": "src/", "kind": "prefix", "weight": 1.25 },
+      { "pattern": "lib/", "kind": "contains", "weight": 1.15 },
+      { "pattern": "utils", "kind": "contains", "weight": 1.1 },
+      { "pattern": "configs/", "kind": "contains", "weight": 1.3 },
+      { "pattern": "tools/bench", "kind": "contains", "weight": 1.3 }
+    ],
+    "penalty": [
+      { "pattern": "/tests/", "kind": "contains", "weight": 0.3 },
+      { "pattern": "/test/", "kind": "contains", "weight": 0.3 },
+      { "pattern": "docs/", "kind": "contains", "weight": 0.35 },
+      { "pattern": ".md", "kind": "suffix", "weight": 0.25 },
+      { "pattern": ".mdx", "kind": "suffix", "weight": 0.25 },
+      { "pattern": "docker", "kind": "contains", "weight": 0.35 },
+      { "pattern": "infra", "kind": "contains", "weight": 0.35 },
+      { "pattern": "monitoring", "kind": "contains", "weight": 0.45 },
+      { "pattern": "vendor", "kind": "contains", "weight": 0.25 },
+      { "pattern": ".log", "kind": "suffix", "weight": 0.15 },
+      { "pattern": "logs/", "kind": "contains", "weight": 0.15 },
+      { "pattern": "data/", "kind": "contains", "weight": 0.45 },
+      { "pattern": "datasets/", "kind": "contains", "weight": 0.45 }
+    ],
+    "reject": [
+      { "pattern": ".git/", "kind": "contains" },
+      { "pattern": ".context-finder/cache", "kind": "contains" },
+      { "pattern": "node_modules", "kind": "contains" },
+      { "pattern": "dist/", "kind": "contains" },
+      { "pattern": "build/", "kind": "contains" },
+      { "pattern": "target/", "kind": "contains" },
+      { "pattern": ".venv/", "kind": "contains" },
+      { "pattern": "venv/", "kind": "contains" },
+      { "pattern": ".direnv/", "kind": "contains" }
+    ],
+    "noise": [
+      { "pattern": "audit", "kind": "contains" },
+      { "pattern": "report", "kind": "contains" },
+      { "pattern": "phase_", "kind": "contains" },
+      { "pattern": "docs/", "kind": "contains" },
+      { "pattern": "data/", "kind": "contains" },
+      { "pattern": "datasets/", "kind": "contains" },
+      { "pattern": ".md", "kind": "suffix" },
+      { "pattern": ".mdx", "kind": "suffix" },
+      { "pattern": ".log", "kind": "suffix" },
+      { "pattern": "bench/logs", "kind": "contains" }
+    ]
+  },
+  "rerank": {
+    "thresholds": {
+      "min_fuzzy_score": 0.18,
+      "min_semantic_score": 0.05
+    },
+    "bm25": {
+      "k1": 1.35,
+      "b": 0.7,
+      "window": 210
+    },
+    "boosts": {
+      "path": 1.8,
+      "symbol": 2.2,
+      "yaml_path": 0.9,
+      "bm25": 1.1
+    },
+    "must_hit": {
+      "base_bonus": 20.0
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "name": "targeted/venorus",
+  "description": "Targeted preset for Venorus repositories with must-hit configs and utilities.",
+  "must_hit": [
+    { "pattern": "venorus-legacy/pnpm-workspace.yaml", "kind": "contains", "tokens": ["pnpm", "workspace"], "boost": 1.7 },
+    { "pattern": "pnpm-workspace.yaml", "kind": "contains", "tokens": ["pnpm", "workspace"], "boost": 1.5 },
+    { "pattern": "venorus-legacy/packages/utils/selection-tables.ts", "kind": "contains", "tokens": ["selection", "tables"], "boost": 1.6 },
+    { "pattern": "venorus-legacy/packages/utils/personal-tags.ts", "kind": "contains", "tokens": ["personal", "tags"], "boost": 1.35 },
+    { "pattern": "venorus-legacy/packages/utils/index.ts", "kind": "contains", "tokens": ["personal", "tags"], "boost": 1.1 },
+    { "pattern": "tools/bench/run_flash_decode.py", "kind": "contains", "tokens": ["flash", "decode"], "boost": 1.5 },
+    { "pattern": "tools/bench/run_matrix.py", "kind": "contains", "tokens": ["flash", "decode"], "boost": 1.25 },
+    { "pattern": "tools/kv/bench_allocator.py", "kind": "contains", "tokens": ["kv", "allocator"], "boost": 1.45 },
+    { "pattern": "tools/quant/bench_gemm.py", "kind": "contains", "tokens": ["quant", "gemm"], "boost": 1.45 },
+    { "pattern": "configs/streaming_kv.yaml", "kind": "contains", "tokens": ["streaming", "kv"], "boost": 1.7 },
+    { "pattern": "configs/orchestrator.yaml", "kind": "contains", "tokens": ["orchestrator"], "boost": 1.45 },
+    { "pattern": "src/adapters/memory/streaming_kv.py", "kind": "contains", "tokens": ["streaming", "kv"], "boost": 1.45 },
+    { "pattern": "src/adapters/memory/index_runtime.py", "kind": "contains", "tokens": ["memory", "index"], "boost": 1.45 },
+    { "pattern": "configs/memory_index_runtime.yaml", "kind": "contains", "tokens": ["memory", "index"], "boost": 1.55 }
+  ],
+  "rerank": {
+    "thresholds": {
+      "min_fuzzy_score": 0.2,
+      "min_semantic_score": 0.05
+    },
+    "bm25": {
+      "k1": 1.4,
+      "b": 0.7,
+      "window": 240
+    },
+    "boosts": {
+      "path": 2.0,
+      "symbol": 2.6,
+      "yaml_path": 1.0,
+      "bm25": 1.2
+    },
+    "must_hit": {
+      "base_bonus": 24.0
+    }
+  }
+}

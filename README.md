@@ -24,7 +24,7 @@ Context Finder — это CLI-инструмент для семантическ
 
 - **Семантическое разбиение кода** — AST-aware chunking с Tree-sitter
 - **Гибридный поиск** — semantic (adaptive) + fuzzy + RRF fusion для 100% точности
-- **Векторный поиск** — FastEmbed + HNSW для точного семантического поиска
+- **Векторный поиск** — ONNX Runtime (CUDA) + HNSW для точного семантического поиска
 - **CLI с JSON выводом** — 4 команды, полностью parseable для ИИ-моделей
 - **Адаптивная query expansion** — 100+ code-specific синонимов, tokenization
 - **Мультиязычность** — Rust, Python, JS/TS с полным AST-пониманием
@@ -130,6 +130,22 @@ cargo build --release
 cargo install --path crates/cli
 ```
 
+### Выбор embedding-модели
+
+По умолчанию используется ONNX Runtime CUDA (BGE-small). Скачайте ONNX + tokenizer в `~/.cache/context-finder/models/bge-small` (или `CONTEXT_FINDER_MODEL_DIR`) через `python scripts/download_onnx_models.py`. CPU fallback отключён, требуется GPU с CUDA. 
+Для загрузки моделей нужен `huggingface_hub` (`pip install huggingface_hub`). Поддерживаемая модель: `bge-small`.
+
+**Переменные окружения (GPU):**
+- `CONTEXT_FINDER_EMBEDDING_MODEL` — `bge-small` (default)
+- `CONTEXT_FINDER_MODEL_DIR` — корень кэша моделей (если не `~/.cache/context-finder/models`)
+- `CONTEXT_FINDER_CUDA_DEVICE` — ID GPU (int, optional, default 0)
+- `CONTEXT_FINDER_CUDA_MEM_LIMIT_MB` — лимит арены CUDA EP в мегабайтах (optional)
+- `CONTEXT_FINDER_PROFILE` — профиль правил поиска (`general` по умолчанию, можно передать `--profile targeted/venorus`)
+
+- `CONTEXT_FINDER_EMBEDDING_MODEL=bge-small` (default, 384d)
+- `ORT_LIB_LOCATION=$HOME/.cache/ort.pyke.io/dfbin/x86_64-unknown-linux-gnu/<hash>/onnxruntime/lib`
+- `LD_LIBRARY_PATH=$ORT_LIB_LOCATION:$HOME/.local/lib/python3.12/site-packages/nvidia/cublas/lib:$HOME/.local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$HOME/.local/lib/python3.12/site-packages/nvidia/curand/lib:$HOME/.local/lib/python3.12/site-packages/nvidia/cufft/lib:$HOME/.local/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/cuda/targets/x86_64-linux/lib:/usr/local/cuda/lib64`
+
 ### Использование CLI
 
 ```bash
@@ -149,6 +165,82 @@ context-finder get-context src/main.rs 42 --window 20
 context-finder list-symbols src/lib.rs
 # Output: JSON с symbols[{name, type, parent, line}]
 ```
+
+## Профили поиска и rerank
+
+- Профиль `general` (по умолчанию) усиляет `src/lib/utils/configs/tools/bench`, штрафует `tests/docs/docker/infra/vendor/logs` и задаёт пороги rerank (fuzzy ≥ 0.18, semantic ≥ 0.05), BM25 окно 210 и boosts: path 1.8, symbol 2.2, yaml 0.9, bm25 1.1.
+- Профиль `targeted/venorus` наследует `general`, добавляет must-hit для ключевых конфигов/скриптов Venorus и более агрессивные boosts (path 2.0, symbol 2.6, yaml 1.0, bm25 1.2).
+- Переключение профиля: `context-finder search "query" --profile targeted/venorus` или `CONTEXT_FINDER_PROFILE=targeted/venorus`.
+- Формат профиля (JSON/TOML): секции `paths` (boost/penalty/reject/noise + must_hit), `rerank.thresholds` (min_fuzzy_score, min_semantic_score), `rerank.bm25` (k1, b, window), `rerank.boosts` (path/symbol/yaml_path/bm25), `rerank.must_hit.base_bonus` (буст для обязателных попаданий).
+
+## ♾ Непрерывный индекс + health RPC
+
+### Watch-демон
+
+1. Запустите долгоживущий сервер, который сам индексирует изменения:
+
+   ```bash
+   context-finder serve \
+     --project /path/to/repo \
+     --bind 0.0.0.0:50051 \
+     --graph-language rust \
+     --context-depth 2
+   ```
+
+2. По умолчанию включается `StreamingIndexer`: notify-вотчер собирает события, дебаунсит бурсты и триггерит инкрементальные пересборки (<2 с для одиночного файла). Для ручного режима есть `--no-watch`.
+
+3. Параметры отклика тюнятся флагами `--watch-debounce-ms` и `--watch-max-batch-ms`. Первый задаёт дебаунс одного события, второй — максимальное ожидание перед форсированием пачки.
+
+### Health / Trigger RPC
+
+gRPC API публикует состояние цикла и алерты. Примеры (используйте `grpcurl`):
+
+```bash
+grpcurl -plaintext -d '{}' \
+  127.0.0.1:50051 contextfinder.ContextFinder/GetHealth
+```
+
+Ответ содержит:
+
+```json
+{
+  "hasWatcher": true,
+  "indexing": false,
+  "lastSuccessUnixMs": 1732031388123,
+  "lastDurationMs": 421,
+  "filesPerSecond": 5120.4,
+  "indexSizeBytes": 18765432,
+  "durationP95Ms": 560,
+  "alertLogJson": "[{\"timestamp_unix_ms\":...,\"level\":\"error\",...}]"
+}
+```
+
+`alertLogJson` — готовый JSON лог для автоматических алертов (последние 20 событий). Для ручного перезапуска индекса запустите:
+
+В CLI те же данные попадают в `meta`: `health_last_success_ms`, `health_last_failure_ms`, `health_failure_reasons`, а также размеры `index_size_bytes` и `graph_cache_size_bytes` — можно сразу понять, свежий ли индекс и прогрет ли граф.
+Дополнительно выводятся `health_p95_ms` (p95 длительности последних прогонов) и `health_failure_count` — помогает быстро увидеть деградацию индексации.
+`health_files_per_sec` и `health_stale_ms` дают throughput и «возраст» индекса; при >15 минут появится warn-hint о необходимости пересборки.
+
+```bash
+grpcurl -plaintext -d '{"reason":"nightly-regen"}' \
+  127.0.0.1:50051 contextfinder.ContextFinder/TriggerIndex
+```
+
+Команда вернёт подтверждение и поставит задачу в очередь, минуя дебаунс.
+
+#### Prometheus endpoint
+
+Для scrape без gRPC поднимите дополнительный HTTP endpoint:
+
+```bash
+context-finder serve \
+  --project /path/to/repo \
+  --metrics-bind 127.0.0.1:9100
+
+curl http://127.0.0.1:9100/metrics
+```
+
+Экспортируются gauge-метрики `contextfinder_last_index_duration_ms`, `contextfinder_files_per_second`, `contextfinder_alert_log_len` и др., поэтому Prometheus/Alertmanager могут напрямую наблюдать за задержками и сбоями.
 
 ### Использование как библиотека
 
@@ -189,7 +281,7 @@ async fn main() -> anyhow::Result<()> {
 
 ### 2. **vector-store** — Векторное хранилище
 
-- FastEmbed для точных embeddings (384d)
+- ONNX Runtime (CUDA) для embeddings (BGE/Jina, 384–1024d)
 - HNSW index для быстрого ANN search
 - Персистентность (JSON + binary)
 - Batch processing для эффективности
@@ -220,7 +312,7 @@ async fn main() -> anyhow::Result<()> {
 | Операция | Время | Примечание |
 |----------|-------|------------|
 | Chunking (10K LOC) | 50-200ms | AST parsing + metadata |
-| Embedding (1 chunk) | 5-15ms | FastEmbed (384d) |
+| Embedding (1 chunk) | 5-15ms | ONNX Runtime CUDA (BGE/Jina) |
 | Fuzzy search (100K chunks) | 1-5ms | nucleo-matcher |
 | Semantic search (100K) | 10-50ms | HNSW index |
 | Full hybrid search | 15-60ms | Fuzzy + Semantic + Fusion |
@@ -271,8 +363,34 @@ MIT OR Apache-2.0
 - [Codex CLI](https://github.com/openai/codex) — архитектурное вдохновение
 - [Tree-sitter](https://tree-sitter.github.io/) — AST parsing
 - [HNSW](https://github.com/nmslib/hnswlib) — ANN search
-- [FastEmbed](https://github.com/Anush008/fastembed-rs) — embeddings
+- [ONNX Runtime](https://onnxruntime.ai/) — GPU embeddings backend
 
 ---
 
 **Context Finder** — сделай навигацию по коду мгновенной! 🚀
+
+### Task-aware подсказки (быстрые стратегии)
+
+- **Debug (stacktrace/error/panic)** → extended + graph, reuse_graph=true. Тянет связанные вызовы/ошибки.
+- **Refactor/rename/migrate** → direct (минимум шума, точные совпадения).
+- **Navigation/architecture/overview/map** → extended (шире покрытие, можно добавить graph).
+- **Perf/latency/throughput** → deep (транзитивные связи по графу).
+
+Подсказки приходят автоматом в `hints`; выбранная стратегия отражается в `hints`/`meta`.
+
+Примеры запросов:
+- `panic stacktrace` → получите hint debug + graph paths из related (пути с типами ребер Calls/Uses/Tests, усечённые до 4 шагов).
+- `rename user_service` → hint refactor, стратегия direct, минимум шума.
+- `architecture overview` → hint navigation, выдача шире, можно добавить `show_graph=true`.
+- `latency spike payment` → hint perf, стратегия deep, graph контекст приоритетен.
+
+### CLI флаги
+- `--quiet` — только предупреждения/ошибки в stderr (stdout остаётся чистым JSON)
+- `-v/--verbose` — детальные логи в stderr
+- SLA-подсказки: при устаревшем индексе (>15 мин), высоком п95 (>2s), большом бэклоге fs-событий или низком throughput поиск выдаст warn-hints и покажет параметры в `meta`.
+
+### A/B сравнение (baseline vs context)
+
+- Команда: `context-finder command --json '{"action":"compare_search","payload":{"queries":["q1","q2"],"limit":6}}'`
+- Смотрите `data.summary` и meta: `compare_avg_baseline_ms`, `compare_avg_context_ms`, `compare_avg_overlap_ratio`, `compare_avg_related`.
+- Hints выводят краткое резюме (`Baseline avg … vs context … (+related)`), cache-hit, а также health/graph cache состояние.
