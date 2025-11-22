@@ -175,7 +175,8 @@ context-finder list-symbols src/lib.rs
 
 ## Локальный CUDA runtime (без глобальной установки)
 
-- Скачайте нужные so (onnxruntime-gpu + CUDA libs) в локальный кэш: `bash scripts/setup_cuda_deps.sh` (≈1.8–2 ГБ в `.deps/ort_cuda`, игнорируется Git).
+- Скачайте нужные so (onnxruntime-gpu + CUDA libs, включая NVRTC) в локальный кэш: `bash scripts/setup_cuda_deps.sh` (≈1.8–2 ГБ в `.deps/ort_cuda`, игнорируется Git).
+- Обёртка `scripts/run_cf_cuda.sh` выставляет ORT_STRATEGY=system и указывает ORT_LIB_LOCATION/LD_LIBRARY_PATH на `.deps/ort_cuda` (локальный ORT + CUDA). Если ругается на `libnvrtc.so.12`, обновите deps через скрипт (тянется `nvidia-cuda-nvrtc-cu12`) или докиньте so вручную.
 - Запуск с локальными либами: `scripts/run_cf_cuda.sh command --json '{"action":"search","payload":{"query":"foo","limit":3}}' --project /path/to/repo`.
 - Если на хосте нет подходящего драйвера/устройства, можно форсить CPU: `ORT_DISABLE_CUDA=1 scripts/run_cf_cuda.sh ...`.
 

@@ -8,6 +8,7 @@ ORT_VERSION="${ORT_VERSION:-1.19.0}"
 CUDA_PKGS=(
   "nvidia-cublas-cu12"
   "nvidia-cuda-runtime-cu12"
+  "nvidia-cuda-nvrtc-cu12"
   "nvidia-cudnn-cu12"
   "nvidia-cufft-cu12"
   "nvidia-curand-cu12"
@@ -111,6 +112,9 @@ PY
 
 echo "[setup_cuda_deps] final lib set:"
 ls -1 "${DEPS_DIR}"
+
+echo "[setup_cuda_deps] removing TensorRT provider (no local TensorRT runtime)"
+rm -f "${DEPS_DIR}/libonnxruntime_providers_tensorrt.so" || true
 
 rm -rf "${WHEEL_DIR}"
 echo "[setup_cuda_deps] complete"

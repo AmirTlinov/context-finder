@@ -17,6 +17,10 @@ if [[ "${ORT_DISABLE_CUDA:-0}" != "1" ]]; then
   fi
   export LD_LIBRARY_PATH="${DEPS_DIR}:${LD_LIBRARY_PATH:-}"
   export ORT_LIB_LOCATION="${DEPS_DIR}"
+  export ORT_DISABLE_TENSORRT=1
+  export ORT_STRATEGY=system
+  export ORT_USE_CUDA=1
+  export ORT_DYLIB_PATH="${DEPS_DIR}"
 else
   echo "[run_cf_cuda] ORT_DISABLE_CUDA=1 → запускаем без локальных CUDA либ" >&2
 fi
