@@ -18,3 +18,8 @@ Thumbs.db
 # Project specific
 .context-finder/
 *.json.bak
+bench/logs/
+bench/results/.current_bench
+bench/results/*.json
+!bench/results/bench_general_rerank.json
+!bench/results/bench_targeted_rerank.json
