@@ -173,6 +173,12 @@ context-finder list-symbols src/lib.rs
 - Переключение профиля: `context-finder search "query" --profile targeted/venorus` или `CONTEXT_FINDER_PROFILE=targeted/venorus`.
 - Формат профиля (JSON/TOML): секции `paths` (boost/penalty/reject/noise + must_hit), `rerank.thresholds` (min_fuzzy_score, min_semantic_score), `rerank.bm25` (k1, b, window), `rerank.boosts` (path/symbol/yaml_path/bm25), `rerank.must_hit.base_bonus` (буст для обязателных попаданий).
 
+## Локальный CUDA runtime (без глобальной установки)
+
+- Скачайте нужные so (onnxruntime-gpu + CUDA libs) в локальный кэш: `bash scripts/setup_cuda_deps.sh` (≈1.8–2 ГБ в `.deps/ort_cuda`, игнорируется Git).
+- Запуск с локальными либами: `scripts/run_cf_cuda.sh command --json '{"action":"search","payload":{"query":"foo","limit":3}}' --project /path/to/repo`.
+- Если на хосте нет подходящего драйвера/устройства, можно форсить CPU: `ORT_DISABLE_CUDA=1 scripts/run_cf_cuda.sh ...`.
+
 ## ♾ Непрерывный индекс + health RPC
 
 ### Watch-демон
