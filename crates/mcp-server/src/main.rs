@@ -8,6 +8,7 @@
 //! - `search` - Semantic code search using natural language
 //! - `context` - Search with automatic graph-based context (calls, dependencies)
 //! - `index` - Index a project directory for semantic search
+//! - `doctor` - Diagnose model/GPU/index configuration
 //!
 //! ## Usage
 //!
@@ -23,11 +24,14 @@
 //! ```
 
 use anyhow::Result;
-use rmcp::transport::stdio;
 use rmcp::ServiceExt;
 
+mod daemon;
+mod runtime_env;
+mod stdio_hybrid;
 mod tools;
 
+use stdio_hybrid::stdio_hybrid_server;
 use tools::ContextFinderService;
 
 #[tokio::main]
@@ -38,11 +42,16 @@ async fn main() -> Result<()> {
         .filter_module("ort", log::LevelFilter::Off) // Silence ONNX Runtime
         .init();
 
+    let bootstrap = runtime_env::bootstrap_best_effort();
+    for warning in &bootstrap.warnings {
+        log::warn!("{warning}");
+    }
+
     log::info!("Starting Context Finder MCP server");
 
     // Create and start the MCP server
     let service = ContextFinderService::new();
-    let server = service.serve(stdio()).await?;
+    let server = service.serve(stdio_hybrid_server()).await?;
 
     // Wait for shutdown
     server.waiting().await?;

@@ -135,7 +135,7 @@ pub enum ChunkingStrategy {
 }
 
 /// Strategy for overlapping chunks to preserve context
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum OverlapStrategy {
     /// No overlap between chunks
     None,
@@ -148,16 +148,11 @@ pub enum OverlapStrategy {
 
     /// Contextual overlap (include imports and parent scopes)
     /// Smart overlap that preserves semantic context
+    #[default]
     Contextual,
 
     /// Sliding window with specified overlap percentage (0-100)
     SlidingWindow(u8),
-}
-
-impl Default for OverlapStrategy {
-    fn default() -> Self {
-        Self::Contextual
-    }
 }
 
 #[cfg(test)]

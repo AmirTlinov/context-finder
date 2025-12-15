@@ -1,431 +1,253 @@
-# Архитектура Context Finder
+# Architecture: Context Finder
 
-## 📐 Общая структура
+## Workspace layout
 
-Context Finder построен по модульному принципу с четким разделением ответственности между компонентами:
+Context Finder is implemented as a Rust workspace with a small set of focused crates:
 
 ```
 context-finder/
 ├── crates/
-│   ├── code-chunker/      # Семантическое разбиение кода
-│   ├── vector-store/      # Векторное хранилище
-│   ├── indexer/           # Индексация проектов
-│   ├── retrieval/         # Гибридный поиск
-│   ├── cli/               # CLI интерфейс
-│   └── mcp-server/        # MCP Server для ИИ
-├── docs/                  # Документация
-├── examples/              # Примеры использования
-└── Cargo.toml            # Workspace configuration
+│   ├── code-chunker/      # AST-aware semantic chunking (tree-sitter)
+│   ├── vector-store/      # Embeddings + HNSW vector index (ONNX Runtime)
+│   ├── indexer/           # Project scanning + incremental indexing
+│   ├── search/            # Hybrid retrieval (semantic + fuzzy + fusion + rerank)
+│   ├── graph/             # Code relationship graph (calls/uses/tests/...)
+│   ├── cli/               # CLI + HTTP/gRPC servers + background daemon
+│   └── mcp-server/        # MCP server for AI-agent integration
+├── docs/                  # Documentation
+├── profiles/              # Search heuristic profiles
+└── Cargo.toml             # Workspace configuration
 ```
 
-## 🔄 Data Flow
+## Data flow
 
-### 1. Индексация проекта
+### 1) Indexing
 
 ```
    File System
         │
-        ├─► Git Repository (.gitignore aware)
+        ├─► Git repository scan (.gitignore-aware)
         │
         ▼
    ┌─────────────────┐
-   │  File Scanner   │ ──► Parallel file reading
-   └────────┬────────┘     (tokio::spawn tasks)
+   │  File Scanner   │ ──► parallel file reading (tokio tasks)
+   └────────┬────────┘
             │
             ▼
    ┌──────────────────┐
-   │  Code Chunker    │
-   │  (Tree-sitter)   │
+   │  Code Chunker    │  (tree-sitter)
    ├──────────────────┤
-   │ • Parse AST      │
-   │ • Extract funcs  │
-   │ • Add context    │
-   │ • Compute meta   │
+   │ • parse AST      │
+   │ • extract symbols│
+   │ • add context    │
+   │ • compute meta   │
    └────────┬─────────┘
             │
-            ├─────────────────┬─────────────────┐
-            ▼                 ▼                 ▼
-   ┌──────────────┐  ┌──────────────┐  ┌─────────────┐
-   │ Vector Store │  │ Fuzzy Index  │  │  Metadata   │
-   │              │  │              │  │   Store     │
-   │ Embeddings   │  │ Path index   │  │ Symbols DB  │
-   │ HNSW build   │  │ Content idx  │  │ Relations   │
-   └──────────────┘  └──────────────┘  └─────────────┘
-            │                 │                 │
-            └─────────────────┴─────────────────┘
+            ├─────────────────┬─────────────────┬──────────────────┐
+            ▼                 ▼                 ▼                  ▼
+   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+   │  Corpus      │  │ Vector Store │  │ Fuzzy Index  │  │  Code Graph  │
+   │ (chunks+meta)│  │ (HNSW)       │  │ (nucleo)     │  │ (relations)  │
+   └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘
+            │                 │                 │                  │
+            └─────────────────┴─────────────────┴──────────────────┘
                               │
                               ▼
-                      ┌──────────────┐
-                      │ Persist to   │
-                      │ Disk (.idx/) │
-                      └──────────────┘
+                      Persist to disk
+                    `.context-finder/`
 ```
 
-### 2. Поиск по проекту
+### 2) Querying
 
 ```
-   User Query: "async error handling"
+   User query: "async error handling"
         │
         ▼
    ┌─────────────────────┐
-   │  Query Processor    │
-   │  • Tokenize         │
-   │  • Normalize        │
-   │  • Extract keywords │
+   │  Query processing   │
+   │ • tokenize/normalize│
+   │ • classify intent   │
    └─────────┬───────────┘
              │
-             ├──────────────────────┬──────────────────┐
-             ▼                      ▼                  ▼
-    ┌────────────────┐    ┌──────────────────┐  ┌────────────┐
-    │  Fuzzy Search  │    │ Semantic Search  │  │  Metadata  │
-    │   (nucleo)     │    │  (embeddings)    │  │   Filter   │
-    ├────────────────┤    ├──────────────────┤  ├────────────┤
-    │ • Path match   │    │ • Query vector   │  │ • Lang     │
-    │ • Content fuzz │    │ • HNSW search    │  │ • Type     │
-    │ • Rank by sim  │    │ • Cosine sim     │  │ • Scope    │
-    └───────┬────────┘    └────────┬─────────┘  └──────┬─────┘
-            │                      │                    │
-            └──────────┬───────────┴────────────────────┘
+             ├──────────────────────┬──────────────────────┐
+             ▼                      ▼                      ▼
+    ┌────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+    │  Fuzzy search  │    │ Semantic search  │    │ Profile heuristics│
+    │ (paths/text)   │    │ (embeddings)     │    │ (boosts/filters) │
+    └───────┬────────┘    └────────┬─────────┘    └────────┬────────┘
+            │                      │                        │
+            └──────────┬───────────┴────────────────────────┘
                        │
                        ▼
               ┌─────────────────┐
-              │  Fusion Engine  │
-              │   (RRF/Hybrid)  │
-              ├─────────────────┤
-              │ RRF formula:    │
-              │ score = Σ 1/    │
-              │   (k + rank_i)  │
-              │                 │
-              │ Weights:        │
-              │ • Fuzzy: 0.3    │
-              │ • Semantic: 0.7 │
+              │ Fusion + rerank │
+              │  (RRF + boosts) │
               └────────┬────────┘
                        │
                        ▼
-              ┌─────────────────┐
-              │   Reranker      │
-              │  (Contextual)   │
-              ├─────────────────┤
-              │ • Boost by meta │
-              │ • Recent edits  │
-              │ • Importance    │
-              └────────┬────────┘
-                       │
-                       ▼
-              ┌─────────────────┐
-              │ Final Results   │
-              │ [ {chunk, score,│
-              │    metadata} ]  │
-              └─────────────────┘
+            ┌────────────────────────┐
+            │ Results / context pack │
+            │ (primary + related)    │
+            └────────────────────────┘
 ```
 
-## 🧩 Компоненты подробно
+## Components
 
-### Code Chunker
+### Code Chunker (`crates/code-chunker`)
 
-**Ответственность:** Разбиение кода на семантически значимые фрагменты
+Responsibility: split source files into semantically meaningful chunks and enrich them with metadata used by retrieval and routing.
 
-**Технологии:**
-- Tree-sitter для AST parsing
-- Language detection по расширениям
-- Metadata extraction (symbols, types, imports)
+Chunking strategies (see `ChunkingStrategy`):
 
-**Стратегии chunking:**
 ```rust
 enum ChunkingStrategy {
-    Semantic,        // По границам функций/классов (AST)
-    LineCount,       // Фиксированное число строк
-    TokenAware,      # По токенам с учетом синтаксиса
-    Hierarchical,    // Иерархический (parent + children)
+    Semantic,     // AST boundaries (functions, classes, etc.)
+    LineCount,    // fixed line count (fast)
+    TokenAware,   // token-based, syntax-aware
+    Hierarchical, // parent context + focused element
 }
 ```
 
-**Output:**
-```rust
-CodeChunk {
-    file_path: String,
-    start_line: usize,
-    end_line: usize,
-    content: String,
-    metadata: ChunkMetadata {
-        language: "rust",
-        chunk_type: Function,
-        symbol_name: "process_data",
-        parent_scope: Some("DataProcessor"),
-        imports: vec!["std::io", "serde::Deserialize"],
-        estimated_tokens: 245,
-    }
-}
-```
+Presets (see `ChunkerConfig`):
 
-### Vector Store
+- `ChunkerConfig::for_speed()`
+- `ChunkerConfig::for_embeddings()`
+- `ChunkerConfig::for_llm_context()`
 
-**Ответственность:** Векторизация и индексация для семантического поиска
+### Vector Store (`crates/vector-store`)
 
-**Pipeline:**
-```
-Content → Embedding Model → Vector[384] → HNSW Index → Disk
-```
+Responsibility: embed chunks and build/load a vector index for fast semantic retrieval.
 
-**Технологии:**
-- **FastEmbed**: Быстрые CPU embeddings (всего ~50MB памяти)
-- **HNSW**: Hierarchical Navigable Small World graphs для ANN
-- **Persistence**: JSON для metadata + binary для vectors
+Key points:
 
-**Performance:**
-- Embedding: 5-15ms per chunk (batch: 2-5ms per chunk)
-- Index build: O(n log n) для n chunks
-- Search: O(log n) с ~50-100 hops
-- Memory: ~1KB per chunk + embeddings
+- Embeddings are computed via ONNX Runtime (CUDA by default).
+- CPU fallback is allowed only when `CONTEXT_FINDER_ALLOW_CPU=1`.
+- Index is stored per model id under `.context-finder/indexes/<model_id>/`.
 
-### Retrieval System
+### Search (`crates/search`)
 
-**Ответственность:** Гибридный поиск с fusion и reranking
+Responsibility: hybrid retrieval + fusion + reranking.
 
-**Multi-stage pipeline:**
+- Fuzzy search: fast path/content matching.
+- Semantic search: embedding similarity (HNSW).
+- Fusion: reciprocal rank fusion (RRF).
+- Rerank: profile-driven boosts and thresholds.
 
-**Stage 1: Candidate Retrieval**
-```
-Fuzzy (Top 50) + Semantic (Top 50) → Pool of 100 candidates
-```
+Profiles (`profiles/*.json`) are the primary way to tune behavior (routing, boosts, must-hit rules, rerank thresholds, embedding templates).
 
-**Stage 2: Fusion (RRF)**
-```python
-def reciprocal_rank_fusion(rankings, k=60):
-    scores = defaultdict(float)
-    for rank_list in rankings:
-        for rank, item in enumerate(rank_list):
-            scores[item] += 1 / (k + rank + 1)
-    return sorted(scores.items(), key=lambda x: -x[1])
-```
+### Graph (`crates/graph`)
 
-**Stage 3: Reranking**
-```
-• Boost recent edits (git blame)
-• Boost by importance (references count)
-• Boost by type (function > variable)
-• Contextual similarity (cross-encoder optional)
-```
+Responsibility: build a code relationship graph (calls, uses, tests, imports, etc.) and support graph-aware context assembly.
 
-**Strategies:**
-```rust
-enum FusionStrategy {
-    ReciprocalRank,   // RRF (default)
-    WeightedScore,    // Linear combination
-    MaxScore,         // Best score wins
-    SemanticOnly,     // Pure embeddings
-    FuzzyOnly,        // Pure lexical
-}
-```
+Used by:
 
-### Indexer
+- `search_with_context` / `context` (attach related chunks)
+- `context_pack` / `context-pack` (bounded output under a character budget)
 
-**Ответственность:** Сканирование и индексация проектов
+### Indexer (`crates/indexer`)
 
-**Features:**
-- Параллельная обработка (rayon/tokio)
-- .gitignore aware (через `ignore` crate)
-- Инкрементальные обновления (inotify/FSEvents)
-- Progress tracking (indicatif)
+Responsibility: scan projects, (re)build indexes, and support incremental updates.
 
-**Index structure:**
+Key points:
+
+- `.gitignore`-aware scanning (crate `ignore`).
+- Incremental rebuild via mtimes snapshot + file watcher.
+- Persists a health snapshot to `.context-finder/health.json`.
+
+### CLI (`crates/cli`)
+
+Responsibility: user-facing interface and service modes.
+
+Notable commands:
+
+- Search/index: `index`, `search`, `context`, `context-pack`, `map`, `list-symbols`
+- Ops: `install-models`, `doctor`
+- Evaluation: `eval`, `eval-compare`
+- JSON API: `command`, `serve-http`, `serve-grpc`
+- Daemon: `daemon-loop` (keeps indexes warm)
+
+### MCP server (`crates/mcp-server`)
+
+Responsibility: expose Context Finder capabilities as MCP tools for AI-agent integrations.
+
+Transport:
+
+- stdio JSON-RPC with `Content-Length` framing
+
+For the tool list and examples, see `README.md`.
+
+## On-disk layout (per project)
+
 ```
 .context-finder/
-├── chunks.json         # Metadata
-├── vectors.bin         # HNSW index
-├── fuzzy.idx          # Fuzzy index
-└── stats.json         # Statistics
+├── corpus.json                     # chunk corpus (text + metadata)
+├── indexes/
+│   └── <model_id>/
+│       ├── index.json              # vector store index
+│       ├── meta.json               # store metadata (mode/templates/dimension)
+│       └── mtimes.json             # incremental mtimes snapshot
+├── graph_cache.json                # cached code graph (optional)
+├── health.json                     # indexer health snapshot
+├── config.json                     # per-project config (optional)
+├── profiles/                       # per-project profiles (optional)
+└── cache/                          # compare_search and heavy-op caches
 ```
 
-### CLI
+## Configuration
 
-**Ответственность:** Пользовательский интерфейс
+### Runtime defaults
 
-**Commands:**
-```bash
-context-finder index <path>              # Index project
-context-finder search <query>            # Search
-context-finder reindex                   # Rebuild index
-context-finder stats                     # Show statistics
-context-finder interactive               # TUI mode
-context-finder export --format json      # Export results
-```
+- Models: installed into `./models/` by default (`models/manifest.json` is the source of truth).
+- GPU: CUDA by default; no silent CPU fallback.
+- Deterministic tests: `CONTEXT_FINDER_EMBEDDING_MODE=stub`.
 
-**TUI Features:**
-- Live search with debouncing
-- File preview with syntax highlighting
-- Keyboard navigation
-- Multi-select for bulk operations
+### Tuning knobs
 
-### MCP Server
+The project prefers "configuration at the edges" over hard-coded constants:
 
-**Ответственность:** Интеграция с ИИ-моделями через MCP
+- Chunking behavior: `ChunkerConfig` (see `crates/code-chunker/src/config.rs`).
+- Retrieval/rerank behavior: `SearchProfile` in `profiles/*.json` (see `profiles/general.json` for a full example).
+- Per-project overrides: `.context-finder/config.json` and `.context-finder/profiles/`.
 
-**Protocol:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/list",
-  "result": {
-    "tools": [
-      {
-        "name": "search_codebase",
-        "description": "Search for code semantically",
-        "inputSchema": { ... }
-      },
-      {
-        "name": "get_chunk",
-        "description": "Get specific chunk by ID",
-        "inputSchema": { ... }
-      }
-    ]
-  }
-}
-```
-
-**Endpoints:**
-- `search_codebase(query, limit)` → SearchResults
-- `get_chunk(id)` → CodeChunk
-- `get_context(file, line)` → Context
-- `list_symbols(file)` → Symbols[]
-
-## 🎛️ Конфигурация
-
-### Performance Presets
-
-```rust
-// Для максимальной скорости
-ChunkerConfig::for_speed()
-RetrievalConfig::fast()
-
-// Для максимальной точности
-ChunkerConfig::for_llm_context()
-RetrievalConfig::accurate()
-
-// Для embeddings (баланс)
-ChunkerConfig::for_embeddings()
-RetrievalConfig::default()
-```
-
-### Tunable Parameters
-
-| Parameter | Default | Range | Impact |
-|-----------|---------|-------|--------|
-| `target_chunk_tokens` | 512 | 128-2048 | Chunk size |
-| `candidate_pool_size` | 50 | 10-200 | Recall vs speed |
-| `semantic_weight` | 0.7 | 0.0-1.0 | Semantic vs fuzzy |
-| `rrf_k` | 60 | 10-100 | Fusion sensitivity |
-| `cache_size` | 100 | 0-1000 | Memory vs speed |
-
-## 🔬 Алгоритмы
+## Algorithms
 
 ### Reciprocal Rank Fusion (RRF)
 
+RRF merges multiple ranked lists without requiring score normalization.
+
 ```
-Вход: Rankings R1, R2, ..., Rm (по n элементов каждый)
-Параметр: k (обычно 60)
+Inputs: rankings R1..Rm, parameter k (commonly 60)
 
-Для каждого элемента d:
-    score(d) = Σ(i=1 to m) 1 / (k + rank_i(d))
+For each document d:
+  score(d) = Σ(i=1..m) 1 / (k + rank_i(d))
 
-где rank_i(d) — позиция элемента d в рейтинге R_i
-(если d отсутствует в R_i, то rank_i(d) = ∞)
-
-Выход: Элементы, отсортированные по убыванию score(d)
+Output: documents sorted by descending score(d)
 ```
-
-**Преимущества:**
-- Робастность к outliers
-- Не требует нормализации скоров
-- Хорошо работает с разнородными источниками
 
 ### HNSW (Hierarchical Navigable Small World)
 
-```
-Построение индекса:
-1. Создать слои графа (Level 0, 1, 2, ...)
-2. Для каждого вектора v:
-   - Выбрать layer_level случайно (exponential decay)
-   - Вставить в графы уровней 0..layer_level
-   - Связать с M ближайшими соседями на каждом уровне
+HNSW is an approximate nearest neighbor (ANN) structure:
 
-Поиск:
-1. Начать с entry point на верхнем уровне
-2. Жадно двигаться к ближайшим соседям
-3. При достижении локального минимума — спуститься ниже
-4. На Level 0 — собрать ef ближайших
-5. Вернуть top-k из ef
-```
+- Index build inserts vectors into a layered small-world graph.
+- Query starts at the top layer and greedily descends to refine the candidate set.
+- Final top-k comes from the bottom layer neighborhood search.
 
-**Параметры:**
-- M = 16 (connections per node)
-- ef_construction = 200 (build quality)
-- ef_search = 50 (search quality)
+### Graph-based context assembly
 
-## 💡 Дизайн-решения
+Graph-aware modes expand primary hits with "related" chunks:
 
-### Почему гибридный поиск?
+- Calls and callees
+- Imports and dependencies
+- Tests that exercise a symbol
 
-| Scenario | Fuzzy | Semantic | Hybrid |
-|----------|-------|----------|--------|
-| "getUserById" (exact name) | ✅ Perfect | ❌ Partial | ✅ Perfect |
-| "error handling pattern" | ❌ Poor | ✅ Good | ✅ Excellent |
-| "auth middleware" (concept) | 🟡 OK | ✅ Great | ✅ Great |
-| Typos: "usre" → "user" | ✅ Good | ❌ Bad | ✅ Good |
+`context-pack` bounds the output size via a character budget (`max_chars`) and caps the per-primary halo (`max_related_per_primary`).
 
-**Вывод:** Hybrid даёт лучшее из обоих миров
+## Limitations and trade-offs
 
-### Почему Tree-sitter?
+| Aspect | Trade-off | Mitigation |
+|--------|-----------|------------|
+| Memory | vector index + corpus can be large | shard via multiple models/profiles; prefer incremental indexing |
+| Cold start | initial index build cost | keep `.context-finder/` cached; use daemon-loop |
+| Language support | depends on tree-sitter grammars | fall back to non-AST modes where needed |
+| Real-time updates | watcher has debounce/latency | acceptable for dev; run `index --force` when needed |
 
-| Alternative | Pros | Cons |
-|-------------|------|------|
-| regex | Fast, simple | Breaks on edge cases |
-| LSP | Accurate, rich | Slow, heavy, language-specific |
-| Tree-sitter | Fast, accurate, multi-lang | Needs grammars |
-
-**Выбор:** Tree-sitter для баланса скорости и точности
-
-### Почему RRF?
-
-| Method | Pros | Cons |
-|--------|------|------|
-| Weighted sum | Simple | Needs normalization |
-| Max score | Fast | Ignores other signals |
-| RRF | Robust, no normalization | Slight overhead |
-
-**Выбор:** RRF как золотой стандарт в IR research
-
-## 📈 Масштабирование
-
-### Большие проекты (>1M LOC)
-
-**Стратегии:**
-1. **Sharding**: Разбить индекс по модулям
-2. **Incremental**: Обновлять только изменённые файлы
-3. **Lazy loading**: Подгружать vectors по требованию
-4. **Compression**: Quantize embeddings (384d → 192d)
-
-### Распределённая индексация
-
-```
-Master Node
-    ├─► Worker 1: src/module_a/
-    ├─► Worker 2: src/module_b/
-    └─► Worker 3: tests/
-
-Results → Merge → Final Index
-```
-
-## 🛡️ Ограничения и trade-offs
-
-| Аспект | Ограничение | Workaround |
-|--------|-------------|------------|
-| Memory | ~1KB per chunk | Shard large projects |
-| Embedding speed | CPU-bound | Batch operations, GPU option |
-| Language support | Tree-sitter only | Fallback to regex |
-| Real-time updates | Debounce 500ms | Acceptable for dev |
-| Cold start | Index build ~10s per 100K LOC | Cache, incremental |
-
----
-
-**Context Finder** — архитектура для flagship-level производительности 🏗️

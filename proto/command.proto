@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package command;
+
+message CommandPayload {
+  // JSON-оригинал CommandRequest в UTF-8
+  bytes json = 1;
+}
+
+message CommandReply {
+  // JSON-ответ CommandResponse в UTF-8
+  bytes json = 1;
+}
+
+message HealthRequest {
+  // путь к проекту (по умолчанию current working dir)
+  string project = 1;
+}
+
+message HealthReply {
+  string status = 1;
+  uint64 last_success_unix_ms = 2;
+  uint64 last_failure_unix_ms = 3;
+  repeated string failures = 4;
+  uint64 index_size_bytes = 5;
+  uint64 graph_cache_size_bytes = 6;
+  string last_failure_reason = 7;
+}
+
+service CommandService {
+  rpc Execute(CommandPayload) returns (CommandReply);
+  rpc Health(HealthRequest) returns (HealthReply);
+}

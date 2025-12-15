@@ -74,6 +74,35 @@ impl QueryExpander {
                 .collect(),
         );
 
+        // Workspace/monorepo
+        synonyms.insert(
+            "workspace".to_string(),
+            vec!["workspaces", "monorepo", "pnpm-workspace", "repo graph"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        );
+        synonyms.insert(
+            "pnpm".to_string(),
+            vec!["pnpm-workspace", "workspace", "monorepo"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        );
+        synonyms.insert(
+            "layout".to_string(),
+            vec![
+                "workspace layout",
+                "structure",
+                "workspace structure",
+                "pnpm-workspace",
+                "pnpm-workspace.yaml",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        );
+
         // Code structure
         synonyms.insert(
             "function".to_string(),
@@ -121,6 +150,13 @@ impl QueryExpander {
                 .map(String::from)
                 .collect(),
         );
+        synonyms.insert(
+            "helper".to_string(),
+            vec!["utility", "utils", "helper function", "support"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        );
 
         // Fuzzy/string matching
         synonyms.insert(
@@ -135,7 +171,7 @@ impl QueryExpander {
     }
 
     /// Expand query with synonyms and variants
-    #[must_use] 
+    #[must_use]
     pub fn expand(&self, query: &str) -> Vec<String> {
         let mut expansions = vec![query.to_string()];
 
@@ -220,7 +256,7 @@ impl QueryExpander {
 
     /// Expand query and create weighted query string
     /// Format: "term1 term2 synonym1 synonym2..."
-    #[must_use] 
+    #[must_use]
     pub fn expand_to_query(&self, query: &str) -> String {
         let expansions = self.expand(query);
         expansions.join(" ")

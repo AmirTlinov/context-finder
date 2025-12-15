@@ -2,20 +2,33 @@
 //!
 //! Provides semantic code search capabilities to AI agents via MCP protocol.
 
+use crate::runtime_env;
 use anyhow::{Context as AnyhowContext, Result};
-use context_graph::{GraphBuilder, GraphLanguage};
-use context_search::{ContextSearch, HybridSearch, SearchProfile};
-use context_vector_store::VectorStore;
+use context_code_chunker::{Chunker, ChunkerConfig};
+use context_graph::{
+    build_graph_docs, CodeGraph, ContextAssembler, GraphDocConfig, GraphEdge, GraphLanguage,
+    GraphNode, RelationshipType, Symbol, GRAPH_DOC_VERSION,
+};
+use context_indexer::FileScanner;
+use context_search::{
+    ContextPackBudget, ContextPackItem, ContextPackOutput, MultiModelContextSearch,
+    MultiModelHybridSearch, QueryClassifier, QueryType, SearchProfile, CONTEXT_PACK_VERSION,
+};
+use context_vector_store::{
+    corpus_path_for_project_root, current_model_id, ChunkCorpus, GraphNodeDoc, GraphNodeStore,
+    GraphNodeStoreMeta, QueryKind, VectorIndex,
+};
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{
-    CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo,
-};
+use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::schemars;
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 
 /// Context Finder MCP Service
 #[derive(Clone)]
@@ -24,22 +37,54 @@ pub struct ContextFinderService {
     profile: SearchProfile,
     /// Tool router
     tool_router: ToolRouter<Self>,
+    /// Shared cache state (per-process)
+    state: Arc<ServiceState>,
 }
 
 impl ContextFinderService {
     pub fn new() -> Self {
         Self {
-            profile: SearchProfile::general(),
+            profile: load_profile_from_env(),
             tool_router: Self::tool_router(),
+            state: Arc::new(ServiceState::new()),
         }
     }
+}
+
+fn load_profile_from_env() -> SearchProfile {
+    let profile_name = std::env::var("CONTEXT_FINDER_PROFILE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "quality".to_string());
+
+    if let Some(profile) = SearchProfile::builtin(&profile_name) {
+        return profile;
+    }
+
+    let candidate_path = PathBuf::from(&profile_name);
+    if candidate_path.exists() {
+        match SearchProfile::from_file(&profile_name, &candidate_path) {
+            Ok(profile) => return profile,
+            Err(err) => {
+                log::warn!(
+                    "Failed to load profile from {}: {err:#}; falling back to builtin 'quality'",
+                    candidate_path.display()
+                );
+            }
+        }
+    } else {
+        log::warn!("Unknown profile '{profile_name}', falling back to builtin 'quality'");
+    }
+
+    SearchProfile::builtin("quality").unwrap_or_else(SearchProfile::general)
 }
 
 #[tool_handler]
 impl ServerHandler for ContextFinderService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("Context Finder provides semantic code search for AI agents. Use 'map' to explore project structure, 'search' for semantic queries, 'context' for search with related code, and 'index' to index new projects.".into()),
+            instructions: Some("Context Finder provides semantic code search for AI agents. Use 'map' to explore project structure, 'search' for semantic queries, 'context' for search with related code, 'index' to index new projects, and 'doctor' to diagnose model/GPU/index configuration.".into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation::from_build_env(),
             ..Default::default()
@@ -48,34 +93,722 @@ impl ServerHandler for ContextFinderService {
 }
 
 impl ContextFinderService {
-    /// Get canonical path and index path, checking if index exists
-    fn resolve_project(path: &PathBuf) -> Result<(PathBuf, PathBuf)> {
-        let canonical = path.canonicalize().context("Invalid project path")?;
-        let index_path = canonical.join(".context-finder/index.json");
-        if !index_path.exists() {
-            anyhow::bail!(
-                "Index not found at {}. Run 'context-finder index' first.",
-                index_path.display()
-            );
+    async fn load_chunk_corpus(root: &Path) -> Result<Option<ChunkCorpus>> {
+        let path = corpus_path_for_project_root(root);
+        if !path.exists() {
+            return Ok(None);
         }
-        Ok((canonical, index_path))
+        Ok(Some(ChunkCorpus::load(&path).await.with_context(|| {
+            format!("Failed to load chunk corpus {}", path.display())
+        })?))
     }
 
-    /// Load store and chunks from index path
-    async fn load_store(index_path: &PathBuf) -> Result<(VectorStore, Vec<context_code_chunker::CodeChunk>)> {
-        let store = VectorStore::load(index_path)
-            .await
-            .context("Failed to load vector store")?;
+    async fn lock_engine(&self, root: &Path) -> Result<EngineLock> {
+        self.touch_daemon_best_effort(root);
 
-        let mut chunks = Vec::new();
-        for id in store.chunk_ids() {
-            if let Some(stored) = store.get_chunk(&id) {
-                chunks.push(stored.chunk.clone());
+        let handle = self.state.engine_handle(root).await;
+        let mut slot = handle.lock_owned().await;
+
+        let signature = compute_engine_signature(root, &self.profile).await?;
+        let needs_rebuild = match slot.engine.as_ref() {
+            Some(engine) => engine.signature != signature,
+            None => true,
+        };
+        if needs_rebuild {
+            slot.engine = None;
+            slot.engine = Some(build_project_engine(root, &self.profile, signature).await?);
+        }
+
+        Ok(EngineLock { slot })
+    }
+
+    fn touch_daemon_best_effort(&self, root: &Path) {
+        let root = root.to_path_buf();
+        tokio::spawn(async move {
+            if let Err(err) = crate::daemon::touch(&root).await {
+                log::debug!("daemon touch failed: {err:#}");
+            }
+        });
+    }
+
+    async fn auto_index_project(&self, root: &Path) -> Result<()> {
+        let templates = self.profile.embedding().clone();
+        let indexer =
+            context_indexer::ProjectIndexer::new_with_embedding_templates(root, templates).await?;
+        match indexer.index().await {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                log::warn!("Auto-index failed, retrying full: {err:#}");
+                indexer.index_full().await?;
+                Ok(())
+            }
+        }
+    }
+}
+
+fn model_id_dir_name(model_id: &str) -> String {
+    model_id
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c,
+            _ => '_',
+        })
+        .collect()
+}
+
+fn graph_nodes_store_path(root: &Path) -> PathBuf {
+    let model_id = current_model_id().unwrap_or_else(|_| "bge-small".to_string());
+    root.join(".context-finder")
+        .join("indexes")
+        .join(model_id_dir_name(&model_id))
+        .join("graph_nodes.json")
+}
+
+fn index_path_for_model(root: &Path, model_id: &str) -> PathBuf {
+    root.join(".context-finder")
+        .join("indexes")
+        .join(model_id_dir_name(model_id))
+        .join("index.json")
+}
+
+fn semantic_model_roster(profile: &SearchProfile) -> Vec<String> {
+    let experts = profile.experts();
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for kind in [
+        QueryKind::Identifier,
+        QueryKind::Path,
+        QueryKind::Conceptual,
+    ] {
+        for model_id in experts.semantic_models(kind) {
+            if seen.insert(model_id.clone()) {
+                out.push(model_id.clone());
+            }
+        }
+    }
+
+    out
+}
+
+async fn load_semantic_indexes(
+    root: &Path,
+    profile: &SearchProfile,
+) -> Result<Vec<(String, VectorIndex)>> {
+    let default_model_id = current_model_id().unwrap_or_else(|_| "bge-small".to_string());
+
+    let mut requested: Vec<String> = Vec::new();
+    requested.push(default_model_id.clone());
+    requested.extend(semantic_model_roster(profile));
+
+    let mut sources = Vec::new();
+    let mut seen = HashSet::new();
+    for model_id in requested {
+        if !seen.insert(model_id.clone()) {
+            continue;
+        }
+        let path = index_path_for_model(root, &model_id);
+        if !path.exists() {
+            continue;
+        }
+        let index = VectorIndex::load(&path)
+            .await
+            .with_context(|| format!("Failed to load index {}", path.display()))?;
+        sources.push((model_id, index));
+    }
+
+    if sources.is_empty() {
+        anyhow::bail!("No semantic indices available (run 'context-finder index' first)");
+    }
+
+    Ok(sources)
+}
+
+fn build_chunk_lookup(chunks: &[context_code_chunker::CodeChunk]) -> HashMap<String, usize> {
+    let mut lookup = HashMap::new();
+    for (idx, chunk) in chunks.iter().enumerate() {
+        lookup.insert(
+            format!(
+                "{}:{}:{}",
+                chunk.file_path, chunk.start_line, chunk.end_line
+            ),
+            idx,
+        );
+    }
+    lookup
+}
+
+fn unix_ms(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn normalize_relative_path(root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let rel = rel.to_string_lossy().into_owned();
+    Some(rel.replace('\\', "/"))
+}
+
+fn chunker_config_for_map() -> ChunkerConfig {
+    ChunkerConfig {
+        strategy: context_code_chunker::ChunkingStrategy::Semantic,
+        overlap: context_code_chunker::OverlapStrategy::None,
+        target_chunk_tokens: 768,
+        max_chunk_tokens: 2048,
+        min_chunk_tokens: 0,
+        include_imports: false,
+        include_parent_context: false,
+        include_documentation: false,
+        max_imports_per_chunk: 0,
+        supported_languages: vec![],
+    }
+}
+
+fn absorb_chunk_for_map(
+    tree_files: &mut HashMap<String, HashSet<String>>,
+    tree_chunks: &mut HashMap<String, usize>,
+    tree_symbols: &mut HashMap<String, Vec<String>>,
+    total_lines: &mut usize,
+    total_chunks: &mut usize,
+    depth: usize,
+    chunk: &context_code_chunker::CodeChunk,
+) {
+    let parts: Vec<&str> = chunk.file_path.split('/').collect();
+    let key = parts
+        .iter()
+        .take(depth)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("/");
+
+    tree_files
+        .entry(key.clone())
+        .or_default()
+        .insert(chunk.file_path.clone());
+    *tree_chunks.entry(key.clone()).or_insert(0) += 1;
+    *total_chunks += 1;
+    *total_lines += chunk.content.lines().count().max(1);
+
+    if let Some(sym) = &chunk.metadata.symbol_name {
+        let sym_type = chunk
+            .metadata
+            .chunk_type
+            .map(|ct| ct.as_str())
+            .unwrap_or("symbol");
+        tree_symbols
+            .entry(key)
+            .or_default()
+            .push(format!("{} {}", sym_type, sym));
+    }
+}
+
+async fn compute_map_result(root: &Path, depth: usize, limit: usize) -> Result<MapResult> {
+    // Aggregate by directory
+    let mut tree_files: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut tree_chunks: HashMap<String, usize> = HashMap::new();
+    let mut tree_symbols: HashMap<String, Vec<String>> = HashMap::new();
+    let mut total_lines = 0usize;
+    let mut total_chunks = 0usize;
+
+    match ContextFinderService::load_chunk_corpus(root).await? {
+        Some(corpus) => {
+            for chunks in corpus.files().values() {
+                for chunk in chunks {
+                    absorb_chunk_for_map(
+                        &mut tree_files,
+                        &mut tree_chunks,
+                        &mut tree_symbols,
+                        &mut total_lines,
+                        &mut total_chunks,
+                        depth,
+                        chunk,
+                    );
+                }
+            }
+        }
+        None => {
+            let scanner = FileScanner::new(root);
+            let files = scanner.scan();
+            let chunker = Chunker::new(chunker_config_for_map());
+
+            for file in files {
+                let Some(rel_path) = normalize_relative_path(root, &file) else {
+                    continue;
+                };
+
+                let parts: Vec<&str> = rel_path.split('/').collect();
+                let key = parts
+                    .iter()
+                    .take(depth)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("/");
+                tree_files.entry(key).or_default().insert(rel_path.clone());
+
+                let content = match tokio::fs::read_to_string(&file).await {
+                    Ok(content) => content,
+                    Err(err) => {
+                        log::debug!("Skipping unreadable file {}: {err}", file.display());
+                        continue;
+                    }
+                };
+                if content.trim().is_empty() {
+                    continue;
+                }
+
+                let chunks = match chunker.chunk_str(&content, Some(&rel_path)) {
+                    Ok(chunks) => chunks,
+                    Err(err) => {
+                        log::debug!("Skipping unchunkable file {rel_path}: {err}");
+                        continue;
+                    }
+                };
+
+                for chunk in &chunks {
+                    absorb_chunk_for_map(
+                        &mut tree_files,
+                        &mut tree_chunks,
+                        &mut tree_symbols,
+                        &mut total_lines,
+                        &mut total_chunks,
+                        depth,
+                        chunk,
+                    );
+                }
+            }
+        }
+    }
+
+    let total_files: usize = tree_files.values().map(|s| s.len()).sum();
+
+    let mut directories: Vec<DirectoryInfo> = tree_chunks
+        .into_iter()
+        .map(|(path, chunks)| {
+            let files = tree_files.get(&path).map(|s| s.len()).unwrap_or(0);
+            let coverage_pct = if total_chunks > 0 {
+                chunks as f32 / total_chunks as f32 * 100.0
+            } else {
+                0.0
+            };
+            let top_symbols: Vec<String> = tree_symbols
+                .get(&path)
+                .map(|v| v.iter().take(5).cloned().collect())
+                .unwrap_or_default();
+
+            DirectoryInfo {
+                path,
+                files,
+                chunks,
+                coverage_pct,
+                top_symbols,
+            }
+        })
+        .collect();
+
+    directories.sort_by(|a, b| b.chunks.cmp(&a.chunks));
+    directories.truncate(limit);
+
+    Ok(MapResult {
+        total_files,
+        total_chunks,
+        total_lines,
+        directories,
+    })
+}
+
+// ============================================================================
+// MCP Engine Cache (per-project, long-lived)
+// ============================================================================
+
+const ENGINE_CACHE_CAPACITY: usize = 4;
+
+type EngineHandle = Arc<Mutex<EngineSlot>>;
+
+struct ServiceState {
+    engines: Mutex<EngineCache>,
+}
+
+impl ServiceState {
+    fn new() -> Self {
+        Self {
+            engines: Mutex::new(EngineCache::new(ENGINE_CACHE_CAPACITY)),
+        }
+    }
+
+    async fn engine_handle(&self, root: &Path) -> EngineHandle {
+        let mut cache = self.engines.lock().await;
+        cache.get_or_insert(root.to_path_buf())
+    }
+}
+
+struct EngineCache {
+    capacity: usize,
+    entries: HashMap<PathBuf, EngineHandle>,
+    order: VecDeque<PathBuf>,
+}
+
+impl EngineCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn get_or_insert(&mut self, root: PathBuf) -> EngineHandle {
+        if let Some(handle) = self.entries.get(&root).cloned() {
+            self.touch(&root);
+            return handle;
+        }
+
+        let handle = Arc::new(Mutex::new(EngineSlot { engine: None }));
+        self.entries.insert(root.clone(), handle.clone());
+        self.touch(&root);
+
+        while self.entries.len() > self.capacity {
+            let Some(evict_root) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&evict_root);
+        }
+
+        handle
+    }
+
+    fn touch(&mut self, root: &PathBuf) {
+        if let Some(pos) = self.order.iter().position(|p| p == root) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(root.clone());
+    }
+}
+
+struct EngineSlot {
+    engine: Option<ProjectEngine>,
+}
+
+struct EngineLock {
+    slot: tokio::sync::OwnedMutexGuard<EngineSlot>,
+}
+
+impl EngineLock {
+    fn engine_mut(&mut self) -> &mut ProjectEngine {
+        self.slot.engine.as_mut().expect("engine must be available")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EngineSignature {
+    corpus_mtime_ms: Option<u64>,
+    index_mtimes_ms: Vec<(String, Option<u64>)>,
+}
+
+struct ProjectEngine {
+    signature: EngineSignature,
+    root: PathBuf,
+    context_search: MultiModelContextSearch,
+    chunk_lookup: HashMap<String, usize>,
+    available_models: Vec<String>,
+    canonical_index_mtime: SystemTime,
+    graph_language: Option<GraphLanguage>,
+}
+
+impl ProjectEngine {
+    async fn ensure_graph(&mut self, language: GraphLanguage) -> Result<()> {
+        if self.graph_language == Some(language) && self.context_search.assembler().is_some() {
+            return Ok(());
+        }
+
+        let cache = GraphCache::new(&self.root);
+        match cache
+            .load(
+                self.canonical_index_mtime,
+                language,
+                self.context_search.hybrid().chunks(),
+                &self.chunk_lookup,
+            )
+            .await
+        {
+            Ok(Some(assembler)) => {
+                self.context_search.set_assembler(assembler);
+                self.graph_language = Some(language);
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(err) => log::warn!("Graph cache load error: {err:#}"),
+        }
+
+        self.context_search.build_graph(language)?;
+        self.graph_language = Some(language);
+
+        if let Some(assembler) = self.context_search.assembler() {
+            if let Err(err) = cache
+                .save(self.canonical_index_mtime, language, assembler)
+                .await
+            {
+                log::warn!("Graph cache save error: {err:#}");
             }
         }
 
-        Ok((store, chunks))
+        Ok(())
     }
+}
+
+#[derive(Clone)]
+struct GraphCache {
+    path: PathBuf,
+}
+
+impl GraphCache {
+    fn new(project_root: &Path) -> Self {
+        Self {
+            path: project_root
+                .join(".context-finder")
+                .join("graph_cache.json"),
+        }
+    }
+
+    async fn load(
+        &self,
+        store_mtime: SystemTime,
+        language: GraphLanguage,
+        chunks: &[context_code_chunker::CodeChunk],
+        chunk_index: &HashMap<String, usize>,
+    ) -> Result<Option<ContextAssembler>> {
+        if !self.path.exists() {
+            return Ok(None);
+        }
+
+        let data = match tokio::fs::read(&self.path).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                log::warn!("Failed to read graph cache {}: {err}", self.path.display());
+                return Ok(None);
+            }
+        };
+
+        let cached: CachedGraph = match serde_json::from_slice(&data) {
+            Ok(cached) => cached,
+            Err(err) => {
+                log::warn!("Graph cache corrupted ({}): {err}", self.path.display());
+                return Ok(None);
+            }
+        };
+
+        if cached.language != language {
+            return Ok(None);
+        }
+
+        if cached.index_mtime_ms != unix_ms(store_mtime) {
+            return Ok(None);
+        }
+
+        let mut graph = CodeGraph::new();
+        let mut node_indices = Vec::new();
+
+        for node in cached.nodes {
+            let Some(&idx) = chunk_index.get(&node.chunk_id) else {
+                return Ok(None);
+            };
+            let Some(chunk) = chunks.get(idx) else {
+                return Ok(None);
+            };
+
+            let graph_node = GraphNode {
+                symbol: node.symbol,
+                chunk_id: node.chunk_id,
+                chunk: Some(chunk.clone()),
+            };
+            let idx = graph.add_node(graph_node);
+            node_indices.push(idx);
+        }
+
+        for edge in cached.edges {
+            let Some(&from_idx) = node_indices.get(edge.from) else {
+                return Ok(None);
+            };
+            let Some(&to_idx) = node_indices.get(edge.to) else {
+                return Ok(None);
+            };
+            graph.add_edge(
+                from_idx,
+                to_idx,
+                GraphEdge {
+                    relationship: edge.relationship,
+                    weight: edge.weight,
+                },
+            );
+        }
+
+        Ok(Some(ContextAssembler::new(graph)))
+    }
+
+    async fn save(
+        &self,
+        store_mtime: SystemTime,
+        language: GraphLanguage,
+        assembler: &ContextAssembler,
+    ) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let cached = CachedGraph::from_assembler(store_mtime, language, assembler);
+        let data = serde_json::to_vec_pretty(&cached)?;
+        tokio::fs::write(&self.path, data)
+            .await
+            .with_context(|| format!("Failed to write graph cache {}", self.path.display()))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedGraph {
+    index_mtime_ms: u64,
+    language: GraphLanguage,
+    nodes: Vec<CachedNode>,
+    edges: Vec<CachedEdge>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedNode {
+    symbol: Symbol,
+    chunk_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedEdge {
+    from: usize,
+    to: usize,
+    relationship: RelationshipType,
+    weight: f32,
+}
+
+impl CachedGraph {
+    fn from_assembler(
+        store_mtime: SystemTime,
+        language: GraphLanguage,
+        assembler: &ContextAssembler,
+    ) -> Self {
+        let graph = assembler.graph();
+        let mut node_map = HashMap::new();
+        let mut nodes = Vec::new();
+
+        for (idx, node) in graph.graph.node_indices().enumerate() {
+            if let Some(data) = graph.graph.node_weight(node) {
+                node_map.insert(node, idx);
+                nodes.push(CachedNode {
+                    symbol: data.symbol.clone(),
+                    chunk_id: data.chunk_id.clone(),
+                });
+            }
+        }
+
+        let mut edges = Vec::new();
+        for edge_id in graph.graph.edge_indices() {
+            let Some((source, target)) = graph.graph.edge_endpoints(edge_id) else {
+                continue;
+            };
+            let Some(weight) = graph.graph.edge_weight(edge_id) else {
+                continue;
+            };
+            let (Some(&from), Some(&to)) = (node_map.get(&source), node_map.get(&target)) else {
+                continue;
+            };
+            edges.push(CachedEdge {
+                from,
+                to,
+                relationship: weight.relationship,
+                weight: weight.weight,
+            });
+        }
+
+        Self {
+            index_mtime_ms: unix_ms(store_mtime),
+            language,
+            nodes,
+            edges,
+        }
+    }
+}
+
+async fn compute_engine_signature(root: &Path, profile: &SearchProfile) -> Result<EngineSignature> {
+    let corpus_path = corpus_path_for_project_root(root);
+    let corpus_mtime_ms = match tokio::fs::metadata(&corpus_path)
+        .await
+        .and_then(|m| m.modified())
+    {
+        Ok(t) => Some(unix_ms(t)),
+        Err(_) => None,
+    };
+
+    let default_model_id = current_model_id().unwrap_or_else(|_| "bge-small".to_string());
+    let mut models = Vec::new();
+    models.push(default_model_id);
+    models.extend(semantic_model_roster(profile));
+    models.sort();
+    models.dedup();
+
+    let mut index_mtimes_ms = Vec::with_capacity(models.len());
+    for model_id in models {
+        let index_path = index_path_for_model(root, &model_id);
+        let mtime_ms = match tokio::fs::metadata(&index_path)
+            .await
+            .and_then(|m| m.modified())
+        {
+            Ok(t) => Some(unix_ms(t)),
+            Err(_) => None,
+        };
+        index_mtimes_ms.push((model_id, mtime_ms));
+    }
+
+    Ok(EngineSignature {
+        corpus_mtime_ms,
+        index_mtimes_ms,
+    })
+}
+
+async fn build_project_engine(
+    root: &Path,
+    profile: &SearchProfile,
+    signature: EngineSignature,
+) -> Result<ProjectEngine> {
+    let sources = load_semantic_indexes(root, profile).await?;
+    let mut available_models: Vec<String> = sources.iter().map(|(id, _)| id.clone()).collect();
+    available_models.sort();
+
+    let canonical_model_id = available_models
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("No semantic indices available"))?;
+    let canonical_index_path = index_path_for_model(root, &canonical_model_id);
+    let canonical_index_mtime = tokio::fs::metadata(&canonical_index_path)
+        .await
+        .with_context(|| format!("Failed to stat {}", canonical_index_path.display()))?
+        .modified()
+        .with_context(|| format!("Failed to read mtime {}", canonical_index_path.display()))?;
+
+    let corpus = ContextFinderService::load_chunk_corpus(root).await?;
+    let hybrid = match corpus {
+        Some(corpus) => {
+            MultiModelHybridSearch::from_env_with_corpus(sources, profile.clone(), corpus)
+        }
+        None => MultiModelHybridSearch::from_env(sources, profile.clone()),
+    }?;
+
+    let context_search = MultiModelContextSearch::new(hybrid)?;
+    let chunk_lookup = build_chunk_lookup(context_search.hybrid().chunks());
+
+    Ok(ProjectEngine {
+        signature,
+        root: root.to_path_buf(),
+        context_search,
+        chunk_lookup,
+        available_models,
+        canonical_index_mtime,
+        graph_language: None,
+    })
 }
 
 // ============================================================================
@@ -121,6 +854,273 @@ pub struct DirectoryInfo {
     pub coverage_pct: f32,
     /// Top symbols in this directory
     pub top_symbols: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TextSearchRequest {
+    /// Text pattern to search for (literal)
+    #[schemars(description = "Text pattern to search for (literal substring)")]
+    pub pattern: String,
+
+    /// Project directory path
+    #[schemars(description = "Project directory path")]
+    pub path: Option<String>,
+
+    /// Optional path filter (simple glob: '*' and '?' supported). If no glob metachars are
+    /// present, treated as substring match against the relative file path.
+    #[schemars(description = "Optional file path filter (glob or substring)")]
+    pub file_pattern: Option<String>,
+
+    /// Maximum number of matches to return (bounded)
+    #[schemars(description = "Maximum number of matches to return (bounded)")]
+    pub max_results: Option<usize>,
+
+    /// Case-sensitive search (default: true)
+    #[schemars(description = "Whether search is case-sensitive")]
+    pub case_sensitive: Option<bool>,
+
+    /// Whole-word match for identifier-like patterns (default: false)
+    #[schemars(description = "If true, enforce identifier-like word boundaries")]
+    pub whole_word: Option<bool>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct TextSearchResult {
+    pub pattern: String,
+    pub source: String,
+    pub scanned_files: usize,
+    pub matched_files: usize,
+    pub skipped_large_files: usize,
+    pub returned: usize,
+    pub truncated: bool,
+    pub matches: Vec<TextSearchMatch>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct TextSearchMatch {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DoctorRequest {
+    /// Project directory path (optional)
+    #[schemars(description = "Project directory path (optional)")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct DoctorResult {
+    pub env: DoctorEnvResult,
+    pub project: Option<DoctorProjectResult>,
+    pub issues: Vec<String>,
+    pub hints: Vec<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct DoctorEnvResult {
+    pub profile: String,
+    pub model_dir: String,
+    pub model_manifest_exists: bool,
+    pub models: Vec<DoctorModelStatus>,
+    pub gpu: runtime_env::GpuEnvReport,
+    pub cuda_disabled: bool,
+    pub allow_cpu_fallback: bool,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct DoctorModelStatus {
+    pub id: String,
+    pub installed: bool,
+    pub missing_assets: Vec<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct DoctorIndexDrift {
+    pub model: String,
+    pub index_path: String,
+    pub index_chunks: usize,
+    pub corpus_chunks: usize,
+    pub missing_chunks: usize,
+    pub extra_chunks: usize,
+    pub missing_file_samples: Vec<String>,
+    pub extra_file_samples: Vec<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct DoctorProjectResult {
+    pub root: String,
+    pub corpus_path: String,
+    pub has_corpus: bool,
+    pub indexed_models: Vec<String>,
+    pub drift: Vec<DoctorIndexDrift>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelManifestFile {
+    models: Vec<ModelManifestModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelManifestModel {
+    id: String,
+    assets: Vec<ModelManifestAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelManifestAsset {
+    path: String,
+}
+
+fn validate_relative_model_asset_path(path: &Path) -> Result<()> {
+    let mut has_component = false;
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                anyhow::bail!("asset path must be relative");
+            }
+            Component::ParentDir => {
+                anyhow::bail!("asset path must not contain '..'");
+            }
+            Component::CurDir => {}
+            Component::Normal(_) => {
+                has_component = true;
+            }
+        }
+    }
+    if !has_component {
+        anyhow::bail!("asset path is empty");
+    }
+    Ok(())
+}
+
+fn safe_join_model_asset_path(model_dir: &Path, asset_path: &str) -> Result<PathBuf> {
+    let rel = Path::new(asset_path);
+    validate_relative_model_asset_path(rel)
+        .with_context(|| format!("Invalid model asset path '{asset_path}'"))?;
+    Ok(model_dir.join(rel))
+}
+
+#[cfg(test)]
+mod model_asset_path_tests {
+    use super::*;
+
+    #[test]
+    fn safe_join_rejects_traversal_and_absolute_paths() {
+        let base = Path::new("models");
+        assert!(safe_join_model_asset_path(base, "../escape").is_err());
+        assert!(safe_join_model_asset_path(base, "m1/../escape").is_err());
+        assert!(safe_join_model_asset_path(base, "").is_err());
+
+        #[cfg(unix)]
+        assert!(safe_join_model_asset_path(base, "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn safe_join_accepts_normal_relative_paths() {
+        let base = Path::new("models");
+        let path = safe_join_model_asset_path(base, "m1/model.onnx").expect("valid path");
+        assert!(path.starts_with(base));
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct IndexIdMapOnly {
+    #[serde(default)]
+    schema_version: Option<u32>,
+    #[serde(default)]
+    id_map: HashMap<usize, String>,
+}
+
+async fn load_model_statuses(model_dir: &Path) -> Result<(bool, Vec<DoctorModelStatus>)> {
+    let manifest_path = model_dir.join("manifest.json");
+    if !manifest_path.exists() {
+        return Ok((false, Vec::new()));
+    }
+
+    let bytes = tokio::fs::read(&manifest_path)
+        .await
+        .with_context(|| format!("Failed to read model manifest {}", manifest_path.display()))?;
+    let parsed: ModelManifestFile = serde_json::from_slice(&bytes)
+        .with_context(|| format!("Failed to parse model manifest {}", manifest_path.display()))?;
+
+    let mut statuses = Vec::new();
+    for model in parsed.models {
+        let mut missing = Vec::new();
+        for asset in model.assets {
+            let full = match safe_join_model_asset_path(model_dir, &asset.path) {
+                Ok(path) => path,
+                Err(err) => {
+                    missing.push(format!("invalid_path: {} ({err})", asset.path));
+                    continue;
+                }
+            };
+            if !full.exists() {
+                missing.push(asset.path);
+            }
+        }
+        let installed = missing.is_empty();
+        statuses.push(DoctorModelStatus {
+            id: model.id,
+            installed,
+            missing_assets: missing,
+        });
+    }
+    Ok((true, statuses))
+}
+
+async fn load_corpus_chunk_ids(corpus_path: &Path) -> Result<HashSet<String>> {
+    let corpus = ChunkCorpus::load(corpus_path).await?;
+    let mut ids = HashSet::new();
+    for chunks in corpus.files().values() {
+        for chunk in chunks {
+            ids.insert(format!(
+                "{}:{}:{}",
+                chunk.file_path, chunk.start_line, chunk.end_line
+            ));
+        }
+    }
+    Ok(ids)
+}
+
+async fn load_index_chunk_ids(index_path: &Path) -> Result<HashSet<String>> {
+    let bytes = tokio::fs::read(index_path)
+        .await
+        .with_context(|| format!("Failed to read index {}", index_path.display()))?;
+    let parsed: IndexIdMapOnly = serde_json::from_slice(&bytes)
+        .with_context(|| format!("Failed to parse index {}", index_path.display()))?;
+    // schema_version is tracked for diagnostics, but chunk id extraction relies on id_map values.
+    let _ = parsed.schema_version.unwrap_or(1);
+    Ok(parsed.id_map.into_values().collect())
+}
+
+fn chunk_id_file_path(chunk_id: &str) -> Option<String> {
+    let mut parts = chunk_id.rsplitn(3, ':');
+    let _end = parts.next()?;
+    let _start = parts.next()?;
+    Some(parts.next()?.to_string())
+}
+
+fn sample_file_paths<'a, I>(chunk_ids: I, limit: usize) -> Vec<String>
+where
+    I: Iterator<Item = &'a String>,
+{
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for id in chunk_ids {
+        if out.len() >= limit {
+            break;
+        }
+        let Some(file) = chunk_id_file_path(id) else {
+            continue;
+        };
+        if seen.insert(file.clone()) {
+            out.push(file);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -171,12 +1171,57 @@ pub struct ContextRequest {
     pub limit: Option<usize>,
 
     /// Search strategy: direct, extended, deep
-    #[schemars(description = "Graph traversal depth: direct (none), extended (1-hop), deep (2-hop)")]
+    #[schemars(
+        description = "Graph traversal depth: direct (none), extended (1-hop), deep (2-hop)"
+    )]
     pub strategy: Option<String>,
 
     /// Graph language: rust, python, javascript, typescript
     #[schemars(description = "Programming language for graph analysis")]
     pub language: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ContextPackRequest {
+    /// Search query
+    #[schemars(description = "Natural language search query")]
+    pub query: String,
+
+    /// Project directory path
+    #[schemars(description = "Project directory path")]
+    pub path: Option<String>,
+
+    /// Maximum primary results (default: 10)
+    #[schemars(description = "Maximum number of primary results")]
+    pub limit: Option<usize>,
+
+    /// Maximum total characters for packed output (default: 20000)
+    #[schemars(description = "Maximum total characters in packed output")]
+    pub max_chars: Option<usize>,
+
+    /// Related chunks per primary (default: 3)
+    #[schemars(description = "Maximum related chunks per primary")]
+    pub max_related_per_primary: Option<usize>,
+
+    /// Search strategy: direct, extended, deep
+    #[schemars(
+        description = "Graph traversal depth: direct (none), extended (1-hop), deep (2-hop)"
+    )]
+    pub strategy: Option<String>,
+
+    /// Graph language: rust, python, javascript, typescript
+    #[schemars(description = "Programming language for graph analysis")]
+    pub language: Option<String>,
+
+    /// Auto-index the project if missing (opt-in)
+    #[schemars(
+        description = "If true, automatically index the project (single-model) when missing before building the context pack"
+    )]
+    pub auto_index: Option<bool>,
+
+    /// Include debug output (adds a second MCP content block with debug JSON)
+    #[schemars(description = "Include debug output as an additional response block")]
+    pub trace: Option<bool>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -223,9 +1268,23 @@ pub struct IndexRequest {
     #[schemars(description = "Project directory to index")]
     pub path: Option<String>,
 
-    /// Force full reindex
-    #[schemars(description = "Force full reindex ignoring cache")]
+    /// Force full reindex (alias for `full`)
+    #[schemars(description = "Force full reindex ignoring cache (alias for `full`)")]
     pub force: Option<bool>,
+
+    /// Index expert roster models from the active profile (opt-in)
+    #[schemars(
+        description = "If true, index the profile's expert roster models in addition to the primary model"
+    )]
+    pub experts: Option<bool>,
+
+    /// Additional model IDs to index (opt-in)
+    #[schemars(description = "Additional embedding model IDs to index")]
+    pub models: Option<Vec<String>>,
+
+    /// Full reindex (skip incremental checks)
+    #[schemars(description = "Run a full reindex (skip incremental checks)")]
+    pub full: Option<bool>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -440,7 +1499,9 @@ pub struct GraphStats {
 #[tool_router]
 impl ContextFinderService {
     /// Get project structure overview
-    #[tool(description = "Get project structure overview with directories, files, and top symbols. Use this first to understand a new codebase.")]
+    #[tool(
+        description = "Get project structure overview with directories, files, and top symbols. Use this first to understand a new codebase."
+    )]
     pub async fn map(
         &self,
         Parameters(request): Parameters<MapRequest>,
@@ -449,78 +1510,362 @@ impl ContextFinderService {
         let depth = request.depth.unwrap_or(2).clamp(1, 4);
         let limit = request.limit.unwrap_or(10);
 
-        let (_root, index_path) = match Self::resolve_project(&path) {
+        let root = match path.canonicalize() {
             Ok(p) => p,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid path: {e}"
+                ))]));
+            }
+        };
+        self.touch_daemon_best_effort(&root);
+        let result = match compute_map_result(&root, depth, limit).await {
+            Ok(result) => result,
+            Err(err) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Error: {err:#}"
+                ))]));
+            }
         };
 
-        let (_store, chunks) = match Self::load_store(&index_path).await {
-            Ok(s) => s,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Bounded exact text search (literal substring), as a safe `rg` replacement.
+    #[tool(
+        description = "Search for an exact text pattern in project files with bounded output (rg-like, but safe for agent context). Uses corpus if available, otherwise scans files without side effects."
+    )]
+    pub async fn text_search(
+        &self,
+        Parameters(request): Parameters<TextSearchRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = PathBuf::from(request.path.unwrap_or_else(|| ".".to_string()));
+        let root = match path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid path: {e}"
+                ))]));
+            }
+        };
+        self.touch_daemon_best_effort(&root);
+
+        let pattern = request.pattern.trim();
+        if pattern.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Pattern must not be empty",
+            )]));
+        }
+
+        let file_pattern = request
+            .file_pattern
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty());
+        let max_results = request.max_results.unwrap_or(50).clamp(1, 1000);
+        let case_sensitive = request.case_sensitive.unwrap_or(true);
+        let whole_word = request.whole_word.unwrap_or(false);
+
+        const MAX_FILE_BYTES: u64 = 2_000_000;
+
+        let mut matches = Vec::new();
+        let mut matched_files: HashSet<String> = HashSet::new();
+        let mut scanned_files = 0usize;
+        let mut skipped_large_files = 0usize;
+        let mut truncated = false;
+        let source: String;
+
+        let corpus = match Self::load_chunk_corpus(&root).await {
+            Ok(corpus) => corpus,
+            Err(err) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Error: {err:#}"
+                ))]));
+            }
         };
 
-        // Aggregate by directory
-        let mut tree_files: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut tree_chunks: HashMap<String, usize> = HashMap::new();
-        let mut tree_symbols: HashMap<String, Vec<String>> = HashMap::new();
-        let mut total_lines = 0usize;
+        if let Some(corpus) = corpus {
+            source = "corpus".to_string();
 
-        for chunk in &chunks {
-            let parts: Vec<&str> = chunk.file_path.split('/').collect();
-            let key = parts.iter().take(depth).cloned().collect::<Vec<_>>().join("/");
+            let mut files: Vec<(&String, &Vec<context_code_chunker::CodeChunk>)> =
+                corpus.files().iter().collect();
+            files.sort_by(|a, b| a.0.cmp(b.0));
 
-            tree_files.entry(key.clone()).or_default().insert(chunk.file_path.clone());
-            *tree_chunks.entry(key.clone()).or_insert(0) += 1;
-            total_lines += chunk.content.lines().count().max(1);
+            'outer_corpus: for (file, chunks) in files {
+                if !Self::matches_file_pattern(file, file_pattern) {
+                    continue;
+                }
+                scanned_files += 1;
 
-            if let Some(sym) = &chunk.metadata.symbol_name {
-                let sym_type = chunk
-                    .metadata
-                    .chunk_type
-                    .map(|ct| ct.as_str())
-                    .unwrap_or("symbol");
-                tree_symbols
-                    .entry(key)
-                    .or_default()
-                    .push(format!("{} {}", sym_type, sym));
+                for chunk in chunks {
+                    for (offset, line_text) in chunk.content.lines().enumerate() {
+                        if matches.len() >= max_results {
+                            truncated = true;
+                            break 'outer_corpus;
+                        }
+                        let Some(col_byte) =
+                            Self::match_in_line(line_text, pattern, case_sensitive, whole_word)
+                        else {
+                            continue;
+                        };
+
+                        let line = chunk.start_line + offset;
+                        let column = line_text[..col_byte].chars().count() + 1;
+                        matched_files.insert(chunk.file_path.clone());
+                        matches.push(TextSearchMatch {
+                            file: chunk.file_path.clone(),
+                            line,
+                            column,
+                            text: line_text.to_string(),
+                        });
+                    }
+                }
+            }
+        } else {
+            source = "filesystem".to_string();
+
+            let scanner = FileScanner::new(&root);
+            let files = scanner.scan();
+
+            'outer_fs: for file in files {
+                if matches.len() >= max_results {
+                    truncated = true;
+                    break 'outer_fs;
+                }
+                let Some(rel_path) = normalize_relative_path(&root, &file) else {
+                    continue;
+                };
+                if !Self::matches_file_pattern(&rel_path, file_pattern) {
+                    continue;
+                }
+                scanned_files += 1;
+
+                let meta = match std::fs::metadata(&file) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if meta.len() > MAX_FILE_BYTES {
+                    skipped_large_files += 1;
+                    continue;
+                }
+
+                let Ok(content) = std::fs::read_to_string(&file) else {
+                    continue;
+                };
+
+                for (offset, line_text) in content.lines().enumerate() {
+                    if matches.len() >= max_results {
+                        truncated = true;
+                        break 'outer_fs;
+                    }
+                    let Some(col_byte) =
+                        Self::match_in_line(line_text, pattern, case_sensitive, whole_word)
+                    else {
+                        continue;
+                    };
+                    let column = line_text[..col_byte].chars().count() + 1;
+                    matched_files.insert(rel_path.clone());
+                    matches.push(TextSearchMatch {
+                        file: rel_path.clone(),
+                        line: offset + 1,
+                        column,
+                        text: line_text.to_string(),
+                    });
+                }
             }
         }
 
-        let total_files: usize = tree_files.values().map(|s| s.len()).sum();
-        let total_chunks = chunks.len();
+        let result = TextSearchResult {
+            pattern: pattern.to_string(),
+            source,
+            scanned_files,
+            matched_files: matched_files.len(),
+            skipped_large_files,
+            returned: matches.len(),
+            truncated,
+            matches,
+        };
 
-        let mut directories: Vec<DirectoryInfo> = tree_chunks
-            .into_iter()
-            .map(|(path, chunks)| {
-                let files = tree_files.get(&path).map(|s| s.len()).unwrap_or(0);
-                let coverage_pct = if total_chunks > 0 {
-                    chunks as f32 / total_chunks as f32 * 100.0
-                } else {
-                    0.0
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Diagnose model/GPU/index configuration
+    #[tool(
+        description = "Show diagnostics for model directory, CUDA/ORT runtime, and per-project index/corpus status. Use this when something fails (e.g., GPU provider missing)."
+    )]
+    pub async fn doctor(
+        &self,
+        Parameters(request): Parameters<DoctorRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let model_dir = context_vector_store::model_dir();
+        let manifest_path = model_dir.join("manifest.json");
+
+        let (model_manifest_exists, models) = match load_model_statuses(&model_dir).await {
+            Ok(result) => result,
+            Err(err) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to load model manifest {}: {err:#}",
+                    manifest_path.display()
+                ))]));
+            }
+        };
+
+        let gpu = runtime_env::diagnose_gpu_env();
+        let cuda_disabled = runtime_env::is_cuda_disabled();
+        let allow_cpu_fallback = std::env::var("CONTEXT_FINDER_ALLOW_CPU")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let mut issues: Vec<String> = Vec::new();
+        let mut hints: Vec<String> = Vec::new();
+
+        if !cuda_disabled && (!gpu.provider_present || !gpu.cublas_present) {
+            issues
+                .push("CUDA libraries are not fully configured (provider/cublas missing).".into());
+            hints.push("Run `bash scripts/setup_cuda_deps.sh` in the Context Finder repo, or set ORT_LIB_LOCATION/LD_LIBRARY_PATH to directories containing libonnxruntime_providers_cuda.so and libcublasLt.so.*. If you want CPU fallback, set CONTEXT_FINDER_ALLOW_CPU=1.".into());
+        }
+
+        if !model_manifest_exists {
+            issues.push(format!(
+                "Model manifest not found at {}",
+                manifest_path.display()
+            ));
+            hints.push("Run `context-finder install-models` (or set CONTEXT_FINDER_MODEL_DIR to a directory containing models/manifest.json).".into());
+        } else if models.iter().any(|m| !m.installed) {
+            hints.push("Some models are missing assets. Run `context-finder install-models` to download them into the model directory.".into());
+        }
+
+        let project = match request.path {
+            None => None,
+            Some(raw) => {
+                let root = match PathBuf::from(raw).canonicalize() {
+                    Ok(p) => Some(p),
+                    Err(err) => {
+                        issues.push(format!("Invalid project path: {err}"));
+                        None
+                    }
                 };
-                let top_symbols: Vec<String> = tree_symbols
-                    .get(&path)
-                    .map(|v| v.iter().take(5).cloned().collect())
-                    .unwrap_or_default();
 
-                DirectoryInfo {
-                    path,
-                    files,
-                    chunks,
-                    coverage_pct,
-                    top_symbols,
+                if let Some(root) = root {
+                    let corpus_path = corpus_path_for_project_root(&root);
+                    let has_corpus = corpus_path.exists();
+
+                    let indexes_dir = root.join(".context-finder").join("indexes");
+                    let mut indexed_models: Vec<String> = Vec::new();
+                    if let Ok(entries) = std::fs::read_dir(&indexes_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if !path.is_dir() {
+                                continue;
+                            }
+                            let index_path = path.join("index.json");
+                            if index_path.exists() {
+                                indexed_models
+                                    .push(entry.file_name().to_string_lossy().into_owned());
+                            }
+                        }
+                    }
+                    indexed_models.sort();
+
+                    if indexed_models.is_empty() {
+                        hints.push(
+                            "No semantic indexes found for this project. Run the `index` tool first."
+                                .into(),
+                        );
+                    }
+
+                    let mut drift: Vec<DoctorIndexDrift> = Vec::new();
+                    if has_corpus && !indexed_models.is_empty() {
+                        match load_corpus_chunk_ids(&corpus_path).await {
+                            Ok(corpus_ids) => {
+                                let corpus_chunks = corpus_ids.len();
+                                let mut drifted_models = Vec::new();
+
+                                for model_id in &indexed_models {
+                                    let index_path = indexes_dir.join(model_id).join("index.json");
+                                    let index_ids = match load_index_chunk_ids(&index_path).await {
+                                        Ok(ids) => ids,
+                                        Err(err) => {
+                                            issues.push(format!(
+                                                "Failed to read index for model '{model_id}': {err:#}"
+                                            ));
+                                            continue;
+                                        }
+                                    };
+
+                                    let missing_chunks = corpus_ids.difference(&index_ids).count();
+                                    let extra_chunks = index_ids.difference(&corpus_ids).count();
+
+                                    if missing_chunks > 0 || extra_chunks > 0 {
+                                        drifted_models.push(model_id.clone());
+                                    }
+
+                                    let missing_file_samples =
+                                        sample_file_paths(corpus_ids.difference(&index_ids), 8);
+                                    let extra_file_samples =
+                                        sample_file_paths(index_ids.difference(&corpus_ids), 8);
+
+                                    drift.push(DoctorIndexDrift {
+                                        model: model_id.clone(),
+                                        index_path: index_path.to_string_lossy().into_owned(),
+                                        index_chunks: index_ids.len(),
+                                        corpus_chunks,
+                                        missing_chunks,
+                                        extra_chunks,
+                                        missing_file_samples,
+                                        extra_file_samples,
+                                    });
+                                }
+
+                                if !drifted_models.is_empty() {
+                                    issues.push(format!(
+                                        "Index drift detected vs corpus for models: {}",
+                                        drifted_models.join(", ")
+                                    ));
+                                    hints.push("Run `context-finder index --force --experts` (or the MCP `index` tool) to rebuild semantic indexes to match the current corpus. If you recently changed profiles/models, consider reindexing all models in your roster.".into());
+                                }
+                            }
+                            Err(err) => {
+                                issues.push(format!(
+                                    "Failed to load corpus {}: {err:#}",
+                                    corpus_path.display()
+                                ));
+                            }
+                        }
+                    } else if !has_corpus && !indexed_models.is_empty() {
+                        hints.push("Corpus not found for this project; drift detection is unavailable. Run `context-finder index` once to generate corpus + indexes.".into());
+                    }
+
+                    Some(DoctorProjectResult {
+                        root: root.to_string_lossy().into_owned(),
+                        corpus_path: corpus_path.to_string_lossy().into_owned(),
+                        has_corpus,
+                        indexed_models,
+                        drift,
+                    })
+                } else {
+                    None
                 }
-            })
-            .collect();
+            }
+        };
 
-        directories.sort_by(|a, b| b.chunks.cmp(&a.chunks));
-        directories.truncate(limit);
-
-        let result = MapResult {
-            total_files,
-            total_chunks,
-            total_lines,
-            directories,
+        let result = DoctorResult {
+            env: DoctorEnvResult {
+                profile: self.profile.name().to_string(),
+                model_dir: model_dir.to_string_lossy().into_owned(),
+                model_manifest_exists,
+                models,
+                gpu,
+                cuda_disabled,
+                allow_cpu_fallback,
+            },
+            project,
+            issues,
+            hints,
         };
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -529,7 +1874,9 @@ impl ContextFinderService {
     }
 
     /// Semantic code search
-    #[tool(description = "Search for code using natural language. Returns relevant code snippets with file locations and symbols.")]
+    #[tool(
+        description = "Search for code using natural language. Returns relevant code snippets with file locations and symbols."
+    )]
     pub async fn search(
         &self,
         Parameters(request): Parameters<SearchRequest>,
@@ -543,26 +1890,31 @@ impl ContextFinderService {
             )]));
         }
 
-        let (_root, index_path) = match Self::resolve_project(&path) {
+        let root = match path.canonicalize() {
             Ok(p) => p,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
-        };
-
-        let (store, chunks) = match Self::load_store(&index_path).await {
-            Ok(s) => s,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
-        };
-
-        let mut search = match HybridSearch::with_profile(store, chunks, self.profile.clone()) {
-            Ok(s) => s,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Error creating search: {e}"
+                    "Invalid path: {e}"
                 ))]));
             }
         };
 
-        let results = match search.search(&request.query, limit).await {
+        let mut engine = match self.lock_engine(&root).await {
+            Ok(engine) => engine,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Error: {e}"
+                ))]));
+            }
+        };
+
+        let results = match engine
+            .engine_mut()
+            .context_search
+            .hybrid_mut()
+            .search(&request.query, limit)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -578,7 +1930,11 @@ impl ContextFinderService {
                 start_line: r.chunk.start_line,
                 end_line: r.chunk.end_line,
                 symbol: r.chunk.metadata.symbol_name.clone(),
-                symbol_type: r.chunk.metadata.chunk_type.map(|ct| ct.as_str().to_string()),
+                symbol_type: r
+                    .chunk
+                    .metadata
+                    .chunk_type
+                    .map(|ct| ct.as_str().to_string()),
                 score: r.score,
                 content: r.chunk.content.clone(),
             })
@@ -590,7 +1946,9 @@ impl ContextFinderService {
     }
 
     /// Search with graph context
-    #[tool(description = "Search for code with automatic graph-based context. Returns code plus related functions/types through call graphs and dependencies. Best for understanding how code connects.")]
+    #[tool(
+        description = "Search for code with automatic graph-based context. Returns code plus related functions/types through call graphs and dependencies. Best for understanding how code connects."
+    )]
     pub async fn context(
         &self,
         Parameters(request): Parameters<ContextRequest>,
@@ -602,12 +1960,6 @@ impl ContextFinderService {
             Some("deep") => context_graph::AssemblyStrategy::Deep,
             _ => context_graph::AssemblyStrategy::Extended,
         };
-        let language = match request.language.as_deref() {
-            Some("python") => GraphLanguage::Python,
-            Some("javascript") => GraphLanguage::JavaScript,
-            Some("typescript") => GraphLanguage::TypeScript,
-            _ => GraphLanguage::Rust,
-        };
 
         if request.query.trim().is_empty() {
             return Ok(CallToolResult::error(vec![Content::text(
@@ -615,18 +1967,17 @@ impl ContextFinderService {
             )]));
         }
 
-        let (_root, index_path) = match Self::resolve_project(&path) {
+        let root = match path.canonicalize() {
             Ok(p) => p,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid path: {e}"
+                ))]));
+            }
         };
 
-        let (store, chunks) = match Self::load_store(&index_path).await {
-            Ok(s) => s,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
-        };
-
-        let hybrid = match HybridSearch::with_profile(store, chunks, self.profile.clone()) {
-            Ok(s) => s,
+        let mut engine = match self.lock_engine(&root).await {
+            Ok(engine) => engine,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Error: {e}"
@@ -634,22 +1985,20 @@ impl ContextFinderService {
             }
         };
 
-        let mut context_search = match ContextSearch::new(hybrid) {
-            Ok(s) => s,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Error: {e}"
-                ))]));
-            }
+        let language = match request.language.as_deref() {
+            Some(lang) => Self::parse_language(Some(lang)),
+            None => Self::detect_language(engine.engine_mut().context_search.hybrid().chunks()),
         };
 
-        if let Err(e) = context_search.build_graph(language) {
+        if let Err(e) = engine.engine_mut().ensure_graph(language).await {
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "Graph build error: {e}"
             ))]));
         }
 
-        let enriched = match context_search
+        let enriched = match engine
+            .engine_mut()
+            .context_search
             .search_with_context(&request.query, limit, strategy)
             .await
         {
@@ -702,14 +2051,355 @@ impl ContextFinderService {
         )]))
     }
 
+    /// Build a bounded context pack for agents (single-call context).
+    #[tool(
+        description = "Build a bounded `context_pack` JSON for a query: primary hits + graph-related halo, under a strict character budget. Intended as the single-call payload for AI agents."
+    )]
+    pub async fn context_pack(
+        &self,
+        Parameters(request): Parameters<ContextPackRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = PathBuf::from(request.path.unwrap_or_else(|| ".".to_string()));
+        let limit = request.limit.unwrap_or(10).clamp(1, 50);
+        let max_chars = request.max_chars.unwrap_or(20_000).max(1_000);
+        let max_related_per_primary = request.max_related_per_primary.unwrap_or(3).clamp(0, 12);
+        let trace = request.trace.unwrap_or(false);
+        let auto_index = request.auto_index.unwrap_or(false);
+        let strategy = match request.strategy.as_deref() {
+            Some("direct") => context_graph::AssemblyStrategy::Direct,
+            Some("deep") => context_graph::AssemblyStrategy::Deep,
+            _ => context_graph::AssemblyStrategy::Extended,
+        };
+
+        if request.query.trim().is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Error: Query cannot be empty",
+            )]));
+        }
+
+        let root = match path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid path: {e}"
+                ))]));
+            }
+        };
+
+        let mut engine = match self.lock_engine(&root).await {
+            Ok(engine) => engine,
+            Err(e) => {
+                if !auto_index {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Error: {e}"
+                    ))]));
+                }
+
+                if let Err(index_err) = self.auto_index_project(&root).await {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Auto-index error: {index_err}"
+                    ))]));
+                }
+
+                match self.lock_engine(&root).await {
+                    Ok(engine) => engine,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Error after auto-index: {e}"
+                        ))]));
+                    }
+                }
+            }
+        };
+
+        let language = match request.language.as_deref() {
+            Some(lang) => Self::parse_language(Some(lang)),
+            None => Self::detect_language(engine.engine_mut().context_search.hybrid().chunks()),
+        };
+
+        if let Err(e) = engine.engine_mut().ensure_graph(language).await {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Graph build error: {e}"
+            ))]));
+        }
+
+        let available_models = engine.engine_mut().available_models.clone();
+        let source_index_mtime_ms = unix_ms(engine.engine_mut().canonical_index_mtime);
+
+        let mut enriched = match engine
+            .engine_mut()
+            .context_search
+            .search_with_context(&request.query, limit, strategy)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Search error: {e}"
+                ))]));
+            }
+        };
+
+        // Optional graph_nodes channel for conceptual queries (graph-as-text embeddings).
+        let query_type = QueryClassifier::classify(&request.query);
+        let graph_nodes_cfg = self.profile.graph_nodes();
+        if graph_nodes_cfg.enabled
+            && !matches!(strategy, context_graph::AssemblyStrategy::Direct)
+            && matches!(query_type, QueryType::Conceptual)
+        {
+            let engine_ref = engine.engine_mut();
+            if let Some(assembler) = engine_ref.context_search.assembler() {
+                let chunks = engine_ref.context_search.hybrid().chunks();
+                let chunk_lookup = &engine_ref.chunk_lookup;
+
+                let graph_nodes_path = graph_nodes_store_path(&root);
+                let language_key = graph_language_key(language).to_string();
+
+                let template_hash = self.profile.embedding().graph_node_template_hash();
+                let graph_nodes_store =
+                    if let Ok(store) = GraphNodeStore::load(&graph_nodes_path).await {
+                        let meta = store.meta();
+                        if meta.source_index_mtime_ms == source_index_mtime_ms
+                            && meta.graph_language == language_key
+                            && meta.graph_doc_version == GRAPH_DOC_VERSION
+                            && meta.template_hash == template_hash
+                        {
+                            Some(store)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                let graph_nodes_store = match graph_nodes_store {
+                    Some(store) => store,
+                    None => {
+                        let docs = build_graph_docs(
+                            assembler,
+                            GraphDocConfig {
+                                max_neighbors_per_relation: graph_nodes_cfg
+                                    .max_neighbors_per_relation,
+                            },
+                        );
+                        let docs: Vec<GraphNodeDoc> = docs
+                            .into_iter()
+                            .map(|doc| {
+                                let text = self
+                                    .profile
+                                    .embedding()
+                                    .render_graph_node_doc(&doc.doc)
+                                    .unwrap_or(doc.doc);
+                                GraphNodeDoc {
+                                    node_id: doc.node_id,
+                                    chunk_id: doc.chunk_id,
+                                    text,
+                                    doc_hash: doc.doc_hash,
+                                }
+                            })
+                            .collect();
+
+                        let meta = match GraphNodeStoreMeta::for_current_model(
+                            source_index_mtime_ms,
+                            language_key,
+                            GRAPH_DOC_VERSION,
+                            template_hash,
+                        ) {
+                            Ok(m) => m,
+                            Err(err) => {
+                                return Ok(CallToolResult::error(vec![Content::text(format!(
+                                    "graph_nodes meta error: {err}"
+                                ))]));
+                            }
+                        };
+
+                        match GraphNodeStore::build_or_update(&graph_nodes_path, meta, docs).await {
+                            Ok(store) => store,
+                            Err(err) => {
+                                return Ok(CallToolResult::error(vec![Content::text(format!(
+                                    "graph_nodes build error: {err}"
+                                ))]));
+                            }
+                        }
+                    }
+                };
+
+                let embedding_query = self
+                    .profile
+                    .embedding()
+                    .render_query(context_vector_store::QueryKind::Conceptual, &request.query)
+                    .unwrap_or_else(|_| request.query.clone());
+                let hits = graph_nodes_store
+                    .search_with_embedding_text(&embedding_query, graph_nodes_cfg.top_k)
+                    .await
+                    .unwrap_or_default();
+
+                if !hits.is_empty() {
+                    const RRF_K: f32 = 60.0;
+                    let mut fused: HashMap<String, f32> = HashMap::new();
+
+                    for (rank, er) in enriched.iter().enumerate() {
+                        #[allow(clippy::cast_precision_loss)]
+                        let contrib = 1.0 / (RRF_K + (rank as f32) + 1.0);
+                        fused
+                            .entry(er.primary.id.clone())
+                            .and_modify(|v| *v += contrib)
+                            .or_insert(contrib);
+                    }
+
+                    for (rank, hit) in hits.iter().enumerate() {
+                        #[allow(clippy::cast_precision_loss)]
+                        let contrib = graph_nodes_cfg.weight / (RRF_K + (rank as f32) + 1.0);
+                        fused
+                            .entry(hit.chunk_id.clone())
+                            .and_modify(|v| *v += contrib)
+                            .or_insert(contrib);
+                    }
+
+                    let mut have_primary: HashSet<String> =
+                        enriched.iter().map(|er| er.primary.id.clone()).collect();
+
+                    for hit in hits {
+                        if have_primary.contains(&hit.chunk_id) {
+                            continue;
+                        }
+                        let Some(&chunk_idx) = chunk_lookup.get(&hit.chunk_id) else {
+                            continue;
+                        };
+                        let Some(chunk) = chunks.get(chunk_idx).cloned() else {
+                            continue;
+                        };
+                        if self.profile.is_rejected(&chunk.file_path) {
+                            continue;
+                        }
+
+                        let mut related = Vec::new();
+                        let mut total_lines = chunk.line_count();
+                        if let Ok(assembled) = assembler.assemble_for_chunk(&hit.chunk_id, strategy)
+                        {
+                            total_lines = assembled.total_lines;
+                            related = assembled
+                                .related_chunks
+                                .into_iter()
+                                .map(|rc| context_search::RelatedContext {
+                                    chunk: rc.chunk,
+                                    relationship_path: rc
+                                        .relationship
+                                        .iter()
+                                        .map(|r| format!("{r:?}"))
+                                        .collect(),
+                                    distance: rc.distance,
+                                    relevance_score: rc.relevance_score,
+                                })
+                                .collect();
+                        }
+
+                        enriched.push(context_search::EnrichedResult {
+                            primary: context_search::SearchResult {
+                                chunk,
+                                score: 0.0,
+                                id: hit.chunk_id.clone(),
+                            },
+                            related,
+                            total_lines,
+                            strategy,
+                        });
+                        have_primary.insert(hit.chunk_id);
+                    }
+
+                    let mut min_score = f32::MAX;
+                    let mut max_score = f32::MIN;
+                    for er in &enriched {
+                        if let Some(score) = fused.get(&er.primary.id) {
+                            min_score = min_score.min(*score);
+                            max_score = max_score.max(*score);
+                        }
+                    }
+                    let range = (max_score - min_score).max(1e-9);
+
+                    for er in &mut enriched {
+                        if let Some(score) = fused.get(&er.primary.id) {
+                            er.primary.score = if range <= 1e-9 {
+                                1.0
+                            } else {
+                                (*score - min_score) / range
+                            };
+                        }
+                    }
+
+                    enriched.sort_by(|a, b| {
+                        b.primary
+                            .score
+                            .total_cmp(&a.primary.score)
+                            .then_with(|| a.primary.id.cmp(&b.primary.id))
+                    });
+                    enriched.truncate(limit);
+                }
+            }
+        }
+
+        let (items, budget) =
+            pack_enriched_results(&self.profile, enriched, max_chars, max_related_per_primary);
+        let model_id = current_model_id().unwrap_or_else(|_| "bge-small".to_string());
+        let output = ContextPackOutput {
+            version: CONTEXT_PACK_VERSION,
+            query: request.query,
+            model_id,
+            profile: self.profile.name().to_string(),
+            items,
+            budget,
+        };
+
+        let mut contents = Vec::new();
+        contents.push(Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_default(),
+        ));
+
+        if trace {
+            let query_kind = match query_type {
+                QueryType::Identifier => QueryKind::Identifier,
+                QueryType::Path => QueryKind::Path,
+                QueryType::Conceptual => QueryKind::Conceptual,
+            };
+            let desired_models: Vec<String> =
+                self.profile.experts().semantic_models(query_kind).to_vec();
+
+            let debug = serde_json::json!({
+                "query_kind": format!("{query_kind:?}"),
+                "strategy": format!("{strategy:?}"),
+                "language": graph_language_key(language),
+                "semantic_models": {
+                    "available": available_models,
+                    "desired": desired_models,
+                },
+                "graph_nodes": {
+                    "enabled": graph_nodes_cfg.enabled,
+                    "weight": graph_nodes_cfg.weight,
+                    "top_k": graph_nodes_cfg.top_k,
+                    "max_neighbors_per_relation": graph_nodes_cfg.max_neighbors_per_relation,
+                }
+            });
+            contents.push(Content::text(
+                serde_json::to_string_pretty(&debug).unwrap_or_default(),
+            ));
+        }
+
+        Ok(CallToolResult::success(contents))
+    }
+
     /// Index a project
-    #[tool(description = "Index a project directory for semantic search. Required before using search/context tools on a new project.")]
+    #[tool(
+        description = "Index a project directory for semantic search. Required before using search/context tools on a new project."
+    )]
     pub async fn index(
         &self,
         Parameters(request): Parameters<IndexRequest>,
     ) -> Result<CallToolResult, McpError> {
         let path = PathBuf::from(request.path.unwrap_or_else(|| ".".to_string()));
         let force = request.force.unwrap_or(false);
+        let full = request.full.unwrap_or(false) || force;
+        let experts = request.experts.unwrap_or(false);
+        let extra_models = request.models.unwrap_or_default();
 
         let canonical = match path.canonicalize() {
             Ok(p) => p,
@@ -719,11 +2409,63 @@ impl ContextFinderService {
                 ))]));
             }
         };
+        self.touch_daemon_best_effort(&canonical);
 
         let start = std::time::Instant::now();
 
-        // Use indexer
-        let indexer = match context_indexer::ProjectIndexer::new(&canonical).await {
+        let primary_model_id = current_model_id().unwrap_or_else(|_| "bge-small".to_string());
+        let templates = self.profile.embedding().clone();
+
+        let mut models: Vec<String> = Vec::new();
+        let mut seen = HashSet::new();
+        seen.insert(primary_model_id.clone());
+        models.push(primary_model_id.clone());
+
+        if experts {
+            let expert_cfg = self.profile.experts();
+            for kind in [
+                QueryKind::Identifier,
+                QueryKind::Path,
+                QueryKind::Conceptual,
+            ] {
+                for model_id in expert_cfg.semantic_models(kind) {
+                    if seen.insert(model_id.clone()) {
+                        models.push(model_id.clone());
+                    }
+                }
+            }
+        }
+
+        for model_id in extra_models {
+            if seen.insert(model_id.clone()) {
+                models.push(model_id);
+            }
+        }
+
+        let registry = match context_vector_store::ModelRegistry::from_env() {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Model registry error: {e}"
+                ))]));
+            }
+        };
+        for model_id in &models {
+            if let Err(e) = registry.dimension(model_id) {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown or unsupported model_id '{model_id}': {e}"
+                ))]));
+            }
+        }
+
+        let specs: Vec<context_indexer::ModelIndexSpec> = models
+            .iter()
+            .map(|model_id| {
+                context_indexer::ModelIndexSpec::new(model_id.clone(), templates.clone())
+            })
+            .collect();
+
+        let indexer = match context_indexer::MultiModelProjectIndexer::new(&canonical).await {
             Ok(i) => i,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -732,28 +2474,17 @@ impl ContextFinderService {
             }
         };
 
-        let stats = if force {
-            match indexer.index_full().await {
-                Ok(s) => s,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Indexing error: {e}"
-                    ))]));
-                }
-            }
-        } else {
-            match indexer.index().await {
-                Ok(s) => s,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Indexing error: {e}"
-                    ))]));
-                }
+        let stats = match indexer.index_models(&specs, full).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Indexing error: {e}"
+                ))]));
             }
         };
 
         let time_ms = start.elapsed().as_millis() as u64;
-        let index_path = canonical.join(".context-finder/index.json");
+        let index_path = index_path_for_model(&canonical, &primary_model_id);
 
         let result = IndexResult {
             files: stats.files,
@@ -768,53 +2499,123 @@ impl ContextFinderService {
     }
 
     /// Find all usages of a symbol (impact analysis)
-    #[tool(description = "Find all places where a symbol is used. Essential for refactoring - shows direct usages, transitive dependencies, and related tests.")]
+    #[tool(
+        description = "Find all places where a symbol is used. Essential for refactoring - shows direct usages, transitive dependencies, and related tests."
+    )]
     pub async fn impact(
         &self,
         Parameters(request): Parameters<ImpactRequest>,
     ) -> Result<CallToolResult, McpError> {
+        const MAX_DIRECT: usize = 200;
+        const MAX_TRANSITIVE: usize = 200;
+
         let path = PathBuf::from(request.path.unwrap_or_else(|| ".".to_string()));
         let depth = request.depth.unwrap_or(2).clamp(1, 3);
-        let language = Self::parse_language(request.language.as_deref());
-
-        let (_root, index_path) = match Self::resolve_project(&path) {
+        let root = match path.canonicalize() {
             Ok(p) => p,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
-        };
-
-        let (_store, chunks) = match Self::load_store(&index_path).await {
-            Ok(s) => s,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
-        };
-
-        // Build graph
-        let mut builder = match GraphBuilder::new(language) {
-            Ok(b) => b,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Graph builder error: {e}"
-                ))]));
-            }
-        };
-        let graph = match builder.build(&chunks) {
-            Ok(g) => g,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Graph build error: {e}"
+                    "Invalid path: {e}"
                 ))]));
             }
         };
 
-        // Find the symbol node
-        let node = match graph.find_node(&request.symbol) {
-            Some(n) => n,
-            None => {
+        let mut engine = match self.lock_engine(&root).await {
+            Ok(engine) => engine,
+            Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Symbol '{}' not found in graph",
-                    request.symbol
+                    "Error: {e}"
                 ))]));
             }
         };
+
+        let language = match request.language.as_deref() {
+            Some(lang) => Self::parse_language(Some(lang)),
+            None => Self::detect_language(engine.engine_mut().context_search.hybrid().chunks()),
+        };
+
+        let symbol = request.symbol;
+        let graph_ready = engine.engine_mut().ensure_graph(language).await.is_ok();
+
+        if !graph_ready {
+            // Best-effort UX: even when graph build fails (unsupported language), return
+            // bounded TextMatch hits instead of hard-failing.
+            let chunks = engine.engine_mut().context_search.hybrid().chunks();
+            let direct = Self::find_text_usages(chunks, &symbol, None, MAX_DIRECT);
+            let mermaid = Self::generate_impact_mermaid(&symbol, &direct, &[]);
+            let files_affected: HashSet<&str> = direct.iter().map(|u| u.file.as_str()).collect();
+
+            let result = ImpactResult {
+                symbol,
+                definition: None,
+                total_usages: direct.len(),
+                files_affected: files_affected.len(),
+                direct,
+                transitive: Vec::new(),
+                tests: Vec::new(),
+                public_api: false,
+                mermaid,
+            };
+
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&result).unwrap_or_default(),
+            )]));
+        }
+
+        let engine_ref = engine.engine_mut();
+        let chunks = engine_ref.context_search.hybrid().chunks();
+
+        let Some(assembler) = engine_ref.context_search.assembler() else {
+            // Same best-effort behavior if graph isn't available after a successful build.
+            let direct = Self::find_text_usages(chunks, &symbol, None, MAX_DIRECT);
+            let mermaid = Self::generate_impact_mermaid(&symbol, &direct, &[]);
+            let files_affected: HashSet<&str> = direct.iter().map(|u| u.file.as_str()).collect();
+
+            let result = ImpactResult {
+                symbol,
+                definition: None,
+                total_usages: direct.len(),
+                files_affected: files_affected.len(),
+                direct,
+                transitive: Vec::new(),
+                tests: Vec::new(),
+                public_api: false,
+                mermaid,
+            };
+
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&result).unwrap_or_default(),
+            )]));
+        };
+        let graph = assembler.graph();
+
+        let node = graph.find_node(&symbol);
+
+        if node.is_none() {
+            // Best-effort UX: when the symbol is not present in the graph (missing/ambiguous),
+            // return bounded TextMatch hits instead of hard-failing.
+            let direct = Self::find_text_usages(chunks, &symbol, None, MAX_DIRECT);
+            let mermaid = Self::generate_impact_mermaid(&symbol, &direct, &[]);
+            let files_affected: HashSet<&str> = direct.iter().map(|u| u.file.as_str()).collect();
+
+            let result = ImpactResult {
+                symbol,
+                definition: None,
+                total_usages: direct.len(),
+                files_affected: files_affected.len(),
+                direct,
+                transitive: Vec::new(),
+                tests: Vec::new(),
+                public_api: false,
+                mermaid,
+            };
+
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&result).unwrap_or_default(),
+            )]));
+        }
+
+        let node = node.expect("node checked above");
 
         // Get definition location
         let definition = graph.get_node(node).map(|nd| SymbolLocation {
@@ -825,7 +2626,7 @@ impl ContextFinderService {
         // Get direct usages (filter unknown symbols and markdown files)
         let direct_usages = graph.get_all_usages(node);
         let mut seen_direct: HashSet<(String, usize)> = HashSet::new();
-        let direct: Vec<UsageInfo> = direct_usages
+        let mut direct: Vec<UsageInfo> = direct_usages
             .iter()
             .filter_map(|(n, rel)| {
                 graph.get_node(*n).and_then(|nd| {
@@ -848,6 +2649,9 @@ impl ContextFinderService {
                 })
             })
             .collect();
+        if direct.len() > MAX_DIRECT {
+            direct.truncate(MAX_DIRECT);
+        }
 
         // Get transitive usages if depth > 1
         let transitive_usages = if depth > 1 {
@@ -856,7 +2660,7 @@ impl ContextFinderService {
             vec![]
         };
         let mut seen_transitive: HashSet<(String, usize)> = HashSet::new();
-        let transitive: Vec<UsageInfo> = transitive_usages
+        let mut transitive: Vec<UsageInfo> = transitive_usages
             .iter()
             .filter(|(_, d, _)| *d > 1)
             .filter_map(|(n, _, path)| {
@@ -884,6 +2688,25 @@ impl ContextFinderService {
                 })
             })
             .collect();
+        if transitive.len() > MAX_TRANSITIVE {
+            transitive.truncate(MAX_TRANSITIVE);
+        }
+
+        // Always add bounded TextMatch hits to reduce false negatives when the graph is incomplete.
+        let exclude_chunk_id = graph.get_node(node).map(|nd| nd.chunk_id.as_str());
+        let remaining = MAX_DIRECT.saturating_sub(direct.len());
+        if remaining > 0 {
+            for usage in Self::find_text_usages(chunks, &symbol, exclude_chunk_id, remaining) {
+                let key = (usage.file.clone(), usage.line);
+                if !seen_direct.insert(key) {
+                    continue;
+                }
+                direct.push(usage);
+                if direct.len() >= MAX_DIRECT {
+                    break;
+                }
+            }
+        }
 
         // Find related tests (deduplicated)
         let test_nodes = graph.find_related_tests(node);
@@ -902,10 +2725,10 @@ impl ContextFinderService {
         let public_api = graph.is_public_api(node);
 
         // Generate Mermaid diagram
-        let mermaid = Self::generate_impact_mermaid(&request.symbol, &direct, &transitive);
+        let mermaid = Self::generate_impact_mermaid(&symbol, &direct, &transitive);
 
         let total_usages = direct.len() + transitive.len();
-        
+
         // Count unique files affected
         let files_affected: HashSet<&str> = direct
             .iter()
@@ -914,7 +2737,7 @@ impl ContextFinderService {
             .collect();
 
         let result = ImpactResult {
-            symbol: request.symbol,
+            symbol,
             definition,
             total_usages,
             files_affected: files_affected.len(),
@@ -930,42 +2753,214 @@ impl ContextFinderService {
         )]))
     }
 
+    fn find_text_usages(
+        chunks: &[context_code_chunker::CodeChunk],
+        symbol: &str,
+        exclude_chunk_id: Option<&str>,
+        max_results: usize,
+    ) -> Vec<UsageInfo> {
+        if symbol.is_empty() || max_results == 0 {
+            return Vec::new();
+        }
+
+        let mut out = Vec::new();
+        let mut seen: HashSet<(String, usize)> = HashSet::new();
+
+        for chunk in chunks {
+            if out.len() >= max_results {
+                break;
+            }
+
+            if chunk.file_path.ends_with(".md") {
+                continue;
+            }
+
+            let chunk_id = format!(
+                "{}:{}:{}",
+                chunk.file_path, chunk.start_line, chunk.end_line
+            );
+            if let Some(exclude) = exclude_chunk_id {
+                if chunk_id == exclude {
+                    continue;
+                }
+            }
+
+            let Some(hit_byte) = Self::find_word_boundary(&chunk.content, symbol) else {
+                continue;
+            };
+
+            let line_offset = chunk.content[..hit_byte]
+                .bytes()
+                .filter(|b| *b == b'\n')
+                .count();
+            let line = chunk.start_line + line_offset;
+            if !seen.insert((chunk.file_path.clone(), line)) {
+                continue;
+            }
+
+            out.push(UsageInfo {
+                file: chunk.file_path.clone(),
+                line,
+                symbol: chunk
+                    .metadata
+                    .symbol_name
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                relationship: "TextMatch".to_string(),
+            });
+        }
+
+        out
+    }
+
+    fn find_word_boundary(haystack: &str, needle: &str) -> Option<usize> {
+        if needle.is_empty() {
+            return None;
+        }
+
+        let needle_is_ident = needle.bytes().all(Self::is_ident_byte);
+        if !needle_is_ident {
+            return haystack.find(needle);
+        }
+
+        let bytes = haystack.as_bytes();
+        for (idx, _) in haystack.match_indices(needle) {
+            let left_ok = idx == 0 || !Self::is_ident_byte(bytes[idx - 1]);
+            let right_idx = idx + needle.len();
+            let right_ok = right_idx >= bytes.len() || !Self::is_ident_byte(bytes[right_idx]);
+            if left_ok && right_ok {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
+    const fn is_ident_byte(b: u8) -> bool {
+        matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+    }
+
+    fn match_in_line(
+        line: &str,
+        pattern: &str,
+        case_sensitive: bool,
+        whole_word: bool,
+    ) -> Option<usize> {
+        if case_sensitive {
+            if whole_word {
+                Self::find_word_boundary(line, pattern)
+            } else {
+                line.find(pattern)
+            }
+        } else {
+            let line_lower = line.to_ascii_lowercase();
+            let pat_lower = pattern.to_ascii_lowercase();
+            if whole_word {
+                Self::find_word_boundary(&line_lower, &pat_lower)
+            } else {
+                line_lower.find(&pat_lower)
+            }
+        }
+    }
+
+    fn matches_file_pattern(path: &str, pattern: Option<&str>) -> bool {
+        let Some(pattern) = pattern else {
+            return true;
+        };
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            return true;
+        }
+
+        if !pattern.contains('*') && !pattern.contains('?') {
+            return path.contains(pattern);
+        }
+
+        Self::glob_match(pattern, path)
+    }
+
+    // Minimal glob matcher supporting '*' and '?'.
+    fn glob_match(pattern: &str, text: &str) -> bool {
+        let p = pattern.as_bytes();
+        let t = text.as_bytes();
+        let mut p_idx = 0usize;
+        let mut t_idx = 0usize;
+        let mut star_idx: Option<usize> = None;
+        let mut match_idx = 0usize;
+
+        while t_idx < t.len() {
+            if p_idx < p.len() && (p[p_idx] == b'?' || p[p_idx] == t[t_idx]) {
+                p_idx += 1;
+                t_idx += 1;
+                continue;
+            }
+
+            if p_idx < p.len() && p[p_idx] == b'*' {
+                star_idx = Some(p_idx);
+                match_idx = t_idx;
+                p_idx += 1;
+                continue;
+            }
+
+            if let Some(star) = star_idx {
+                p_idx = star + 1;
+                match_idx += 1;
+                t_idx = match_idx;
+                continue;
+            }
+
+            return false;
+        }
+
+        while p_idx < p.len() && p[p_idx] == b'*' {
+            p_idx += 1;
+        }
+        p_idx == p.len()
+    }
+
     /// Trace call path between two symbols
-    #[tool(description = "Show call chain from one symbol to another. Essential for understanding code flow and debugging.")]
+    #[tool(
+        description = "Show call chain from one symbol to another. Essential for understanding code flow and debugging."
+    )]
     pub async fn trace(
         &self,
         Parameters(request): Parameters<TraceRequest>,
     ) -> Result<CallToolResult, McpError> {
         let path = PathBuf::from(request.path.unwrap_or_else(|| ".".to_string()));
-        let language = Self::parse_language(request.language.as_deref());
-
-        let (_root, index_path) = match Self::resolve_project(&path) {
+        let root = match path.canonicalize() {
             Ok(p) => p,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
-        };
-
-        let (_store, chunks) = match Self::load_store(&index_path).await {
-            Ok(s) => s,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
-        };
-
-        // Build graph
-        let mut builder = match GraphBuilder::new(language) {
-            Ok(b) => b,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Graph builder error: {e}"
+                    "Invalid path: {e}"
                 ))]));
             }
         };
-        let graph = match builder.build(&chunks) {
-            Ok(g) => g,
+
+        let mut engine = match self.lock_engine(&root).await {
+            Ok(engine) => engine,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Graph build error: {e}"
+                    "Error: {e}"
                 ))]));
             }
         };
+
+        let language = match request.language.as_deref() {
+            Some(lang) => Self::parse_language(Some(lang)),
+            None => Self::detect_language(engine.engine_mut().context_search.hybrid().chunks()),
+        };
+
+        if let Err(e) = engine.engine_mut().ensure_graph(language).await {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Graph build error: {e}"
+            ))]));
+        }
+
+        let Some(assembler) = engine.engine_mut().context_search.assembler() else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Graph build error: missing assembler after build",
+            )]));
+        };
+        let graph = assembler.graph();
 
         // Find both symbols
         let from_node = match graph.find_node(&request.from) {
@@ -1031,41 +3026,49 @@ impl ContextFinderService {
     }
 
     /// Deep dive into a symbol
-    #[tool(description = "Get complete information about a symbol: definition, dependencies, dependents, tests, and documentation.")]
+    #[tool(
+        description = "Get complete information about a symbol: definition, dependencies, dependents, tests, and documentation."
+    )]
     pub async fn explain(
         &self,
         Parameters(request): Parameters<ExplainRequest>,
     ) -> Result<CallToolResult, McpError> {
         let path = PathBuf::from(request.path.unwrap_or_else(|| ".".to_string()));
-        let language = Self::parse_language(request.language.as_deref());
-
-        let (_root, index_path) = match Self::resolve_project(&path) {
+        let root = match path.canonicalize() {
             Ok(p) => p,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
-        };
-
-        let (_store, chunks) = match Self::load_store(&index_path).await {
-            Ok(s) => s,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
-        };
-
-        // Build graph
-        let mut builder = match GraphBuilder::new(language) {
-            Ok(b) => b,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Graph builder error: {e}"
+                    "Invalid path: {e}"
                 ))]));
             }
         };
-        let graph = match builder.build(&chunks) {
-            Ok(g) => g,
+
+        let mut engine = match self.lock_engine(&root).await {
+            Ok(engine) => engine,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Graph build error: {e}"
+                    "Error: {e}"
                 ))]));
             }
         };
+
+        let language = match request.language.as_deref() {
+            Some(lang) => Self::parse_language(Some(lang)),
+            None => Self::detect_language(engine.engine_mut().context_search.hybrid().chunks()),
+        };
+
+        if let Err(e) = engine.engine_mut().ensure_graph(language).await {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Graph build error: {e}"
+            ))]));
+        }
+
+        let Some(assembler) = engine.engine_mut().context_search.assembler() else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Graph build error: missing assembler after build",
+            )]));
+        };
+        let graph = assembler.graph();
 
         // Find the symbol
         let node = match graph.find_node(&request.symbol) {
@@ -1161,28 +3164,55 @@ impl ContextFinderService {
     }
 
     /// Project architecture overview
-    #[tool(description = "Get project architecture snapshot: layers, entry points, key types, and graph statistics. Use this first to understand a new codebase.")]
+    #[tool(
+        description = "Get project architecture snapshot: layers, entry points, key types, and graph statistics. Use this first to understand a new codebase."
+    )]
     pub async fn overview(
         &self,
         Parameters(request): Parameters<OverviewRequest>,
     ) -> Result<CallToolResult, McpError> {
         let path = PathBuf::from(request.path.unwrap_or_else(|| ".".to_string()));
 
-        let (root, index_path) = match Self::resolve_project(&path) {
+        let root = match path.canonicalize() {
             Ok(p) => p,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid path: {e}"
+                ))]));
+            }
         };
 
-        let (_store, chunks) = match Self::load_store(&index_path).await {
-            Ok(s) => s,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Error: {e}"))])),
+        let mut engine = match self.lock_engine(&root).await {
+            Ok(engine) => engine,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Error: {e}"
+                ))]));
+            }
         };
 
-        // Auto-detect language if not specified
         let language = match request.language.as_deref() {
             Some(lang) => Self::parse_language(Some(lang)),
-            None => Self::detect_language(&chunks),
+            None => {
+                let chunks = engine.engine_mut().context_search.hybrid().chunks();
+                Self::detect_language(chunks)
+            }
         };
+
+        if let Err(e) = engine.engine_mut().ensure_graph(language).await {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Graph build error: {e}"
+            ))]));
+        }
+
+        let engine_ref = engine.engine_mut();
+        let chunks = engine_ref.context_search.hybrid().chunks();
+        let Some(assembler) = engine_ref.context_search.assembler() else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Graph build error: missing assembler after build",
+            )]));
+        };
+        let graph = assembler.graph();
 
         // Compute project info
         let total_files: HashSet<&str> = chunks.iter().map(|c| c.file_path.as_str()).collect();
@@ -1201,7 +3231,7 @@ impl ContextFinderService {
 
         // Compute layers by top-level directory only (skip individual files at root)
         let mut layer_files: HashMap<String, HashSet<&str>> = HashMap::new();
-        for chunk in &chunks {
+        for chunk in chunks {
             let parts: Vec<&str> = chunk.file_path.split('/').collect();
             // Only use directories (skip root-level files)
             if parts.len() > 1 {
@@ -1227,24 +3257,6 @@ impl ContextFinderService {
         // Sort by file count descending for better overview
         layers.sort_by(|a, b| b.files.cmp(&a.files));
 
-        // Build graph for analysis
-        let mut builder = match GraphBuilder::new(language) {
-            Ok(b) => b,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Graph builder error: {e}"
-                ))]));
-            }
-        };
-        let graph = match builder.build(&chunks) {
-            Ok(g) => g,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Graph build error: {e}"
-                ))]));
-            }
-        };
-
         // Find entry points (filter unknown, tests, and deduplicate)
         let entry_nodes = graph.find_entry_points();
         let mut entry_points: Vec<String> = entry_nodes
@@ -1253,8 +3265,8 @@ impl ContextFinderService {
                 graph.get_node(*n).and_then(|nd| {
                     let name = &nd.symbol.name;
                     // Skip unknown, test functions, and markdown
-                    if name == "unknown" 
-                        || name.starts_with("test_") 
+                    if name == "unknown"
+                        || name.starts_with("test_")
                         || nd.symbol.file_path.ends_with(".md")
                         || nd.symbol.file_path.contains("/tests/")
                     {
@@ -1375,7 +3387,11 @@ impl ContextFinderService {
         }
     }
 
-    fn generate_impact_mermaid(symbol: &str, direct: &[UsageInfo], transitive: &[UsageInfo]) -> String {
+    fn generate_impact_mermaid(
+        symbol: &str,
+        direct: &[UsageInfo],
+        transitive: &[UsageInfo],
+    ) -> String {
         let mut lines = vec!["graph LR".to_string()];
 
         // Add direct edges
@@ -1423,9 +3439,307 @@ impl ContextFinderService {
     }
 
     fn mermaid_safe(s: &str) -> String {
-        s.replace("::", "_")
-            .replace('<', "_")
-            .replace('>', "_")
-            .replace(' ', "_")
+        s.replace("::", "_").replace(['<', '>', ' '], "_")
+    }
+}
+
+fn graph_language_key(language: GraphLanguage) -> &'static str {
+    match language {
+        GraphLanguage::Rust => "rust",
+        GraphLanguage::Python => "python",
+        GraphLanguage::JavaScript => "javascript",
+        GraphLanguage::TypeScript => "typescript",
+    }
+}
+
+fn pack_enriched_results(
+    profile: &SearchProfile,
+    enriched: Vec<context_search::EnrichedResult>,
+    max_chars: usize,
+    max_related_per_primary: usize,
+) -> (Vec<ContextPackItem>, ContextPackBudget) {
+    let mut used_chars = 0usize;
+    let mut truncated = false;
+    let mut dropped_items = 0usize;
+
+    let mut items: Vec<ContextPackItem> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for er in enriched {
+        let primary = er.primary;
+        let primary_id = primary.id.clone();
+        if !seen.insert(primary_id.clone()) {
+            continue;
+        }
+
+        let primary_item = ContextPackItem {
+            id: primary_id,
+            role: "primary".to_string(),
+            file: primary.chunk.file_path.clone(),
+            start_line: primary.chunk.start_line,
+            end_line: primary.chunk.end_line,
+            symbol: primary.chunk.metadata.symbol_name.clone(),
+            chunk_type: primary
+                .chunk
+                .metadata
+                .chunk_type
+                .map(|ct| ct.as_str().to_string()),
+            score: primary.score,
+            imports: primary.chunk.metadata.context_imports.clone(),
+            content: primary.chunk.content,
+            relationship: None,
+            distance: None,
+        };
+        let cost = estimate_item_chars(&primary_item);
+        if used_chars.saturating_add(cost) > max_chars {
+            truncated = true;
+            dropped_items += 1;
+            break;
+        }
+        used_chars += cost;
+        items.push(primary_item);
+
+        let mut related = er.related;
+        related.retain(|rc| !profile.is_rejected(&rc.chunk.file_path));
+        related.sort_by(|a, b| {
+            b.relevance_score
+                .total_cmp(&a.relevance_score)
+                .then_with(|| a.distance.cmp(&b.distance))
+                .then_with(|| a.chunk.file_path.cmp(&b.chunk.file_path))
+                .then_with(|| a.chunk.start_line.cmp(&b.chunk.start_line))
+        });
+
+        let relationship_cap = |kind: &str| -> usize {
+            match kind {
+                "Calls" => 6,
+                "Uses" => 6,
+                "Contains" => 4,
+                "Extends" => 3,
+                "Imports" => 2,
+                "TestedBy" => 2,
+                _ => 2,
+            }
+        };
+
+        let mut selected_related = 0usize;
+        let mut per_relationship: HashMap<String, usize> = HashMap::new();
+        for rc in related {
+            if selected_related >= max_related_per_primary {
+                break;
+            }
+
+            let kind = rc
+                .relationship_path
+                .first()
+                .cloned()
+                .unwrap_or_else(String::new);
+            let cap = relationship_cap(&kind);
+            let used = per_relationship.get(kind.as_str()).copied().unwrap_or(0);
+            if used >= cap {
+                continue;
+            }
+
+            let id = format!(
+                "{}:{}:{}",
+                rc.chunk.file_path, rc.chunk.start_line, rc.chunk.end_line
+            );
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+
+            let item = ContextPackItem {
+                id,
+                role: "related".to_string(),
+                file: rc.chunk.file_path.clone(),
+                start_line: rc.chunk.start_line,
+                end_line: rc.chunk.end_line,
+                symbol: rc.chunk.metadata.symbol_name.clone(),
+                chunk_type: rc
+                    .chunk
+                    .metadata
+                    .chunk_type
+                    .map(|ct| ct.as_str().to_string()),
+                score: rc.relevance_score,
+                imports: rc.chunk.metadata.context_imports.clone(),
+                content: rc.chunk.content,
+                relationship: Some(rc.relationship_path),
+                distance: Some(rc.distance),
+            };
+
+            let cost = estimate_item_chars(&item);
+            if used_chars.saturating_add(cost) > max_chars {
+                truncated = true;
+                dropped_items += 1;
+                break;
+            }
+            used_chars += cost;
+            items.push(item);
+            *per_relationship.entry(kind).or_insert(0) += 1;
+            selected_related += 1;
+        }
+
+        if truncated {
+            break;
+        }
+    }
+
+    (
+        items,
+        ContextPackBudget {
+            max_chars,
+            used_chars,
+            truncated,
+            dropped_items,
+        },
+    )
+}
+
+fn estimate_item_chars(item: &ContextPackItem) -> usize {
+    let imports: usize = item.imports.iter().map(|s| s.len() + 1).sum();
+    item.content.len() + imports + 128
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use context_code_chunker::ChunkMetadata;
+
+    #[test]
+    fn word_boundary_match_hits_only_whole_identifier() {
+        assert!(ContextFinderService::find_word_boundary("fn new() {}", "new").is_some());
+        assert!(ContextFinderService::find_word_boundary("renew", "new").is_none());
+        assert!(ContextFinderService::find_word_boundary("news", "new").is_none());
+        assert!(ContextFinderService::find_word_boundary("new_", "new").is_none());
+        assert!(ContextFinderService::find_word_boundary(" new ", "new").is_some());
+    }
+
+    #[test]
+    fn text_usages_compute_line_and_respect_exclusion() {
+        let chunk = context_code_chunker::CodeChunk::new(
+            "a.rs".to_string(),
+            10,
+            20,
+            "fn caller() {\n  touch_daemon_best_effort();\n}\n".to_string(),
+            ChunkMetadata::default()
+                .symbol_name("caller")
+                .chunk_type(context_code_chunker::ChunkType::Function),
+        );
+
+        let usages = ContextFinderService::find_text_usages(
+            std::slice::from_ref(&chunk),
+            "touch_daemon_best_effort",
+            None,
+            10,
+        );
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].file, "a.rs");
+        assert_eq!(usages[0].line, 11);
+        assert_eq!(usages[0].symbol, "caller");
+        assert_eq!(usages[0].relationship, "TextMatch");
+
+        let exclude = format!(
+            "{}:{}:{}",
+            chunk.file_path, chunk.start_line, chunk.end_line
+        );
+        let excluded = ContextFinderService::find_text_usages(
+            &[chunk],
+            "touch_daemon_best_effort",
+            Some(&exclude),
+            10,
+        );
+        assert!(excluded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn map_works_without_index_and_has_no_side_effects() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src").join("main.rs"),
+            "fn main() { println!(\"hi\"); }\n",
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs").join("README.md"), "# Hello\n").unwrap();
+
+        assert!(!root.join(".context-finder").exists());
+
+        let result = compute_map_result(root, 1, 20).await.unwrap();
+        assert_eq!(result.total_files, 2);
+        assert!(result.total_chunks > 0);
+        assert!(result.directories.iter().any(|d| d.path == "src"));
+        assert!(result.directories.iter().any(|d| d.path == "docs"));
+
+        // `map` must not create indexes/corpus.
+        assert!(!root.join(".context-finder").exists());
+    }
+
+    #[tokio::test]
+    async fn doctor_manifest_parsing_reports_missing_assets() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let model_dir = tmp.path().join("models");
+        std::fs::create_dir_all(&model_dir).unwrap();
+
+        std::fs::write(
+            model_dir.join("manifest.json"),
+            r#"{"schema_version":1,"models":[{"id":"m1","assets":[{"path":"m1/model.onnx"}]}]}"#,
+        )
+        .unwrap();
+
+        let (exists, models) = load_model_statuses(&model_dir).await.unwrap();
+        assert!(exists);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "m1");
+        assert!(!models[0].installed);
+        assert_eq!(models[0].missing_assets, vec!["m1/model.onnx"]);
+    }
+
+    #[tokio::test]
+    async fn doctor_drift_helpers_detect_missing_and_extra_chunks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let corpus_path = tmp.path().join("corpus.json");
+        let index_path = tmp.path().join("index.json");
+
+        let mut corpus = ChunkCorpus::new();
+        corpus.set_file_chunks(
+            "a.rs".to_string(),
+            vec![context_code_chunker::CodeChunk::new(
+                "a.rs".to_string(),
+                1,
+                2,
+                "alpha".to_string(),
+                ChunkMetadata::default(),
+            )],
+        );
+        corpus.set_file_chunks(
+            "c.rs".to_string(),
+            vec![context_code_chunker::CodeChunk::new(
+                "c.rs".to_string(),
+                10,
+                12,
+                "gamma".to_string(),
+                ChunkMetadata::default(),
+            )],
+        );
+        corpus.save(&corpus_path).await.unwrap();
+
+        // Index contains one correct chunk id (a.rs:1:2) and one extra (b.rs:1:1),
+        // while missing c.rs:10:12.
+        std::fs::write(
+            &index_path,
+            r#"{"schema_version":3,"dimension":384,"next_id":2,"id_map":{"0":"a.rs:1:2","1":"b.rs:1:1"},"vectors":{}}"#,
+        )
+        .unwrap();
+
+        let corpus_ids = load_corpus_chunk_ids(&corpus_path).await.unwrap();
+        let index_ids = load_index_chunk_ids(&index_path).await.unwrap();
+
+        assert_eq!(corpus_ids.len(), 2);
+        assert_eq!(index_ids.len(), 2);
+        assert_eq!(corpus_ids.difference(&index_ids).count(), 1);
+        assert_eq!(index_ids.difference(&corpus_ids).count(), 1);
     }
 }

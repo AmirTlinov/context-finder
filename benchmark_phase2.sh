@@ -1,9 +1,17 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${ROOT_DIR}"
 
-PROJECT_ROOT="/home/amir/Документы/PROJECTS/skills/apply_context/context-finder"
-cd "$PROJECT_ROOT"
+CLI="${CLI:-./target/release/context-finder}"
+if [[ ! -x "${CLI}" ]]; then
+  echo "[benchmark_phase2] CLI not found at ${CLI}. Build it with: cargo build --release -p context-finder-cli" >&2
+  exit 1
+fi
+
+EMBED_MODE="${CONTEXT_FINDER_EMBEDDING_MODE:-stub}"
+COMMON=(--quiet --embed-mode "${EMBED_MODE}")
 
 echo "╔════════════════════════════════════════════════════════════════╗"
 echo "║         Phase 2 Benchmark Suite - AI Agent Optimization       ║"
@@ -28,16 +36,16 @@ echo
 rm -rf .context-finder/
 
 echo "Test 1.1: Full index (cold start)"
-time cargo run --release --bin context-finder-cli -- index . 2>&1 | grep -E "files|chunks|time_ms" | head -10
+"${CLI}" "${COMMON[@]}" index . --json | jq -r '.data.stats | "files=\(.files) chunks=\(.chunks) time_ms=\(.time_ms)"'
 echo
 
 echo "Test 1.2: Re-index with no changes (incremental)"
-time cargo run --release --bin context-finder-cli -- index . 2>&1 | grep -E "Incremental|files|chunks|time_ms" | head -10
+"${CLI}" "${COMMON[@]}" index . --json | jq -r '.data.stats | "files=\(.files) chunks=\(.chunks) time_ms=\(.time_ms)"'
 echo
 
 echo "Test 1.3: Touch one file and re-index"
 touch crates/search/src/fusion.rs
-time cargo run --release --bin context-finder-cli -- index . 2>&1 | grep -E "Incremental|files|chunks|time_ms" | head -10
+"${CLI}" "${COMMON[@]}" index . --json | jq -r '.data.stats | "files=\(.files) chunks=\(.chunks) time_ms=\(.time_ms)"'
 echo
 
 # ============================================================================
@@ -68,9 +76,9 @@ for query in "${queries[@]}"; do
     echo -ne "Testing: \"$query\"... "
 
     # Run search and check if we got results
-    result=$(cargo run --release --bin context-finder-cli -- search "$query" --limit 1 2>&1)
+    result=$("${CLI}" "${COMMON[@]}" search "$query" --limit 1 --json)
 
-    if echo "$result" | grep -q "file_path"; then
+    if echo "$result" | jq -e '.data.results | length > 0' >/dev/null; then
         echo -e "${GREEN}✓ PASS${NC}"
         ((accuracy_count++))
     else
@@ -92,23 +100,23 @@ echo "────────────────────────�
 echo
 
 echo "Test 3.1: Check for imports in chunks"
-result=$(cargo run --release --bin context-finder-cli -- search "embedding model" --limit 1 --verbose 2>&1)
+result=$("${CLI}" "${COMMON[@]}" --verbose search "embedding model" --limit 1 --json)
 
-if echo "$result" | grep -q "use "; then
+if echo "$result" | jq -r '.data.results[0].content // ""' | grep -q "use "; then
     echo -e "${GREEN}✓${NC} Imports present in chunk content"
 else
     echo -e "${YELLOW}⚠${NC} No imports detected (might be expected for some chunks)"
 fi
 
 echo "Test 3.2: Check for docstrings in chunks"
-if echo "$result" | grep -q "///\|#\|//"; then
+if echo "$result" | jq -r '.data.results[0].content // ""' | grep -q "///\\|#\\|//"; then
     echo -e "${GREEN}✓${NC} Docstrings present in chunk content"
 else
     echo -e "${YELLOW}⚠${NC} No docstrings detected"
 fi
 
 echo "Test 3.3: Check for qualified names"
-if echo "$result" | grep -q "::"; then
+if echo "$result" | jq -r '.data.results[0].content // ""' | grep -q "::"; then
     echo -e "${GREEN}✓${NC} Qualified names present (e.g., Class::method)"
 else
     echo -e "${YELLOW}⚠${NC} No qualified names detected"
@@ -124,17 +132,19 @@ echo "────────────────────────�
 echo
 
 echo "Test 4.1: Search latency (single query)"
-time cargo run --release --bin context-finder-cli -- search "error handling" --limit 10 2>&1 | grep -E "time_ms|results" | head -5
+"${CLI}" "${COMMON[@]}" search "error handling" --limit 10 --json \
+  | jq -r '{results: (.data.results | length), duration_ms: .meta.duration_ms}'
 echo
 
 echo "Test 4.2: Memory efficiency"
 echo "Index size:"
-du -h .context-finder/index.json
-du -h .context-finder/mtimes.json
+du -h .context-finder/indexes/*/index.json 2>/dev/null || true
+du -h .context-finder/indexes/*/mtimes.json 2>/dev/null || true
+du -h .context-finder/corpus.json 2>/dev/null || true
 echo
 
 echo "Test 4.3: Chunk statistics"
-cargo run --release --bin context-finder-cli -- index . 2>&1 | grep -E "files|chunks|lines" | tail -20
+"${CLI}" "${COMMON[@]}" index . --json | jq -r '.data.stats | {files, chunks, total_lines, time_ms}'
 echo
 
 # ============================================================================

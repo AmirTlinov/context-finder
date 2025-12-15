@@ -2,10 +2,11 @@ use crate::error::{Result, SearchError};
 use crate::fusion::{AstBooster, RRFFusion};
 use crate::fuzzy::FuzzySearch;
 use crate::profile::SearchProfile;
-use crate::query_classifier::{QueryClassifier, QueryWeights};
+use crate::query_classifier::{QueryClassifier, QueryType, QueryWeights};
 use crate::query_expansion::QueryExpander;
 use crate::rerank::rerank_candidates;
 use context_code_chunker::CodeChunk;
+use context_vector_store::QueryKind;
 use context_vector_store::{SearchResult, VectorStore};
 use std::collections::HashMap;
 /// Hybrid search combining semantic, fuzzy, and RRF fusion
@@ -54,6 +55,16 @@ impl HybridSearch {
         let weights = QueryClassifier::weights(query);
         let candidate_pool = Self::candidate_pool(limit, weights.candidate_multiplier);
         let tokens = query_tokens(query);
+        let query_type = QueryClassifier::classify(query);
+        let query_kind = match query_type {
+            QueryType::Identifier => QueryKind::Identifier,
+            QueryType::Path => QueryKind::Path,
+            QueryType::Conceptual => QueryKind::Conceptual,
+        };
+        let embedding_query = self
+            .profile
+            .embedding()
+            .render_query(query_kind, &expanded_query)?;
 
         // Build chunk id -> index mapping
         let mut chunk_id_to_idx: HashMap<String, usize> = HashMap::new();
@@ -71,7 +82,10 @@ impl HybridSearch {
         }
 
         // 1. Semantic search (embeddings + cosine similarity) with expanded query
-        let semantic_results = self.store.search(&expanded_query, candidate_pool).await?;
+        let semantic_results = self
+            .store
+            .search_with_embedding_text(&embedding_query, candidate_pool)
+            .await?;
         log::debug!("Semantic: {} results", semantic_results.len());
 
         // Convert semantic results to (chunk_idx, score) using chunk_id_to_idx
@@ -120,7 +134,13 @@ impl HybridSearch {
                         "{}:{}:{}",
                         chunk.file_path, chunk.start_line, chunk.end_line
                     );
-                    let penalized = score * self.profile.path_weight(&chunk.file_path);
+                    let weight = match query_type {
+                        QueryType::Conceptual => self.profile.path_weight(&chunk.file_path),
+                        QueryType::Identifier | QueryType::Path => {
+                            self.profile.path_boost_weight(&chunk.file_path)
+                        }
+                    };
+                    let penalized = score * weight;
                     SearchResult {
                         chunk: chunk.clone(),
                         score: penalized,
@@ -133,12 +153,8 @@ impl HybridSearch {
         // 6. Normalize scores to 0-1 range
         Self::normalize_scores(&mut final_results);
 
-        // Sort by final score descending
-        final_results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // Sort by final score descending with deterministic tiebreaker.
+        final_results.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
         final_results.truncate(limit);
 
         log::info!(
@@ -225,6 +241,7 @@ impl HybridSearch {
         for (i, query) in queries.iter().enumerate() {
             let semantic_results = &semantic_results_batch[i];
             let weights = query_weights[i];
+            let query_type = QueryClassifier::classify(query);
 
             // Convert semantic results to (chunk_idx, score)
             let semantic_scores: Vec<(usize, f32)> = semantic_results
@@ -271,7 +288,13 @@ impl HybridSearch {
                                 "{}:{}:{}",
                                 chunk.file_path, chunk.start_line, chunk.end_line
                             );
-                            let penalized = score * self.profile.path_weight(&chunk.file_path);
+                            let weight = match query_type {
+                                QueryType::Conceptual => self.profile.path_weight(&chunk.file_path),
+                                QueryType::Identifier | QueryType::Path => {
+                                    self.profile.path_boost_weight(&chunk.file_path)
+                                }
+                            };
+                            let penalized = score * weight;
                             SearchResult {
                                 chunk: chunk.clone(),
                                 score: penalized,
@@ -285,12 +308,8 @@ impl HybridSearch {
             // Normalize scores to 0-1 range
             Self::normalize_scores(&mut final_results);
 
-            // Sort and truncate
-            final_results.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            // Sort and truncate (deterministic tiebreaker).
+            final_results.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
             final_results.truncate(limit);
 
             log::debug!(
@@ -316,7 +335,16 @@ impl HybridSearch {
             return Err(SearchError::EmptyQuery);
         }
 
-        self.store.search(query, limit).await.map_err(Into::into)
+        let query_kind = match QueryClassifier::classify(query) {
+            QueryType::Identifier => QueryKind::Identifier,
+            QueryType::Path => QueryKind::Path,
+            QueryType::Conceptual => QueryKind::Conceptual,
+        };
+        let embedding_query = self.profile.embedding().render_query(query_kind, query)?;
+        self.store
+            .search_with_embedding_text(&embedding_query, limit)
+            .await
+            .map_err(Into::into)
     }
 
     /// Get chunk by ID

@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "bge-small",
+      "description": "Baseline fast English embedding model (ONNX, Xenova conversion).",
+      "dimension": 384,
+      "max_length": 512,
+      "max_batch": 32,
+      "assets": [
+        {
+          "path": "bge-small/model.onnx",
+          "sha256": "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35",
+          "source": {
+            "type": "huggingface",
+            "repo": "Xenova/bge-small-en-v1.5",
+            "revision": "main",
+            "filename": "onnx/model.onnx"
+          }
+        },
+        {
+          "path": "bge-small/tokenizer.json",
+          "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+          "source": {
+            "type": "huggingface",
+            "repo": "Xenova/bge-small-en-v1.5",
+            "revision": "main",
+            "filename": "tokenizer.json"
+          }
+        }
+      ]
+    },
+    {
+      "id": "bge-base",
+      "description": "Higher-quality English embedding model (fp16 ONNX, Xenova conversion).",
+      "dimension": 768,
+      "max_length": 512,
+      "max_batch": 16,
+      "assets": [
+        {
+          "path": "bge-base/model.onnx",
+          "sha256": "6bf19e68279b88e325598658ef0cccc58ac2f085f8c81fadd87e9d2075d868eb",
+          "source": {
+            "type": "huggingface",
+            "repo": "Xenova/bge-base-en-v1.5",
+            "revision": "main",
+            "filename": "onnx/model_fp16.onnx"
+          }
+        },
+        {
+          "path": "bge-base/tokenizer.json",
+          "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+          "source": {
+            "type": "huggingface",
+            "repo": "Xenova/bge-base-en-v1.5",
+            "revision": "main",
+            "filename": "tokenizer.json"
+          }
+        }
+      ]
+    },
+    {
+      "id": "nomic-embed-text-v1",
+      "description": "High-quality long-context embeddings (fp16 ONNX, Xenova conversion).",
+      "dimension": 768,
+      "max_length": 8192,
+      "max_batch": 8,
+      "assets": [
+        {
+          "path": "nomic-embed-text-v1/model.onnx",
+          "sha256": "f2846b04da63ffb8e6c0b9a563da9aa6f14874361b0501e594fb5887f99bbc7b",
+          "source": {
+            "type": "huggingface",
+            "repo": "Xenova/nomic-embed-text-v1",
+            "revision": "main",
+            "filename": "onnx/model_fp16.onnx"
+          }
+        },
+        {
+          "path": "nomic-embed-text-v1/tokenizer.json",
+          "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+          "source": {
+            "type": "huggingface",
+            "repo": "Xenova/nomic-embed-text-v1",
+            "revision": "main",
+            "filename": "tokenizer.json"
+          }
+        }
+      ]
+    },
+    {
+      "id": "multilingual-e5-small",
+      "description": "Multilingual embedding model (fp16 ONNX, Xenova conversion).",
+      "dimension": 384,
+      "max_length": 512,
+      "max_batch": 16,
+      "assets": [
+        {
+          "path": "multilingual-e5-small/model.onnx",
+          "sha256": "0e0fe349c99ea21c6f3aa273af21f7fb753c1e1174ef1647032029c2be3251c3",
+          "source": {
+            "type": "huggingface",
+            "repo": "Xenova/multilingual-e5-small",
+            "revision": "main",
+            "filename": "onnx/model_fp16.onnx"
+          }
+        },
+        {
+          "path": "multilingual-e5-small/tokenizer.json",
+          "sha256": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+          "source": {
+            "type": "huggingface",
+            "repo": "Xenova/multilingual-e5-small",
+            "revision": "main",
+            "filename": "tokenizer.json"
+          }
+        }
+      ]
+    },
+    {
+      "id": "embeddinggemma-300m",
+      "description": "Promptable high-quality embeddings (EmbeddingGemma 300M, ONNX community export, external weights).",
+      "dimension": 768,
+      "max_length": 2048,
+      "max_batch": 8,
+      "assets": [
+        {
+          "path": "embeddinggemma-300m/model_fp16.onnx",
+          "sha256": "dcfaf21ff7cae91af9295366ac0d7352efcadeaf7deefb98f82d5056502d0bf2",
+          "source": {
+            "type": "huggingface",
+            "repo": "onnx-community/embeddinggemma-300m-ONNX",
+            "revision": "main",
+            "filename": "onnx/model_fp16.onnx"
+          }
+        },
+        {
+          "path": "embeddinggemma-300m/model_fp16.onnx_data",
+          "sha256": "1cd839755aa8e24d5af7f16ef275b12d717a4401bb009099b8c17e4156d3d5d5",
+          "source": {
+            "type": "huggingface",
+            "repo": "onnx-community/embeddinggemma-300m-ONNX",
+            "revision": "main",
+            "filename": "onnx/model_fp16.onnx_data"
+          }
+        },
+        {
+          "path": "embeddinggemma-300m/tokenizer.json",
+          "sha256": "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47",
+          "source": {
+            "type": "huggingface",
+            "repo": "onnx-community/embeddinggemma-300m-ONNX",
+            "revision": "main",
+            "filename": "tokenizer.json"
+          }
+        },
+        {
+          "path": "embeddinggemma-300m/tokenizer.model",
+          "sha256": "1299c11d7cf632ef3b4e11937501358ada021bbdf7c47638d13c0ee982f2e79c",
+          "source": {
+            "type": "huggingface",
+            "repo": "onnx-community/embeddinggemma-300m-ONNX",
+            "revision": "main",
+            "filename": "tokenizer.model"
+          }
+        }
+      ]
+    }
+  ]
+}

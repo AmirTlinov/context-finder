@@ -2,7 +2,6 @@
 /target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
 
 # IDE
 .vscode/
@@ -15,13 +14,32 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 
+# Python
+__pycache__/
+
 # Project specific
 .context-finder/
+.fastembed_cache/
+.tasks/
+.serena/
+.claude/
+.last
+.apply_task_projects.yaml
 *.json.bak
+data/project_inventory.json
+data/audit_candidates.local.json
+
+# Audit artifacts (generated)
+audit_*.log
+full_audit.log
 bench/logs/
 bench/results/.current_bench
 bench/results/*.json
-!bench/results/bench_general_rerank.json
-!bench/results/bench_targeted_rerank.json
 .deps/
 .context-finder/cache/ort_cuda/
+
+# Local embedding models (downloaded once; keep binaries out of git)
+models/*
+!models/.gitkeep
+!models/README.md
+!models/manifest.json

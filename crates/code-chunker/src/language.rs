@@ -16,6 +16,15 @@ pub enum Language {
     Ruby,
     Swift,
     Kotlin,
+    Markdown,
+    Yaml,
+    Json,
+    Config,
+    Sql,
+    Shell,
+    Terraform,
+    Html,
+    Css,
     Unknown,
 }
 
@@ -35,6 +44,17 @@ impl Language {
             "rb" => Self::Ruby,
             "swift" => Self::Swift,
             "kt" | "kts" => Self::Kotlin,
+            "md" | "mdx" | "rst" | "adoc" => Self::Markdown,
+            "yaml" | "yml" => Self::Yaml,
+            "json" => Self::Json,
+            "toml" | "ini" | "cfg" | "conf" | "properties" | "env" | "gradle" | "groovy" => {
+                Self::Config
+            }
+            "sql" | "dbml" => Self::Sql,
+            "sh" | "bash" | "zsh" | "fish" | "ps1" | "bat" | "cmd" => Self::Shell,
+            "tf" | "tfvars" | "hcl" => Self::Terraform,
+            "html" => Self::Html,
+            "css" | "scss" | "less" => Self::Css,
             _ => Self::Unknown,
         }
     }
@@ -44,7 +64,18 @@ impl Language {
         path.as_ref()
             .extension()
             .and_then(|ext| ext.to_str())
-            .map_or(Self::Unknown, Self::from_extension)
+            .map(Self::from_extension)
+            .or_else(|| {
+                path.as_ref()
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| match name {
+                        "Dockerfile" | "docker-compose.yml" => Some(Self::Terraform),
+                        "Makefile" | "makefile" => Some(Self::Shell),
+                        _ => None,
+                    })
+            })
+            .unwrap_or(Self::Unknown)
     }
 
     /// Get language name as string
@@ -62,6 +93,15 @@ impl Language {
             Self::Ruby => "ruby",
             Self::Swift => "swift",
             Self::Kotlin => "kotlin",
+            Self::Markdown => "markdown",
+            Self::Yaml => "yaml",
+            Self::Json => "json",
+            Self::Config => "config",
+            Self::Sql => "sql",
+            Self::Shell => "shell",
+            Self::Terraform => "terraform",
+            Self::Html => "html",
+            Self::Css => "css",
             Self::Unknown => "unknown",
         }
     }
@@ -70,10 +110,7 @@ impl Language {
     pub const fn supports_ast(self) -> bool {
         matches!(
             self,
-            Self::Rust
-                | Self::Python
-                | Self::JavaScript
-                | Self::TypeScript
+            Self::Rust | Self::Python | Self::JavaScript | Self::TypeScript
         )
     }
 
@@ -83,9 +120,7 @@ impl Language {
             Self::Rust => Ok(tree_sitter_rust::LANGUAGE.into()),
             Self::Python => Ok(tree_sitter_python::LANGUAGE.into()),
             Self::JavaScript => Ok(tree_sitter_javascript::LANGUAGE.into()),
-            Self::TypeScript => {
-                Ok(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-            }
+            Self::TypeScript => Ok(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
             _ => Err(ChunkerError::unsupported_language(self.as_str())),
         }
     }
@@ -104,6 +139,12 @@ impl Language {
             | Self::Swift
             | Self::Kotlin => vec!["//", "/*", "///", "/**"],
             Self::Python | Self::Ruby => vec!["#", "\"\"\"", "'''"],
+            Self::Markdown => vec![">", "#"],
+            Self::Yaml | Self::Config | Self::Shell => vec!["#"],
+            Self::Json => vec!["//"],
+            Self::Sql => vec!["--", "/*"],
+            Self::Terraform => vec!["#", "//"],
+            Self::Html | Self::Css => vec!["<!--", "/*"],
             Self::Unknown => vec![],
         }
     }
@@ -118,7 +159,16 @@ impl Language {
             Self::CSharp => vec!["using "],
             Self::Ruby => vec!["require ", "include "],
             Self::C | Self::Cpp => vec!["#include "],
-            Self::Unknown => vec![],
+            Self::Yaml
+            | Self::Json
+            | Self::Config
+            | Self::Sql
+            | Self::Shell
+            | Self::Terraform
+            | Self::Markdown
+            | Self::Html
+            | Self::Css
+            | Self::Unknown => vec![],
         }
     }
 
@@ -139,6 +189,21 @@ impl Language {
                 typical_lines: 150,
                 large_lines: 400,
                 huge_lines: 800,
+            },
+            Self::Markdown | Self::Yaml | Self::Json | Self::Config => LanguageSizeLimits {
+                typical_lines: 200,
+                large_lines: 500,
+                huge_lines: 1200,
+            },
+            Self::Sql => LanguageSizeLimits {
+                typical_lines: 150,
+                large_lines: 300,
+                huge_lines: 700,
+            },
+            Self::Shell | Self::Terraform => LanguageSizeLimits {
+                typical_lines: 120,
+                large_lines: 300,
+                huge_lines: 600,
             },
             _ => LanguageSizeLimits {
                 typical_lines: 250,
@@ -169,6 +234,11 @@ mod tests {
         assert_eq!(Language::from_extension("py"), Language::Python);
         assert_eq!(Language::from_extension("js"), Language::JavaScript);
         assert_eq!(Language::from_extension("ts"), Language::TypeScript);
+        assert_eq!(Language::from_extension("md"), Language::Markdown);
+        assert_eq!(Language::from_extension("yaml"), Language::Yaml);
+        assert_eq!(Language::from_extension("json"), Language::Json);
+        assert_eq!(Language::from_extension("toml"), Language::Config);
+        assert_eq!(Language::from_extension("sql"), Language::Sql);
         assert_eq!(Language::from_extension("unknown"), Language::Unknown);
     }
 
@@ -178,6 +248,8 @@ mod tests {
         assert_eq!(Language::from_path("src/main.py"), Language::Python);
         assert_eq!(Language::from_path("index.ts"), Language::TypeScript);
         assert_eq!(Language::from_path("no_extension"), Language::Unknown);
+        assert_eq!(Language::from_path("README.md"), Language::Markdown);
+        assert_eq!(Language::from_path("Dockerfile"), Language::Terraform);
     }
 
     #[test]

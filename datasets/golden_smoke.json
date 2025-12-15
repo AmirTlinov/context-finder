@@ -1,0 +1,260 @@
+{
+  "schema_version": 1,
+  "name": "apply_context_smoke",
+  "cases": [
+    {
+      "id": "chunk_corpus_persistence",
+      "query": "how is the chunk corpus persisted",
+      "expected_paths": ["crates/vector-store/src/corpus.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "vector_index_schema_v3",
+      "query": "schema_version 3 index stores vectors and id_map",
+      "expected_paths": ["crates/vector-store/src/store.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "mcp_load_chunks",
+      "query": "how does the MCP server load chunks for map and search",
+      "expected_paths": ["crates/mcp-server/src/tools.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "path_vector_store_store_rs",
+      "query": "crates/vector-store/src/store.rs",
+      "expected_paths": ["crates/vector-store/src/store.rs"],
+      "intent": "path"
+    },
+    {
+      "id": "identifier_embedding_cache",
+      "query": "EmbeddingCache",
+      "expected_paths": ["crates/vector-store/src/embedding_cache.rs"],
+      "expected_symbols": ["EmbeddingCache"],
+      "intent": "identifier"
+    },
+    {
+      "id": "eval_runner_location",
+      "query": "where is eval implemented",
+      "expected_paths": ["crates/cli/src/command/services/eval.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "eval_report_rendering",
+      "query": "how is eval markdown report rendered",
+      "expected_paths": ["crates/cli/src/report.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "install_models_and_manifest",
+      "query": "как устроена установка моделей и проверка sha256",
+      "expected_paths": ["crates/cli/src/models.rs", "models/manifest.json"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "embedding_templates_validation",
+      "query": "where are embedding template placeholders validated",
+      "expected_paths": ["crates/vector-store/src/templates.rs", "crates/search/src/profile.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "multi_model_semantic_search",
+      "query": "how does multi-model semantic search select models and fuse ranks",
+      "expected_paths": ["crates/search/src/multi.rs", "crates/search/src/fusion.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "query_classifier_logic",
+      "query": "как определяется тип запроса path identifier conceptual",
+      "expected_paths": ["crates/search/src/query_classifier.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "graph_nodes_store_build",
+      "query": "how does graph_nodes store build and cache graph-as-text embeddings",
+      "expected_paths": ["crates/vector-store/src/graph_node_store.rs", "crates/graph/src/graph_doc.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "context_pack_budget",
+      "query": "where is context-pack budget enforced",
+      "expected_paths": ["crates/cli/src/command/services/search.rs", "crates/search/src/context_pack.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "watcher_debounce",
+      "query": "how does the file watcher debounce events",
+      "expected_paths": ["crates/indexer/src/watcher.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "chunker_pipeline",
+      "query": "how are code chunks produced",
+      "expected_paths": ["crates/code-chunker/src/chunker.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "cli_entrypoint_main",
+      "query": "where is the context-finder CLI entrypoint main",
+      "expected_paths": ["crates/cli/src/main.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "cli_default_profile",
+      "query": "где задаётся дефолтный профиль quality fast general",
+      "expected_paths": ["crates/cli/src/main.rs", "crates/cli/src/command/context.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "command_api_execute",
+      "query": "where is CommandRequest executed and routed to services",
+      "expected_paths": ["crates/cli/src/command/mod.rs", "crates/cli/src/command/services/mod.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "identifier_command_action",
+      "query": "CommandAction",
+      "expected_paths": ["crates/cli/src/command/domain.rs"],
+      "expected_symbols": ["CommandAction"],
+      "intent": "identifier"
+    },
+    {
+      "id": "indexer_scanner_gitignore",
+      "query": "how does FileScanner respect gitignore and ignored scopes",
+      "expected_paths": ["crates/indexer/src/scanner.rs"],
+      "expected_symbols": ["FileScanner"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "identifier_ignored_scopes",
+      "query": "IGNORED_SCOPES",
+      "expected_paths": ["crates/indexer/src/scanner.rs"],
+      "expected_symbols": ["IGNORED_SCOPES"],
+      "intent": "identifier"
+    },
+    {
+      "id": "indexer_incremental_mtimes_purge",
+      "query": "how does the indexer do incremental updates using mtimes and purge missing files",
+      "expected_paths": ["crates/indexer/src/indexer.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "embedding_mode_env",
+      "query": "CONTEXT_FINDER_EMBEDDING_MODE fast stub",
+      "expected_paths": ["crates/vector-store/src/embeddings.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "cpu_fallback_policy",
+      "query": "как разрешить cpu fallback если cuda недоступна",
+      "expected_paths": ["crates/vector-store/src/embeddings.rs", "crates/cli/src/models.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "model_registry_capacity_env",
+      "query": "CONTEXT_FINDER_MODEL_REGISTRY_CAPACITY LRU cache",
+      "expected_paths": ["crates/vector-store/src/embeddings.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "identifier_try_direct_file_path",
+      "query": "try_direct_file_path",
+      "expected_paths": ["crates/search/src/multi.rs"],
+      "intent": "identifier"
+    },
+    {
+      "id": "search_service_basic_flow",
+      "query": "SearchService basic loads semantic indexes and runs MultiModelHybridSearch",
+      "expected_paths": ["crates/cli/src/command/services/search.rs"],
+      "expected_symbols": ["SearchService"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "context_pack_schema_doc",
+      "query": "context-pack schema v1",
+      "expected_paths": ["docs/CONTEXT_PACK.md", "crates/search/src/context_pack.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "graph_cache_implementation",
+      "query": "how is the graph cache saved and loaded",
+      "expected_paths": ["crates/cli/src/graph_cache.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "graph_builder_pipeline",
+      "query": "GraphBuilder build nodes edges",
+      "expected_paths": ["crates/graph/src/builder.rs"],
+      "expected_symbols": ["GraphBuilder"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "multi_model_semantic_models_selection",
+      "query": "semantic_search_multi selects desired models from profile experts",
+      "expected_paths": ["crates/search/src/multi.rs", "crates/search/src/profile.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "profiles_builtin_fast_quality",
+      "query": "builtin profile fast quality include_str overlay general",
+      "expected_paths": ["crates/search/src/profile.rs", "profiles/fast.json", "profiles/quality.json"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "models_manifest_schema",
+      "query": "models manifest schema_version sha256 assets",
+      "expected_paths": ["models/manifest.json", "crates/cli/src/models.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "path_query_dot_slash",
+      "query": "./crates/vector-store/src/corpus.rs",
+      "expected_paths": ["crates/vector-store/src/corpus.rs"],
+      "intent": "path"
+    },
+    {
+      "id": "path_query_quoted",
+      "query": "\"crates/search/src/multi.rs\"",
+      "expected_paths": ["crates/search/src/multi.rs"],
+      "intent": "path"
+    },
+    {
+      "id": "doctor_index_drift_detection",
+      "query": "Index drift detected vs corpus for models",
+      "expected_paths": ["crates/mcp-server/src/tools.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "doctor_project_drift_struct",
+      "query": "DoctorIndexDrift DoctorProjectResult drift fields",
+      "expected_paths": ["crates/mcp-server/src/tools.rs"],
+      "expected_symbols": ["DoctorIndexDrift", "DoctorProjectResult"],
+      "intent": "identifier"
+    },
+    {
+      "id": "rerank_noise_soft_filter",
+      "query": "filter_candidates uses is_rejected instead of is_noise",
+      "expected_paths": ["crates/search/src/rerank.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "profile_noise_rules_location",
+      "query": "paths.noise configuration in general profile",
+      "expected_paths": ["profiles/general.json", "crates/search/src/profile.rs"],
+      "intent": "conceptual"
+    },
+    {
+      "id": "mcp_smoke_drift_validation",
+      "query": "locate_context_finder_mcp_bin",
+      "expected_paths": ["crates/mcp-server/tests/mcp_smoke.rs"],
+      "expected_symbols": ["locate_context_finder_mcp_bin"],
+      "intent": "identifier"
+    },
+    {
+      "id": "path_query_cli_report_rs",
+      "query": "crates/cli/src/report.rs",
+      "expected_paths": ["crates/cli/src/report.rs"],
+      "intent": "path"
+    }
+  ]
+}

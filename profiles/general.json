@@ -7,26 +7,54 @@
       { "pattern": "lib/", "kind": "contains", "weight": 1.2 },
       { "pattern": "utils", "kind": "contains", "weight": 1.2 },
       { "pattern": "configs/", "kind": "contains", "weight": 1.35 },
-      { "pattern": "tools/bench", "kind": "contains", "weight": 1.6 },
+      { "pattern": "tools/bench", "kind": "contains", "weight": 1.02 },
       { "pattern": "workspace.yaml", "kind": "suffix", "weight": 1.45 },
       { "pattern": "pnpm-workspace", "kind": "contains", "weight": 1.6 },
-      { "pattern": "bench", "kind": "contains", "weight": 1.35 },
-      { "pattern": "packages/", "kind": "contains", "weight": 1.35 }
+      { "pattern": "packages/", "kind": "contains", "weight": 1.45 }
     ],
     "penalty": [
-      { "pattern": "/tests/", "kind": "contains", "weight": 0.3 },
-      { "pattern": "/test/", "kind": "contains", "weight": 0.3 },
+      { "pattern": "/tests/", "kind": "contains", "weight": 0.15 },
+      { "pattern": "/test/", "kind": "contains", "weight": 0.15 },
+      { "pattern": "__tests__", "kind": "contains", "weight": 0.12 },
       { "pattern": "docs/", "kind": "contains", "weight": 0.35 },
       { "pattern": ".md", "kind": "suffix", "weight": 0.25 },
       { "pattern": ".mdx", "kind": "suffix", "weight": 0.25 },
       { "pattern": "docker", "kind": "contains", "weight": 0.35 },
       { "pattern": "infra", "kind": "contains", "weight": 0.35 },
       { "pattern": "monitoring", "kind": "contains", "weight": 0.45 },
-      { "pattern": "vendor", "kind": "contains", "weight": 0.25 },
+      { "pattern": "vendor", "kind": "contains", "weight": 0.08 },
       { "pattern": ".log", "kind": "suffix", "weight": 0.15 },
       { "pattern": "logs/", "kind": "contains", "weight": 0.15 },
       { "pattern": "data/", "kind": "contains", "weight": 0.45 },
-      { "pattern": "datasets/", "kind": "contains", "weight": 0.45 }
+      { "pattern": "datasets/", "kind": "contains", "weight": 0.45 },
+      { "pattern": "post-context", "kind": "contains", "weight": 0.1 },
+      { "pattern": "marketing", "kind": "contains", "weight": 0.1 },
+      { "pattern": "landing", "kind": "contains", "weight": 0.1 },
+      { "pattern": "roadmap", "kind": "contains", "weight": 0.1 },
+      { "pattern": "/e2e/", "kind": "contains", "weight": 0.3 },
+      { "pattern": "AGENTS", "kind": "contains", "weight": 0.2 },
+      { "pattern": "docker-compose", "kind": "contains", "weight": 0.2 },
+      { "pattern": "compose.yml", "kind": "suffix", "weight": 0.2 },
+      { "pattern": "compose.yaml", "kind": "suffix", "weight": 0.2 },
+      { "pattern": "deploy/", "kind": "contains", "weight": 0.1 },
+      { "pattern": "specs/", "kind": "contains", "weight": 0.05 },
+      { "pattern": "bench_plan", "kind": "contains", "weight": 0.05 },
+      { "pattern": "guardrails", "kind": "contains", "weight": 0.02 },
+      { "pattern": "storefront", "kind": "contains", "weight": 0.05 },
+      { "pattern": "runtime/src/bench", "kind": "contains", "weight": 0.2 },
+      { "pattern": "docker-bake", "kind": "contains", "weight": 0.1 },
+      { "pattern": "scripts/bench", "kind": "contains", "weight": 0.15 },
+      { "pattern": "security/", "kind": "contains", "weight": 0.08 },
+      { "pattern": "runtime/include/hd/flash", "kind": "contains", "weight": 0.15 },
+      { "pattern": "runtime/src/flash", "kind": "contains", "weight": 0.15 },
+      { "pattern": "runtime/include/hd/kv", "kind": "contains", "weight": 0.08 },
+      { "pattern": "runtime/src/kv", "kind": "contains", "weight": 0.08 },
+      { "pattern": "telemetry", "kind": "contains", "weight": 0.08 },
+      { "pattern": "scheduler/bench.py", "kind": "contains", "weight": 0.05 },
+      { "pattern": "warehouse", "kind": "contains", "weight": 0.08 },
+      { "pattern": "bulk", "kind": "contains", "weight": 0.1 },
+      { "pattern": "eslint_runner.bat", "kind": "contains", "weight": 0.08 },
+      { "pattern": "transformer_engine_wheel", "kind": "contains", "weight": 0.01 }
     ],
     "reject": [
       { "pattern": ".git/", "kind": "contains" },
@@ -37,7 +65,8 @@
       { "pattern": "target/", "kind": "contains" },
       { "pattern": ".venv/", "kind": "contains" },
       { "pattern": "venv/", "kind": "contains" },
-      { "pattern": ".direnv/", "kind": "contains" }
+      { "pattern": ".direnv/", "kind": "contains" },
+      { "pattern": "transformer_engine_wheel", "kind": "contains" }
     ],
     "noise": [
       { "pattern": "audit", "kind": "contains" },
@@ -46,26 +75,87 @@
       { "pattern": "docs/", "kind": "contains" },
       { "pattern": "data/", "kind": "contains" },
       { "pattern": "datasets/", "kind": "contains" },
+      { "pattern": "specs/", "kind": "contains" },
+      { "pattern": "bench_plan", "kind": "contains" },
       { "pattern": ".md", "kind": "suffix" },
       { "pattern": ".mdx", "kind": "suffix" },
       { "pattern": ".log", "kind": "suffix" },
-      { "pattern": "bench/logs", "kind": "contains" }
+      { "pattern": "bench/logs", "kind": "contains" },
+      { "pattern": "post-context", "kind": "contains" },
+      { "pattern": "marketing", "kind": "contains" },
+      { "pattern": "landing", "kind": "contains" },
+      { "pattern": "roadmap", "kind": "contains" },
+      { "pattern": "/tests/", "kind": "contains" },
+      { "pattern": "/test/", "kind": "contains" },
+      { "pattern": "__tests__", "kind": "contains" },
+      { "pattern": ".test.", "kind": "contains" },
+      { "pattern": "/e2e/", "kind": "contains" },
+      { "pattern": "AGENTS", "kind": "contains" },
+      { "pattern": "docker-compose", "kind": "contains" },
+      { "pattern": "deploy/", "kind": "contains" },
+      { "pattern": "docker-bake", "kind": "contains" },
+      { "pattern": "guardrails", "kind": "contains" },
+      { "pattern": "storefront", "kind": "contains" },
+      { "pattern": "runtime/src/bench", "kind": "contains" },
+      { "pattern": "runtime/include/hd/flash", "kind": "contains" },
+      { "pattern": "runtime/src/flash", "kind": "contains" },
+      { "pattern": "runtime/include/hd/kv", "kind": "contains" },
+      { "pattern": "runtime/src/kv", "kind": "contains" },
+      { "pattern": "warehouse", "kind": "contains" },
+      { "pattern": "security/", "kind": "contains" },
+      { "pattern": "telemetry", "kind": "contains" },
+      { "pattern": "bulk", "kind": "contains" },
+      { "pattern": "eslint_runner.bat", "kind": "contains" },
+      { "pattern": "scheduler/bench.py", "kind": "contains" },
+      { "pattern": "scripts/bench", "kind": "contains" },
+      { "pattern": "transformer_engine_wheel", "kind": "contains" }
     ]
   },
   "must_hit": [
-    { "pattern": "workspace.yaml", "kind": "suffix", "tokens": ["workspace"], "boost": 1.6 },
-    { "pattern": "pnpm-workspace", "kind": "contains", "tokens": ["workspace"], "boost": 1.65 },
-    { "pattern": "tools/bench", "kind": "contains", "tokens": ["bench"], "boost": 1.6 },
-    { "pattern": "bench_", "kind": "contains", "tokens": ["bench"], "boost": 1.5 },
-    { "pattern": "bench_gemm", "kind": "contains", "tokens": ["gemm"], "boost": 1.9 },
-    { "pattern": "bench_alloc", "kind": "contains", "tokens": ["alloc"], "boost": 1.9 },
-    { "pattern": "packages/utils", "kind": "contains", "tokens": ["utility"], "boost": 1.6 },
-    { "pattern": "utils/", "kind": "contains", "tokens": ["utility"], "boost": 1.4 }
-  ],
+      { "pattern": "workspace.yaml", "kind": "suffix", "tokens": ["workspace"], "boost": 1.6 },
+      { "pattern": "pnpm-workspace", "kind": "contains", "tokens": ["workspace"], "boost": 1.65 },
+      { "pattern": "tools/quant/bench_gemm.py", "kind": "contains", "tokens": ["gemm"], "boost": 2.4 },
+      { "pattern": "tools/kv/bench_allocator.py", "kind": "contains", "tokens": ["alloc"], "boost": 2.4 },
+      { "pattern": "packages/utils", "kind": "contains", "tokens": ["utility"], "boost": 1.8 },
+      { "pattern": "utils/", "kind": "contains", "tokens": ["utility"], "boost": 1.4 }
+    ],
+  "graph_nodes": {
+    "enabled": true,
+    "weight": 0.25,
+    "top_k": 25,
+    "max_neighbors_per_relation": 12
+  },
+  "embedding": {
+    "max_chars": 8192,
+    "query": {
+      "default": "Query: {text}",
+      "identifier": "Identifier: {text}",
+      "path": "Path: {text}",
+      "conceptual": "Question: {text}"
+    },
+    "document": {
+      "default": "File: {path}\nKind: {doc_kind}\nLanguage: {language}\nChunkType: {chunk_type}\nSymbol: {qualified_name}\n\n{text}",
+      "code": "File: {path}\nLanguage: {language}\nChunkType: {chunk_type}\nSymbol: {qualified_name}\nParent: {parent_scope}\nDoc: {documentation}\nImports:\n{imports}\n\n{text}",
+      "docs": "Doc: {path}\n\n{text}",
+      "config": "Config: {path}\n\n{text}",
+      "test": "Test: {path}\nLanguage: {language}\n\n{text}"
+    },
+    "graph_node": { "default": "Graph: {text}" }
+  },
+  "experts": {
+    "schema_version": 1,
+    "semantic": {
+      "default": ["bge-small"],
+      "identifier": ["bge-small"],
+      "path": ["bge-small"],
+      "conceptual": ["embeddinggemma-300m", "multilingual-e5-small", "bge-base", "bge-small"]
+    },
+    "graph_nodes": { "default": ["bge-small"] }
+  },
   "rerank": {
     "thresholds": {
-      "min_fuzzy_score": 0.18,
-      "min_semantic_score": 0.05
+      "min_fuzzy_score": 0.42,
+      "min_semantic_score": 0.3
     },
     "bm25": {
       "k1": 1.35,
@@ -73,13 +163,13 @@
       "window": 210
     },
     "boosts": {
-      "path": 2.0,
+      "path": 1.8,
       "symbol": 2.2,
-      "yaml_path": 1.2,
-      "bm25": 1.15
+      "yaml_path": 1.1,
+      "bm25": 1.1
     },
     "must_hit": {
-      "base_bonus": 150.0
+      "base_bonus": 220.0
     }
   }
 }

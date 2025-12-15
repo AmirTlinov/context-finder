@@ -1,54 +1,69 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Integration testing script for context-finder
-CLI="./target/release/context-finder"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${ROOT_DIR}"
+
+CLI="${CLI:-./target/release/context-finder}"
+if [[ ! -x "${CLI}" ]]; then
+  echo "[test_integration] CLI not found at ${CLI}. Build it with: cargo build --release -p context-finder-cli" >&2
+  exit 1
+fi
+
+EMBED_MODE="${CONTEXT_FINDER_EMBEDDING_MODE:-stub}"
+COMMON=(--quiet --embed-mode "${EMBED_MODE}")
 
 echo "=== INTEGRATION TESTING CONTEXT-FINDER ==="
 echo ""
 
-# Test 1: Semantic search for concepts
-echo "TEST 1: Semantic search - 'error handling'"
-$CLI search "error handling" -l 5 | jq -r '.results[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
+echo "Indexing (required for search/map)..."
+"${CLI}" "${COMMON[@]}" index . --json >/dev/null
+echo "OK"
 echo ""
 
-# Test 2: Semantic search for AST parsing
-echo "TEST 2: Semantic search - 'AST parsing'"
-$CLI search "AST parsing" -l 5 | jq -r '.results[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
+echo "TEST 1: Search - 'error handling'"
+"${CLI}" "${COMMON[@]}" search "error handling" -n 5 --json \
+  | jq -r '.data.results // [] | .[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
 echo ""
 
-# Test 3: Fuzzy search by exact function name
-echo "TEST 3: Fuzzy search - 'chunk_by_tokens'"
-$CLI search "chunk_by_tokens" -l 5 | jq -r '.results[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
+echo "TEST 2: Search - 'AST parsing'"
+"${CLI}" "${COMMON[@]}" search "AST parsing" -n 5 --json \
+  | jq -r '.data.results // [] | .[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
 echo ""
 
-# Test 4: Fuzzy with typo
-echo "TEST 4: Fuzzy with typo - 'embeding' (should find 'embedding')"
-$CLI search "embeding" -l 5 | jq -r '.results[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
+echo "TEST 3: Search - 'chunk_by_tokens'"
+"${CLI}" "${COMMON[@]}" search "chunk_by_tokens" -n 5 --json \
+  | jq -r '.data.results // [] | .[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
 echo ""
 
-# Test 5: Semantic - vector operations
-echo "TEST 5: Semantic - 'vector similarity'"
-$CLI search "vector similarity" -l 5 | jq -r '.results[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
+echo "TEST 4: Search typo - 'embeding' (should find 'embedding')"
+"${CLI}" "${COMMON[@]}" search "embeding" -n 5 --json \
+  | jq -r '.data.results // [] | .[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
 echo ""
 
-# Test 6: Complex query
-echo "TEST 6: Semantic - 'chunk code into functions'"
-$CLI search "chunk code into functions" -l 5 | jq -r '.results[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
+echo "TEST 5: Search - 'vector similarity'"
+"${CLI}" "${COMMON[@]}" search "vector similarity" -n 5 --json \
+  | jq -r '.data.results // [] | .[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
 echo ""
 
-# Test 7: File-specific search
-echo "TEST 7: Fuzzy - 'main' (should find main function)"
-$CLI search "main" -l 5 | jq -r '.results[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
+echo "TEST 6: Search - 'chunk code into functions'"
+"${CLI}" "${COMMON[@]}" search "chunk code into functions" -n 5 --json \
+  | jq -r '.data.results // [] | .[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
 echo ""
 
-# Test 8: Check chunking quality
+echo "TEST 7: Search - 'main' (should find main function)"
+"${CLI}" "${COMMON[@]}" search "main" -n 5 --json \
+  | jq -r '.data.results // [] | .[] | "\(.file):\(.start_line) - \(.symbol // "unknown") (score: \(.score))"'
+echo ""
+
 echo "TEST 8: List symbols in chunker.rs"
-$CLI list-symbols crates/code-chunker/src/chunker.rs | jq -r '.symbols[] | "\(.line): \(.type) \(.name) (parent: \(.parent // "none"))"'
+"${CLI}" "${COMMON[@]}" list-symbols . --file crates/code-chunker/src/chunker.rs --json \
+  | jq -r '.data.symbols[]? | "\(.line): \(.type) \(.name) (parent: \(.parent // "none"))"'
 echo ""
 
-# Test 9: Get context around specific line
-echo "TEST 9: Get context around line 50 in chunker.rs"
-$CLI get-context crates/code-chunker/src/chunker.rs 50 --window 5 | jq '{symbol, type, parent, line, imports: .imports | length}'
+echo "TEST 9: Get aggregated context for queries"
+"${CLI}" "${COMMON[@]}" get-context "chunk_by_tokens" "embedding mode" --path . -n 3 --json \
+  | jq 'if length > 0 then {count: length, top: .[0] | {file, start_line, symbol, score}} else {count: 0} end'
 echo ""
 
 echo "=== TESTING COMPLETE ==="

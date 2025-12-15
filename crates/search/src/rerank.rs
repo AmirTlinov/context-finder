@@ -24,8 +24,13 @@ pub(crate) fn rerank_candidates(
     }
 
     let rerank_cfg = profile.rerank_config().clone();
+    let must_hit_idxs: HashSet<usize> = profile
+        .must_hit_matches(tokens, chunks)
+        .into_iter()
+        .map(|(idx, _)| idx)
+        .collect();
     let candidates = attach_signals(fused_scores, semantic_scores, fuzzy_scores);
-    let filtered = filter_candidates(profile, chunks, &rerank_cfg, candidates);
+    let filtered = filter_candidates(profile, chunks, &rerank_cfg, &must_hit_idxs, candidates);
     if filtered.is_empty() {
         return Vec::new();
     }
@@ -75,14 +80,8 @@ fn attach_signals(
         .map(|(idx, fused)| CandidateSignal {
             idx,
             fused,
-            semantic: semantic_scores
-                .get(&idx)
-                .copied()
-                .filter(|s| s.is_finite()),
-            fuzzy: fuzzy_scores
-                .get(&idx)
-                .copied()
-                .filter(|s| s.is_finite()),
+            semantic: semantic_scores.get(&idx).copied().filter(|s| s.is_finite()),
+            fuzzy: fuzzy_scores.get(&idx).copied().filter(|s| s.is_finite()),
         })
         .collect()
 }
@@ -91,6 +90,7 @@ fn filter_candidates(
     profile: &SearchProfile,
     chunks: &[CodeChunk],
     cfg: &RerankConfig,
+    must_hit: &HashSet<usize>,
     candidates: Vec<CandidateSignal>,
 ) -> Vec<CandidateSignal> {
     candidates
@@ -99,8 +99,11 @@ fn filter_candidates(
             let Some(chunk) = chunks.get(candidate.idx) else {
                 return false;
             };
-            if profile.is_noise(&chunk.file_path) {
+            if profile.is_rejected(&chunk.file_path) {
                 return false;
+            }
+            if must_hit.contains(&candidate.idx) {
+                return true;
             }
             candidate.passes_thresholds(cfg)
         })
@@ -193,9 +196,8 @@ impl Bm25Context {
             }
             let df = *self.doc_freq.get(token).unwrap_or(&0) as f32;
             let idf = bm25_idf(total_docs, df);
-            let denom = freq
-                + self.cfg.k1
-                    * (1.0 - self.cfg.b + self.cfg.b * dl / self.avg_len.max(1e-3));
+            let denom =
+                freq + self.cfg.k1 * (1.0 - self.cfg.b + self.cfg.b * dl / self.avg_len.max(1e-3));
             if denom > 0.0 {
                 score += idf * (freq * (self.cfg.k1 + 1.0)) / denom;
             }
@@ -205,11 +207,7 @@ impl Bm25Context {
     }
 }
 
-fn tokenize_content(
-    content: &str,
-    window: usize,
-    allow_list: &HashSet<String>,
-) -> Vec<String> {
+fn tokenize_content(content: &str, window: usize, allow_list: &HashSet<String>) -> Vec<String> {
     if window == 0 || allow_list.is_empty() {
         return Vec::new();
     }
@@ -262,11 +260,11 @@ fn symbol_bonus(chunk: &CodeChunk, tokens: &[String], boosts: &RerankBoosts) -> 
         return 0.0;
     };
     let symbol = symbol.to_ascii_lowercase();
-    tokens
-        .iter()
-        .any(|token| symbol.contains(token))
-        .then_some(boosts.symbol)
-        .unwrap_or(0.0)
+    if tokens.iter().any(|token| symbol.contains(token)) {
+        boosts.symbol
+    } else {
+        0.0
+    }
 }
 
 fn is_yaml_path(path: &str) -> bool {
@@ -325,14 +323,16 @@ mod tests {
             Some("general"),
         )
         .unwrap();
-        let chunks = vec![chunk("src/a.rs", "a", "alpha beta"), chunk("src/b.rs", "b", "beta")];
+        let chunks = vec![
+            chunk("src/a.rs", "a", "alpha beta"),
+            chunk("src/b.rs", "b", "beta"),
+        ];
         let tokens = query_tokens("alpha beta");
         let fused = vec![(0, 1.0), (1, 0.8)];
         let semantic = map_scores(&[(0, 0.1), (1, 0.6)]);
         let fuzzy = map_scores(&[(0, 0.1), (1, 0.9)]);
 
-        let reranked =
-            rerank_candidates(&profile, &chunks, &tokens, fused, &semantic, &fuzzy);
+        let reranked = rerank_candidates(&profile, &chunks, &tokens, fused, &semantic, &fuzzy);
 
         assert_eq!(reranked.len(), 1);
         assert_eq!(reranked[0].0, 1);
@@ -359,8 +359,7 @@ mod tests {
         let semantic = map_scores(&[(0, 0.9), (1, 0.9)]);
         let fuzzy = map_scores(&[(0, 0.3), (1, 0.3)]);
 
-        let reranked =
-            rerank_candidates(&profile, &chunks, &tokens, fused, &semantic, &fuzzy);
+        let reranked = rerank_candidates(&profile, &chunks, &tokens, fused, &semantic, &fuzzy);
 
         assert_eq!(reranked[0].0, 0);
         assert!(reranked[0].1 > reranked[1].1);
@@ -392,8 +391,7 @@ mod tests {
         let semantic = map_scores(&[(0, 0.8), (1, 0.8)]);
         let fuzzy = map_scores(&[(0, 0.8), (1, 0.8)]);
 
-        let reranked =
-            rerank_candidates(&profile, &chunks, &tokens, fused, &semantic, &fuzzy);
+        let reranked = rerank_candidates(&profile, &chunks, &tokens, fused, &semantic, &fuzzy);
 
         assert_eq!(reranked[0].0, 0);
         assert!(reranked[0].1 > reranked[1].1);
@@ -423,8 +421,7 @@ mod tests {
         let semantic = map_scores(&[(1, 0.9)]);
         let fuzzy = map_scores(&[(1, 0.9)]);
 
-        let reranked =
-            rerank_candidates(&profile, &chunks, &tokens, fused, &semantic, &fuzzy);
+        let reranked = rerank_candidates(&profile, &chunks, &tokens, fused, &semantic, &fuzzy);
 
         assert_eq!(reranked[0].0, 0);
         assert!(reranked[0].1 >= 11.0);

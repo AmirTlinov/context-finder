@@ -1,0 +1,12 @@
+{
+  "experts": {
+    "schema_version": 1,
+    "semantic": {
+      "default": ["bge-small"],
+      "identifier": ["bge-small"],
+      "path": ["bge-small"],
+      "conceptual": ["bge-small"]
+    },
+    "graph_nodes": { "default": ["bge-small"] }
+  }
+}

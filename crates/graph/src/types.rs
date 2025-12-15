@@ -83,6 +83,7 @@ pub struct GraphEdge {
 }
 
 /// Code graph with relationships
+#[derive(Clone)]
 pub struct CodeGraph {
     /// Directed graph (symbol -> symbol with relationships)
     pub graph: DiGraph<GraphNode, GraphEdge>,
@@ -95,7 +96,7 @@ pub struct CodeGraph {
 }
 
 impl CodeGraph {
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self {
             graph: DiGraph::new(),
@@ -113,10 +114,7 @@ impl CodeGraph {
 
         // Update indices
         self.symbol_index.insert(symbol_name, idx);
-        self.chunk_index
-            .entry(chunk_id)
-            .or_default()
-            .push(idx);
+        self.chunk_index.entry(chunk_id).or_default().push(idx);
 
         idx
     }
@@ -127,41 +125,38 @@ impl CodeGraph {
     }
 
     /// Find node by symbol name
-    #[must_use] 
+    #[must_use]
     pub fn find_node(&self, symbol_name: &str) -> Option<NodeIndex> {
         self.symbol_index.get(symbol_name).copied()
     }
 
     /// Find nodes by chunk ID
-    #[must_use] 
+    #[must_use]
     pub fn find_nodes_by_chunk(&self, chunk_id: &str) -> Vec<NodeIndex> {
-        self.chunk_index
-            .get(chunk_id)
-            .cloned()
-            .unwrap_or_default()
+        self.chunk_index.get(chunk_id).cloned().unwrap_or_default()
     }
 
     /// Get node data
-    #[must_use] 
+    #[must_use]
     pub fn get_node(&self, idx: NodeIndex) -> Option<&GraphNode> {
         self.graph.node_weight(idx)
     }
 
     /// Get all nodes
     pub fn nodes(&self) -> impl Iterator<Item = (NodeIndex, &GraphNode)> {
-        self.graph.node_indices().filter_map(move |idx| {
-            self.graph.node_weight(idx).map(|node| (idx, node))
-        })
+        self.graph
+            .node_indices()
+            .filter_map(move |idx| self.graph.node_weight(idx).map(|node| (idx, node)))
     }
 
     /// Get node count
-    #[must_use] 
+    #[must_use]
     pub fn node_count(&self) -> usize {
         self.graph.node_count()
     }
 
     /// Get edge count
-    #[must_use] 
+    #[must_use]
     pub fn edge_count(&self) -> usize {
         self.graph.edge_count()
     }

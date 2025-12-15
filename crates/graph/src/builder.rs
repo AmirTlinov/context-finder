@@ -1,12 +1,13 @@
 use crate::error::{GraphError, Result};
-use crate::types::{CodeGraph, GraphNode, GraphEdge, RelationshipType, Symbol, SymbolType};
+use crate::types::{CodeGraph, GraphEdge, GraphNode, RelationshipType, Symbol, SymbolType};
 use context_code_chunker::CodeChunk;
 use petgraph::graph::NodeIndex;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tree_sitter::{Node, Parser};
 
 /// Supported languages for graph analysis
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GraphLanguage {
     Rust,
     Python,
@@ -47,7 +48,10 @@ impl GraphBuilder {
 
         for chunk in chunks {
             let symbol = Self::extract_symbol(chunk);
-            let chunk_id = format!("{}:{}:{}", chunk.file_path, chunk.start_line, chunk.end_line);
+            let chunk_id = format!(
+                "{}:{}:{}",
+                chunk.file_path, chunk.start_line, chunk.end_line
+            );
 
             let node = GraphNode {
                 symbol,
@@ -61,7 +65,10 @@ impl GraphBuilder {
 
         // Phase 2: Analyze relationships and add edges
         for chunk in chunks {
-            let chunk_id = format!("{}:{}:{}", chunk.file_path, chunk.start_line, chunk.end_line);
+            let chunk_id = format!(
+                "{}:{}:{}",
+                chunk.file_path, chunk.start_line, chunk.end_line
+            );
 
             if let Some(&from_idx) = chunk_to_node.get(&chunk_id) {
                 // Extract function calls
@@ -107,16 +114,17 @@ impl GraphBuilder {
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
 
-        let symbol_type = chunk.metadata.chunk_type.as_ref().map_or(
-            SymbolType::Function,
-            |ct| match ct {
+        let symbol_type = chunk
+            .metadata
+            .chunk_type
+            .as_ref()
+            .map_or(SymbolType::Function, |ct| match ct {
                 context_code_chunker::ChunkType::Method => SymbolType::Method,
                 context_code_chunker::ChunkType::Class => SymbolType::Class,
                 context_code_chunker::ChunkType::Struct => SymbolType::Struct,
                 context_code_chunker::ChunkType::Variable => SymbolType::Variable,
                 _ => SymbolType::Function,
-            },
-        );
+            });
 
         Symbol {
             name: symbol_name,
@@ -174,25 +182,38 @@ impl GraphBuilder {
 
     /// Extract identifier name from node
     fn extract_identifier(node: Node, content: &str) -> String {
-        match node.kind() {
-            "identifier" | "field_expression" => {
-                let start = node.start_byte();
-                let end = node.end_byte();
-                content[start..end].to_string()
-            }
-            _ => {
-                // Try to find identifier child
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.kind() == "identifier" {
-                        let start = child.start_byte();
-                        let end = child.end_byte();
-                        return content[start..end].to_string();
-                    }
-                }
-                String::new()
+        Self::extract_last_identifier(node, content).unwrap_or_default()
+    }
+
+    fn extract_last_identifier(node: Node, content: &str) -> Option<String> {
+        if Self::is_identifier_like(node.kind()) {
+            let start = node.start_byte();
+            let end = node.end_byte();
+            return Some(content[start..end].to_string());
+        }
+
+        let mut cursor = node.walk();
+        let mut last = None;
+        for child in node.children(&mut cursor) {
+            if let Some(found) = Self::extract_last_identifier(child, content) {
+                last = Some(found);
             }
         }
+        last
+    }
+
+    fn is_identifier_like(kind: &str) -> bool {
+        if kind == "identifier" {
+            return true;
+        }
+
+        // Composite identifiers include separators (e.g. `crate::foo`) and should be
+        // resolved to their last segment via traversal.
+        if matches!(kind, "scoped_identifier" | "scoped_type_identifier") {
+            return false;
+        }
+
+        kind.ends_with("_identifier")
     }
 
     /// Extract type usages from chunk (simplified)
@@ -255,6 +276,24 @@ mod tests {
         )
     }
 
+    fn create_test_chunk_with_type(
+        path: &str,
+        content: &str,
+        symbol: &str,
+        line: usize,
+        chunk_type: ChunkType,
+    ) -> CodeChunk {
+        CodeChunk::new(
+            path.to_string(),
+            line,
+            line + 10,
+            content.to_string(),
+            ChunkMetadata::default()
+                .symbol_name(symbol)
+                .chunk_type(chunk_type),
+        )
+    }
+
     #[test]
     fn test_build_simple_graph() {
         let chunks = vec![
@@ -266,6 +305,55 @@ mod tests {
         let graph = builder.build(&chunks).unwrap();
 
         assert_eq!(graph.node_count(), 2);
-        // Should have edge from foo -> bar (call relationship)
+
+        let foo = graph.find_node("foo").expect("foo node");
+        let bar = graph.find_node("bar").expect("bar node");
+        let calls = graph.get_nodes_by_relationship(foo, RelationshipType::Calls);
+        assert_eq!(calls.len(), 1);
+        assert!(calls.contains(&bar));
+    }
+
+    #[test]
+    fn build_graph_links_self_method_calls() {
+        let chunks = vec![
+            create_test_chunk_with_type(
+                "test.rs",
+                "impl S { fn caller(&self) { self.foo(); } }",
+                "caller",
+                1,
+                ChunkType::Method,
+            ),
+            create_test_chunk_with_type(
+                "test.rs",
+                "impl S { fn foo(&self) {} }",
+                "foo",
+                20,
+                ChunkType::Method,
+            ),
+        ];
+
+        let mut builder = GraphBuilder::new(GraphLanguage::Rust).unwrap();
+        let graph = builder.build(&chunks).unwrap();
+
+        let caller = graph.find_node("caller").expect("caller node");
+        let foo = graph.find_node("foo").expect("foo node");
+        let calls = graph.get_nodes_by_relationship(caller, RelationshipType::Calls);
+        assert!(calls.contains(&foo));
+    }
+
+    #[test]
+    fn build_graph_links_scoped_function_calls() {
+        let chunks = vec![
+            create_test_chunk("test.rs", "fn caller() { crate::foo(); }", "caller", 1),
+            create_test_chunk("test.rs", "fn foo() {}", "foo", 10),
+        ];
+
+        let mut builder = GraphBuilder::new(GraphLanguage::Rust).unwrap();
+        let graph = builder.build(&chunks).unwrap();
+
+        let caller = graph.find_node("caller").expect("caller node");
+        let foo = graph.find_node("foo").expect("foo node");
+        let calls = graph.get_nodes_by_relationship(caller, RelationshipType::Calls);
+        assert!(calls.contains(&foo));
     }
 }

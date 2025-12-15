@@ -12,12 +12,7 @@ impl StrategyExecutor {
     }
 
     /// Execute the configured strategy
-    pub fn execute(
-        &self,
-        content: &str,
-        file_path: &str,
-        language: &str,
-    ) -> Vec<CodeChunk> {
+    pub fn execute(&self, content: &str, file_path: &str, language: &str) -> Vec<CodeChunk> {
         match self.config.strategy {
             ChunkingStrategy::LineCount => self.chunk_by_lines(content, file_path, language),
             ChunkingStrategy::Semantic => {
@@ -26,19 +21,12 @@ impl StrategyExecutor {
                 self.chunk_by_lines(content, file_path, language)
             }
             ChunkingStrategy::TokenAware => self.chunk_by_tokens(content, file_path, language),
-            ChunkingStrategy::Hierarchical => {
-                self.chunk_hierarchical(content, file_path, language)
-            }
+            ChunkingStrategy::Hierarchical => self.chunk_hierarchical(content, file_path, language),
         }
     }
 
     /// Simple line-based chunking
-    fn chunk_by_lines(
-        &self,
-        content: &str,
-        file_path: &str,
-        language: &str,
-    ) -> Vec<CodeChunk> {
+    fn chunk_by_lines(&self, content: &str, file_path: &str, language: &str) -> Vec<CodeChunk> {
         let lines: Vec<&str> = content.lines().collect();
         let target_lines = self.estimate_target_lines();
         let mut chunks = Vec::new();
@@ -70,12 +58,7 @@ impl StrategyExecutor {
     }
 
     /// Token-aware chunking
-    fn chunk_by_tokens(
-        &self,
-        content: &str,
-        file_path: &str,
-        language: &str,
-    ) -> Vec<CodeChunk> {
+    fn chunk_by_tokens(&self, content: &str, file_path: &str, language: &str) -> Vec<CodeChunk> {
         let lines: Vec<&str> = content.lines().collect();
         let mut chunks = Vec::new();
         let mut start_line = 0;
@@ -131,12 +114,7 @@ impl StrategyExecutor {
     }
 
     /// Hierarchical chunking (simplified version)
-    fn chunk_hierarchical(
-        &self,
-        content: &str,
-        file_path: &str,
-        language: &str,
-    ) -> Vec<CodeChunk> {
+    fn chunk_hierarchical(&self, content: &str, file_path: &str, language: &str) -> Vec<CodeChunk> {
         // For now, delegate to token-aware
         // Full implementation would require AST analysis
         self.chunk_by_tokens(content, file_path, language)
@@ -218,7 +196,10 @@ mod tests {
             };
             let executor = StrategyExecutor::new(config);
             let chunks = executor.execute(&content, "test.rs", "rust");
-            assert!(!chunks.is_empty(), "Strategy {strategy:?} produced no chunks");
+            assert!(
+                !chunks.is_empty(),
+                "Strategy {strategy:?} produced no chunks"
+            );
         }
     }
 }

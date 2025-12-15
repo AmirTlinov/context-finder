@@ -26,7 +26,9 @@ log.workspace = true
 ndarray.workspace = true
 
 # Embeddings
-fastembed.workspace = true
+ort.workspace = true
+tokenizers.workspace = true
+once_cell.workspace = true
 
 # Workspace dependencies
 context-code-chunker = { path = "../code-chunker" }

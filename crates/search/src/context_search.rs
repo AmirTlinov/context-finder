@@ -1,9 +1,7 @@
 use crate::error::Result;
 use crate::hybrid::HybridSearch;
 use context_code_chunker::CodeChunk;
-use context_graph::{
-    AssemblyStrategy, ContextAssembler, GraphBuilder, GraphLanguage,
-};
+use context_graph::{AssemblyStrategy, ContextAssembler, GraphBuilder, GraphLanguage};
 use context_vector_store::SearchResult;
 
 /// Context-aware search with automatic related code assembly
@@ -47,6 +45,17 @@ impl ContextSearch {
         })
     }
 
+    /// Inject a pre-built graph/assembler (used by caching layers)
+    pub fn set_assembler(&mut self, assembler: ContextAssembler) {
+        self.assembler = Some(assembler);
+    }
+
+    /// Borrow the current assembler (if available)
+    #[must_use]
+    pub fn assembler(&self) -> Option<&ContextAssembler> {
+        self.assembler.as_ref()
+    }
+
     /// Build code graph for context assembly
     ///
     /// This should be called after indexing to enable context-aware search
@@ -66,13 +75,20 @@ impl ContextSearch {
 
         // Create assembler with the graph (doesn't need to clone)
         let assembler = ContextAssembler::new(graph);
-        let graph_stats = (assembler.get_stats().total_nodes, assembler.get_stats().total_edges);
+        let graph_stats = (
+            assembler.get_stats().total_nodes,
+            assembler.get_stats().total_edges,
+        );
 
         // Store assembler (which owns the graph)
         self.assembler = Some(assembler);
 
         // We'll get graph info from assembler when needed
-        log::info!("Graph stats: {} nodes, {} edges", graph_stats.0, graph_stats.1);
+        log::info!(
+            "Graph stats: {} nodes, {} edges",
+            graph_stats.0,
+            graph_stats.1
+        );
 
         Ok(())
     }
@@ -174,7 +190,7 @@ impl ContextSearch {
     }
 
     /// Get graph statistics
-    #[must_use] 
+    #[must_use]
     pub fn graph_stats(&self) -> Option<(usize, usize)> {
         self.assembler.as_ref().map(|a| {
             let stats = a.get_stats();
@@ -183,19 +199,29 @@ impl ContextSearch {
     }
 
     /// Check if graph is available
-    #[must_use] 
+    #[must_use]
     pub const fn has_graph(&self) -> bool {
         self.assembler.is_some()
+    }
+
+    /// Access underlying hybrid search (mutable)
+    pub const fn hybrid_mut(&mut self) -> &mut HybridSearch {
+        &mut self.hybrid
+    }
+
+    /// Access underlying hybrid search (immutable)
+    #[must_use]
+    pub const fn hybrid(&self) -> &HybridSearch {
+        &self.hybrid
     }
 }
 
 #[cfg(test)]
 mod tests {
-    
 
     #[test]
     fn test_context_search_creation() {
         // Basic test that context search can be created
-        // Real tests require FastEmbed model
+        // Real tests require ONNX embedding model
     }
 }

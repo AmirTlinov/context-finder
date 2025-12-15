@@ -308,4 +308,4 @@ Verdict: ✅ PASS (correct but low score)
 
 ---
 
-**Conclusion**: Двоих критических багов исправлено, но архитектурные проблемы делают решение непригодным для production. Требуется извлечение методов и улучшение semantic scores.
+**Conclusion**: Two critical bugs were fixed, but architectural issues still make the solution unsuitable for production. Further work is required: extract methods and improve semantic scoring.

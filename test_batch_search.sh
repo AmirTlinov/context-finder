@@ -1,35 +1,40 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${ROOT_DIR}"
 
-PROJECT_ROOT="/home/amir/Документы/PROJECTS/skills/apply_context/context-finder"
-CLI="$PROJECT_ROOT/target/debug/context-finder-cli"
+CLI="${CLI:-./target/debug/context-finder}"
+if [[ ! -x "${CLI}" ]]; then
+  CLI="./target/release/context-finder"
+fi
+if [[ ! -x "${CLI}" ]]; then
+  echo "[test_batch_search] CLI not found. Build it with: cargo build -p context-finder-cli" >&2
+  exit 1
+fi
 
-cd "$PROJECT_ROOT"
+EMBED_MODE="${CONTEXT_FINDER_EMBEDDING_MODE:-stub}"
+COMMON=(--quiet --embed-mode "${EMBED_MODE}")
 
-echo "=== Testing Batch Search API ==="
+echo "=== Testing Multi-Query Search (get-context) ==="
 echo
 
-echo "1. Re-index (ensure fresh index):"
-time $CLI index . 2>&1 | grep -E "(Indexing|files|chunks|time_ms)"
+echo "1) Index (required for search)"
+"${CLI}" "${COMMON[@]}" index . --json >/dev/null
+echo "OK"
 echo
 
-echo "2. Test sequential search (baseline):"
-echo "Query 1: 'error handling'"
-time $CLI search "error handling" --limit 3 2>&1 | grep -E "file_path|symbol_name|score" | head -15
-echo
-echo "Query 2: 'embedding model'"
-time $CLI search "embedding model" --limit 3 2>&1 | grep -E "file_path|symbol_name|score" | head -15
-echo
-echo "Query 3: 'fuzzy matching'"
-time $CLI search "fuzzy matching" --limit 3 2>&1 | grep -E "file_path|symbol_name|score" | head -15
+echo "2) Sequential search (baseline)"
+for query in "error handling" "embedding model" "fuzzy matching"; do
+  echo "Query: '${query}'"
+  "${CLI}" "${COMMON[@]}" search "${query}" -n 3 --json \
+    | jq -r '.data.results // [] | .[] | "  - \(.file):\(.start_line) (\(.reason)) score=\(.score)"'
+  echo
+done
+
+echo "3) Multi-query (batch-style) via get-context"
+"${CLI}" "${COMMON[@]}" get-context "error handling" "embedding model" "fuzzy matching" --path . -n 3 --json \
+  | jq '{count: length}'
 echo
 
-echo "3. Test batch search (should be faster):"
-echo "NOTE: CLI doesn't support batch search yet - this is proof of API existence"
-echo "Batch search API is available via:"
-echo "  - VectorStore::search_batch(&[&str], limit)"
-echo "  - HybridSearch::search_batch(&[&str], limit)"
-echo
-
-echo "=== Batch Search API Implementation Complete ==="
+echo "=== DONE ==="

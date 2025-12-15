@@ -7,8 +7,19 @@ echo "║                        FLAGSHIP QUALITY AUDIT                         
 echo "╚═══════════════════════════════════════════════════════════════════════════╝"
 echo
 
-PROJECT_ROOT="/home/amir/Документы/PROJECTS/skills/apply_context/context-finder"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
+
+AUDIT_DIR="$PROJECT_ROOT/.context-finder/audit"
+mkdir -p "$AUDIT_DIR"
+
+AUDIT_CLIPPY_LOG="$AUDIT_DIR/audit_clippy.log"
+AUDIT_SECURITY_LOG="$AUDIT_DIR/audit_security.log"
+AUDIT_TESTS_LOG="$AUDIT_DIR/audit_tests.log"
+AUDIT_COMPLEXITY_LOG="$AUDIT_DIR/audit_complexity.log"
+AUDIT_DEPS_LOG="$AUDIT_DIR/audit_deps.log"
+AUDIT_BUILD_LOG="$AUDIT_DIR/audit_build.log"
+AUDIT_DOCS_LOG="$AUDIT_DIR/audit_docs.log"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -31,7 +42,7 @@ cargo clippy --workspace --all-targets -- \
     -A clippy::missing_errors_doc \
     -A clippy::missing_panics_doc \
     -A clippy::module_name_repetitions \
-    2>&1 | tee audit_clippy.log
+    2>&1 | tee "$AUDIT_CLIPPY_LOG"
 
 if [ ${PIPESTATUS[0]} -eq 0 ]; then
     echo -e "${GREEN}✓ Clippy passed (strictest)${NC}"
@@ -48,7 +59,7 @@ echo -e "${BLUE}[2/8] Security Audit (dependencies)${NC}"
 echo "────────────────────────────────────────"
 
 if command -v cargo-audit &> /dev/null; then
-    cargo audit 2>&1 | tee audit_security.log
+    cargo audit 2>&1 | tee "$AUDIT_SECURITY_LOG"
     if [ ${PIPESTATUS[0]} -eq 0 ]; then
         echo -e "${GREEN}✓ No known vulnerabilities${NC}"
     else
@@ -67,12 +78,13 @@ echo -e "${BLUE}[3/8] Test Coverage${NC}"
 echo "────────────────────────────────────────"
 
 # Run all tests
-cargo test --workspace --lib 2>&1 | tee audit_tests.log
+CONTEXT_FINDER_EMBEDDING_MODE="${CONTEXT_FINDER_EMBEDDING_MODE:-stub}" \
+  cargo test --workspace 2>&1 | tee "$AUDIT_TESTS_LOG"
 
 # Count tests
-total_tests=$(grep -o "test result:" audit_tests.log | wc -l)
-passed_tests=$(grep "passed" audit_tests.log | grep -o "[0-9]* passed" | cut -d' ' -f1 | paste -sd+ | bc)
-ignored_tests=$(grep "ignored" audit_tests.log | grep -o "[0-9]* ignored" | cut -d' ' -f1 | paste -sd+ | bc)
+total_tests=$(grep -o "test result:" "$AUDIT_TESTS_LOG" | wc -l)
+passed_tests=$(grep -oE "[0-9]+ passed" "$AUDIT_TESTS_LOG" | awk '{sum+=$1} END {print sum+0}')
+ignored_tests=$(grep -oE "[0-9]+ ignored" "$AUDIT_TESTS_LOG" | awk '{sum+=$1} END {print sum+0}')
 
 echo
 echo "Test Statistics:"
@@ -96,7 +108,7 @@ echo -e "${BLUE}[4/8] Code Complexity Analysis${NC}"
 echo "────────────────────────────────────────"
 
 if command -v tokei &> /dev/null; then
-    tokei crates/ --exclude "*.json" --exclude "*.md" 2>&1 | tee audit_complexity.log
+    tokei crates/ --exclude "*.json" --exclude "*.md" 2>&1 | tee "$AUDIT_COMPLEXITY_LOG"
     echo -e "${GREEN}✓ Code metrics generated${NC}"
 else
     echo -e "${YELLOW}⚠ tokei not installed (run: cargo install tokei)${NC}"
@@ -115,7 +127,7 @@ echo
 echo -e "${BLUE}[5/8] Dependency Analysis${NC}"
 echo "────────────────────────────────────────"
 
-cargo tree --workspace --depth 1 2>&1 | head -50 | tee audit_deps.log
+cargo tree --workspace --depth 1 2>&1 | head -50 | tee "$AUDIT_DEPS_LOG"
 echo -e "${GREEN}✓ Dependencies checked${NC}"
 echo
 
@@ -126,7 +138,7 @@ echo
 echo -e "${BLUE}[6/8] Build Verification (release)${NC}"
 echo "────────────────────────────────────────"
 
-cargo build --workspace --release 2>&1 | tail -20 | tee audit_build.log
+cargo build --workspace --release 2>&1 | tail -20 | tee "$AUDIT_BUILD_LOG"
 
 if [ ${PIPESTATUS[0]} -eq 0 ]; then
     echo -e "${GREEN}✓ Release build successful${NC}"
@@ -142,7 +154,7 @@ echo
 echo -e "${BLUE}[7/8] Documentation Check${NC}"
 echo "────────────────────────────────────────"
 
-cargo doc --workspace --no-deps 2>&1 | tail -20 | tee audit_docs.log
+cargo doc --workspace --no-deps 2>&1 | tail -20 | tee "$AUDIT_DOCS_LOG"
 
 if [ ${PIPESTATUS[0]} -eq 0 ]; then
     echo -e "${GREEN}✓ Documentation builds${NC}"
@@ -178,12 +190,12 @@ echo "║                          AUDIT COMPLETE                               
 echo "╚═══════════════════════════════════════════════════════════════════════════╝"
 echo
 echo "Audit logs generated:"
-echo "  - audit_clippy.log (code quality)"
-echo "  - audit_security.log (security)"
-echo "  - audit_tests.log (test results)"
-echo "  - audit_complexity.log (code metrics)"
-echo "  - audit_deps.log (dependencies)"
-echo "  - audit_build.log (build output)"
-echo "  - audit_docs.log (documentation)"
+echo "  - $AUDIT_CLIPPY_LOG (code quality)"
+echo "  - $AUDIT_SECURITY_LOG (security)"
+echo "  - $AUDIT_TESTS_LOG (test results)"
+echo "  - $AUDIT_COMPLEXITY_LOG (code metrics)"
+echo "  - $AUDIT_DEPS_LOG (dependencies)"
+echo "  - $AUDIT_BUILD_LOG (build output)"
+echo "  - $AUDIT_DOCS_LOG (documentation)"
 echo
 echo "Review these logs for detailed findings."

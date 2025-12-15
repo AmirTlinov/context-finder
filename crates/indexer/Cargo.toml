@@ -28,7 +28,9 @@ log.workspace = true
 # File system
 walkdir.workspace = true
 ignore.workspace = true
+notify.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 pretty_assertions.workspace = true
+rlimit = "0.10"

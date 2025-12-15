@@ -65,7 +65,8 @@ impl Chunker {
         }
 
         // Try AST-based chunking for supported languages
-        if language.supports_ast() && self.config.strategy == crate::config::ChunkingStrategy::Semantic
+        if language.supports_ast()
+            && self.config.strategy == crate::config::ChunkingStrategy::Semantic
         {
             match self.chunk_with_ast(content, file_path, language) {
                 Ok(chunks) => return Ok(self.post_process_chunks(chunks)),
@@ -106,9 +107,7 @@ impl Chunker {
     fn post_process_chunks(&self, mut chunks: Vec<CodeChunk>) -> Vec<CodeChunk> {
         let min_tokens = self.config.min_chunk_tokens;
         // Filter out chunks that are too small
-        chunks.retain(|chunk| {
-            chunk.estimated_tokens() >= min_tokens
-        });
+        chunks.retain(|chunk| chunk.estimated_tokens() >= min_tokens);
 
         // TODO: Implement overlap strategy
         // TODO: Add contextual imports if configured
@@ -133,7 +132,11 @@ impl Chunker {
             avg_tokens_per_chunk: if chunks.is_empty() {
                 0
             } else {
-                chunks.iter().map(CodeChunk::estimated_tokens).sum::<usize>() / chunks.len()
+                chunks
+                    .iter()
+                    .map(CodeChunk::estimated_tokens)
+                    .sum::<usize>()
+                    / chunks.len()
             },
             min_tokens: chunks
                 .iter()

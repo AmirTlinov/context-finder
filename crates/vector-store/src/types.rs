@@ -6,6 +6,8 @@ pub struct StoredChunk {
     pub chunk: CodeChunk,
     pub vector: Vec<f32>,
     pub id: String,
+    #[serde(default)]
+    pub doc_hash: u64,
 }
 
 #[derive(Debug, Clone)]

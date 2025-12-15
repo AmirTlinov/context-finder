@@ -5,7 +5,7 @@
 //! ## Features
 //!
 //! - **Fast ANN search** via HNSW (Hierarchical Navigable Small World)
-//! - **Efficient embeddings** using `FastEmbed`
+//! - **Efficient embeddings** using ONNX Runtime (CUDA)
 //! - **Persistent storage** with JSON serialization
 //! - **Incremental updates** for dynamic codebases
 //! - **Batch operations** for optimal performance
@@ -15,7 +15,7 @@
 //! ```text
 //! CodeChunk[]
 //!     │
-//!     ├──> Embedding Model (FastEmbed)
+//!     ├──> Embedding Model (ONNX Runtime CUDA)
 //!     │      └─> Vector[384/768/1024]
 //!     │
 //!     ├──> HNSW Index
@@ -50,15 +50,31 @@
 //! }
 //! ```
 
+mod corpus;
+mod embedding_cache;
 mod embeddings;
 mod error;
+mod graph_node_store;
 mod hnsw_index;
 mod store;
+mod templates;
 mod types;
 
+pub use corpus::{corpus_path_for_project_root, ChunkCorpus, CHUNK_CORPUS_SCHEMA_VERSION};
+pub use embeddings::current_model_id;
+pub use embeddings::model_dir;
 pub use embeddings::EmbeddingModel;
+pub use embeddings::{EmbedRequest, ModelRegistry};
 pub use error::{Result, VectorStoreError};
+pub use graph_node_store::{
+    GraphNodeDoc, GraphNodeHit, GraphNodeStore, GraphNodeStoreMeta, GRAPH_NODE_STORE_SCHEMA_VERSION,
+};
+pub use store::VectorIndex;
 pub use store::VectorStore;
+pub use templates::{
+    classify_document_kind, DocumentKind, EmbeddingTemplates, GraphNodeTemplates, QueryKind,
+    QueryTemplates, EMBEDDING_TEMPLATES_SCHEMA_VERSION,
+};
 pub use types::{SearchResult, StoredChunk};
 
 // Re-export code chunker types for convenience

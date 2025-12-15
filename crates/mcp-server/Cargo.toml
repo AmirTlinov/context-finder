@@ -40,3 +40,7 @@ env_logger.workspace = true
 
 # Utilities
 dirs = "5.0"
+
+[dev-dependencies]
+rmcp = { version = "0.8", features = ["client", "transport-child-process"] }
+tempfile = { workspace = true }

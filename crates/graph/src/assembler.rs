@@ -1,6 +1,7 @@
 use crate::error::Result;
 use crate::types::{CodeGraph, RelationshipType};
 use context_code_chunker::CodeChunk;
+use std::cmp::Ordering;
 
 /// Smart context assembler for AI agents
 ///
@@ -46,8 +47,31 @@ pub struct RelatedChunk {
     pub relevance_score: f32,
 }
 
+fn relationship_rank(rel: RelationshipType) -> u8 {
+    match rel {
+        RelationshipType::Calls => 0,
+        RelationshipType::Uses => 1,
+        RelationshipType::Contains => 2,
+        RelationshipType::Extends => 3,
+        RelationshipType::Imports => 4,
+        RelationshipType::TestedBy => 5,
+    }
+}
+
+fn compare_relationship_paths(a: &[RelationshipType], b: &[RelationshipType]) -> Ordering {
+    for (&left, &right) in a.iter().zip(b.iter()) {
+        let left = relationship_rank(left);
+        let right = relationship_rank(right);
+        match left.cmp(&right) {
+            Ordering::Equal => {}
+            non_eq => return non_eq,
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
 impl ContextAssembler {
-    #[must_use] 
+    #[must_use]
     pub const fn new(graph: CodeGraph) -> Self {
         Self { graph }
     }
@@ -77,10 +101,9 @@ impl ContextAssembler {
             .get_node(node)
             .ok_or_else(|| crate::error::GraphError::NodeNotFound(symbol_name.to_string()))?;
 
-        let primary_chunk = primary_node
-            .chunk
-            .clone()
-            .ok_or_else(|| crate::error::GraphError::BuildError("Missing chunk data".to_string()))?;
+        let primary_chunk = primary_node.chunk.clone().ok_or_else(|| {
+            crate::error::GraphError::BuildError("Missing chunk data".to_string())
+        })?;
 
         // Get related nodes
         let related_nodes = self.graph.get_related_nodes(node, max_depth);
@@ -104,8 +127,12 @@ impl ContextAssembler {
         // Sort by relevance
         related_chunks.sort_by(|a, b| {
             b.relevance_score
-                .partial_cmp(&a.relevance_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.relevance_score)
+                .then_with(|| a.distance.cmp(&b.distance))
+                .then_with(|| a.chunk.file_path.cmp(&b.chunk.file_path))
+                .then_with(|| a.chunk.start_line.cmp(&b.chunk.start_line))
+                .then_with(|| a.chunk.end_line.cmp(&b.chunk.end_line))
+                .then_with(|| compare_relationship_paths(&a.relationship, &b.relationship))
         });
 
         // Calculate total lines
@@ -154,12 +181,12 @@ impl ContextAssembler {
         let relationship_score: f32 = path
             .iter()
             .map(|rel| match rel {
-                RelationshipType::Calls => 1.0,       // Direct call = highest relevance
-                RelationshipType::Uses => 0.8,        // Type usage = high relevance
-                RelationshipType::Contains => 0.7,    // Parent-child = medium-high
-                RelationshipType::Imports => 0.5,     // Import = medium relevance
-                RelationshipType::Extends => 0.6,     // Inheritance = medium relevance
-                RelationshipType::TestedBy => 0.4,    // Test = lower relevance
+                RelationshipType::Calls => 1.0,    // Direct call = highest relevance
+                RelationshipType::Uses => 0.8,     // Type usage = high relevance
+                RelationshipType::Contains => 0.7, // Parent-child = medium-high
+                RelationshipType::Imports => 0.5,  // Import = medium relevance
+                RelationshipType::Extends => 0.6,  // Inheritance = medium relevance
+                RelationshipType::TestedBy => 0.4, // Test = lower relevance
             })
             .sum::<f32>()
             / path.len().max(1) as f32;
@@ -168,7 +195,7 @@ impl ContextAssembler {
     }
 
     /// Get statistics about assembled context
-    #[must_use] 
+    #[must_use]
     pub fn get_stats(&self) -> ContextStats {
         ContextStats {
             total_nodes: self.graph.node_count(),
@@ -177,7 +204,7 @@ impl ContextAssembler {
     }
 
     /// Batch assemble contexts for multiple symbols
-    #[must_use] 
+    #[must_use]
     pub fn assemble_batch(
         &self,
         symbol_names: &[&str],
@@ -187,6 +214,11 @@ impl ContextAssembler {
             .iter()
             .map(|name| self.assemble_for_symbol(name, strategy))
             .collect()
+    }
+
+    #[must_use]
+    pub fn graph(&self) -> &CodeGraph {
+        &self.graph
     }
 }
 
@@ -199,6 +231,8 @@ pub struct ContextStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{GraphEdge, GraphNode, Symbol, SymbolType};
+    use context_code_chunker::ChunkMetadata;
 
     #[test]
     fn test_calculate_relevance() {
@@ -218,5 +252,75 @@ mod tests {
             ],
         );
         assert!(score2 < score1);
+    }
+
+    #[test]
+    fn related_chunks_are_sorted_deterministically() {
+        let mut graph = CodeGraph::new();
+
+        let mk_chunk = |path: &str, start: usize, end: usize| {
+            CodeChunk::new(
+                path.to_string(),
+                start,
+                end,
+                format!("// {path}:{start}:{end}"),
+                ChunkMetadata::default(),
+            )
+        };
+
+        let mk_node = |name: &str, path: &str, start: usize, end: usize| GraphNode {
+            symbol: Symbol {
+                name: name.to_string(),
+                qualified_name: None,
+                file_path: path.to_string(),
+                start_line: start,
+                end_line: end,
+                symbol_type: SymbolType::Function,
+            },
+            chunk_id: format!("{path}:{start}:{end}"),
+            chunk: Some(mk_chunk(path, start, end)),
+        };
+
+        let primary = graph.add_node(mk_node("primary", "main.rs", 1, 10));
+        let rel_a = graph.add_node(mk_node("a", "a.rs", 5, 6));
+        let rel_b = graph.add_node(mk_node("b", "b.rs", 1, 2));
+        let rel_c = graph.add_node(mk_node("c", "b.rs", 3, 4));
+
+        for rel in [rel_a, rel_b, rel_c] {
+            graph.add_edge(
+                primary,
+                rel,
+                GraphEdge {
+                    relationship: RelationshipType::Calls,
+                    weight: 1.0,
+                },
+            );
+        }
+
+        let assembler = ContextAssembler::new(graph);
+        let assembled = assembler
+            .assemble_for_symbol("primary", AssemblyStrategy::Direct)
+            .unwrap();
+
+        let ordered: Vec<(String, usize, usize)> = assembled
+            .related_chunks
+            .iter()
+            .map(|rc| {
+                (
+                    rc.chunk.file_path.clone(),
+                    rc.chunk.start_line,
+                    rc.chunk.end_line,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            ordered,
+            vec![
+                ("a.rs".to_string(), 5, 6),
+                ("b.rs".to_string(), 1, 2),
+                ("b.rs".to_string(), 3, 4),
+            ]
+        );
     }
 }

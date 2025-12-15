@@ -1,4 +1,5 @@
-use context_code_chunker::CodeChunk;
+use crate::query_classifier::QueryWeights;
+use context_code_chunker::{ChunkType, CodeChunk};
 use std::collections::HashMap;
 
 /// Reciprocal Rank Fusion for combining multiple rankings
@@ -12,7 +13,7 @@ pub struct RRFFusion {
 }
 
 impl RRFFusion {
-    #[must_use] 
+    #[must_use]
     pub const fn new(semantic_weight: f32, fuzzy_weight: f32, k: f32) -> Self {
         Self {
             k,
@@ -21,28 +22,31 @@ impl RRFFusion {
         }
     }
 
-    /// Fuse semantic and fuzzy results using RRF with adaptive weights based on query type
-    ///
-    /// Query classification:
-    /// - Exact name: CamelCase, `snake_case`, single word → fuzzy-heavy (30/70)
-    /// - Conceptual: multi-word, descriptive → semantic-heavy (70/30)
-    #[must_use] 
+    /// Fuse semantic and fuzzy results using weights, logging the context
+    #[must_use]
     pub fn fuse_adaptive(
         &self,
         query: &str,
+        weights: &QueryWeights,
         semantic_results: &[(usize, f32)],
         fuzzy_results: &[(usize, f32)],
     ) -> Vec<(usize, f32)> {
-        let (semantic_weight, fuzzy_weight) = Self::adaptive_weights(query);
-
+        // Increase k for fuzzy part to suppress noisy neighbors
+        let adaptive_k = self.k + 40.0;
         log::debug!(
             "Adaptive weights for '{}': semantic={:.1}%, fuzzy={:.1}%",
             query,
-            semantic_weight * 100.0,
-            fuzzy_weight * 100.0
+            weights.semantic * 100.0,
+            weights.fuzzy * 100.0
         );
 
-        self.fuse_with_weights(semantic_results, fuzzy_results, semantic_weight, fuzzy_weight)
+        self.fuse_with_weights(
+            semantic_results,
+            fuzzy_results,
+            weights.semantic,
+            weights.fuzzy,
+            adaptive_k,
+        )
     }
 
     /// Fuse semantic and fuzzy results using RRF
@@ -50,7 +54,7 @@ impl RRFFusion {
     /// RRF formula: score(d) = Σ `weight_i` / (k + `rank_i(d)`)
     ///
     /// Returns (`chunk_index`, `fused_score`) sorted by score descending
-    #[must_use] 
+    #[must_use]
     pub fn fuse(
         &self,
         semantic_results: &[(usize, f32)],
@@ -61,6 +65,7 @@ impl RRFFusion {
             fuzzy_results,
             self.semantic_weight,
             self.fuzzy_weight,
+            self.k,
         )
     }
 
@@ -72,18 +77,19 @@ impl RRFFusion {
         fuzzy_results: &[(usize, f32)],
         semantic_weight: f32,
         fuzzy_weight: f32,
+        k: f32,
     ) -> Vec<(usize, f32)> {
         let mut scores: HashMap<usize, f32> = HashMap::new();
 
         // Add semantic scores
         for (rank, (idx, _score)) in semantic_results.iter().enumerate() {
-            let rrf_score = semantic_weight / (self.k + rank as f32 + 1.0);
+            let rrf_score = semantic_weight / (k + rank as f32 + 1.0);
             *scores.entry(*idx).or_insert(0.0) += rrf_score;
         }
 
         // Add fuzzy scores
         for (rank, (idx, _score)) in fuzzy_results.iter().enumerate() {
-            let rrf_score = fuzzy_weight / (self.k + rank as f32 + 1.0);
+            let rrf_score = fuzzy_weight / (k + rank as f32 + 1.0);
             *scores.entry(*idx).or_insert(0.0) += rrf_score;
         }
 
@@ -93,36 +99,11 @@ impl RRFFusion {
 
         fused
     }
-
-    /// Determine optimal weights based on query characteristics
-    fn adaptive_weights(query: &str) -> (f32, f32) {
-        let query_trimmed = query.trim();
-
-        // Check for exact name patterns
-        let is_single_word = !query_trimmed.contains(' ') && !query_trimmed.contains('_');
-        let has_camel_case = query_trimmed.chars().any(char::is_uppercase)
-            && query_trimmed.chars().any(char::is_lowercase);
-        let has_snake_case = query_trimmed.contains('_');
-
-        // Exact name query: prioritize fuzzy matching
-        if is_single_word && (has_camel_case || has_snake_case) {
-            return (0.3, 0.7); // semantic 30%, fuzzy 70%
-        }
-
-        // Short query (1-2 words) without code patterns: balanced
-        let word_count = query_trimmed.split_whitespace().count();
-        if word_count <= 2 && !has_camel_case && !has_snake_case {
-            return (0.5, 0.5); // balanced 50/50
-        }
-
-        // Conceptual/descriptive query: prioritize semantic
-        (0.7, 0.3) // semantic 70%, fuzzy 30% (default)
-    }
 }
 
 impl Default for RRFFusion {
     fn default() -> Self {
-        Self::new(0.7, 0.3, 60.0)
+        Self::new(0.8, 0.2, 60.0)
     }
 }
 
@@ -132,7 +113,7 @@ pub struct AstBooster;
 impl AstBooster {
     /// Boost scores based on chunk type priority
     /// Functions/Methods get higher boost than variables
-    #[must_use] 
+    #[must_use]
     pub fn boost(chunks: &[CodeChunk], results: Vec<(usize, f32)>) -> Vec<(usize, f32)> {
         results
             .into_iter()
@@ -144,10 +125,13 @@ impl AstBooster {
     }
 
     fn compute_boost(chunk: &CodeChunk) -> f32 {
-        let type_boost = chunk
-            .metadata
-            .chunk_type
-            .map_or(1.0, |ct| f32::from(ct.priority()) / 100.0);
+        let type_boost = chunk.metadata.chunk_type.map_or(1.0, |ct| match ct {
+            ChunkType::Function | ChunkType::Method => 1.18,
+            ChunkType::Struct | ChunkType::Class => 1.05,
+            ChunkType::Enum | ChunkType::Interface => 1.05,
+            ChunkType::Variable | ChunkType::Const => 0.9,
+            _ => f32::from(ct.priority()) / 100.0,
+        });
 
         // Additional boost for chunks with documentation
         let doc_boost = if chunk.metadata.documentation.is_some() {
@@ -158,13 +142,31 @@ impl AstBooster {
 
         // Boost for chunks with context (imports, parent scope)
         let context_boost = if !chunk.metadata.context_imports.is_empty()
-            || chunk.metadata.parent_scope.is_some() {
+            || chunk.metadata.parent_scope.is_some()
+        {
             1.05
         } else {
             1.0
         };
 
-        type_boost * doc_boost * context_boost
+        let path = chunk.file_path.to_lowercase();
+        let mut path_boost = 1.0;
+        if path.contains("/agents/") || path.contains("/tests/") || path.contains("/test/") {
+            path_boost *= 0.6;
+        }
+        if path.contains("/scripts/")
+            || path.contains("docker")
+            || path.contains("/db/")
+            || path.contains("/deploy/")
+            || path.contains("/infra/")
+        {
+            path_boost *= 0.7;
+        }
+        if path.contains("packages/utils") || path.contains("/utils") || path.contains("src/lib") {
+            path_boost *= 1.25;
+        }
+
+        type_boost * doc_boost * context_boost * path_boost
     }
 }
 

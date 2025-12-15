@@ -91,6 +91,27 @@ impl AstAnalyzer {
 
         for child in children {
             let kind = child.kind();
+
+            // Recurse into module bodies to avoid missing nested items
+            if kind == "mod_item" {
+                let chunk = self.node_to_chunk(content, file_path, child, ChunkType::Module);
+                chunks.push(chunk);
+
+                // Try field name "body" first, then iterate children for declaration_list
+                let body = child.child_by_field_name("body").or_else(|| {
+                    let mut c = child.walk();
+                    let result = child
+                        .children(&mut c)
+                        .find(|n| n.kind() == "declaration_list");
+                    result
+                });
+
+                if let Some(body) = body {
+                    self.extract_rust_chunks(content, file_path, body, chunks);
+                }
+                continue;
+            }
+
             let chunk_type = match kind {
                 "function_item" => Some(ChunkType::Function),
                 "struct_item" => Some(ChunkType::Struct),
@@ -113,7 +134,6 @@ impl AstAnalyzer {
                 }
             }
         }
-
     }
 
     /// Extract methods from impl block
@@ -138,7 +158,8 @@ impl AstAnalyzer {
 
                     // Extract methods and associated functions
                     if kind == "function_item" {
-                        let mut chunk = self.node_to_chunk(content, file_path, method_node, ChunkType::Method);
+                        let mut chunk =
+                            self.node_to_chunk(content, file_path, method_node, ChunkType::Method);
 
                         // Set parent scope and build qualified name
                         if let Some(ref target) = impl_target {
@@ -146,7 +167,8 @@ impl AstAnalyzer {
 
                             // Build qualified name: "EmbeddingModel::embed"
                             if let Some(ref method_name) = chunk.metadata.symbol_name {
-                                chunk.metadata.qualified_name = Some(format!("{target}::{method_name}"));
+                                chunk.metadata.qualified_name =
+                                    Some(format!("{target}::{method_name}"));
                             }
                         }
 
@@ -159,7 +181,8 @@ impl AstAnalyzer {
                             ChunkType::Impl // Type aliases in impl
                         };
 
-                        let mut chunk = self.node_to_chunk(content, file_path, method_node, chunk_type);
+                        let mut chunk =
+                            self.node_to_chunk(content, file_path, method_node, chunk_type);
 
                         if let Some(ref target) = impl_target {
                             chunk.metadata.parent_scope = Some(target.clone());
@@ -174,49 +197,54 @@ impl AstAnalyzer {
 
     /// Extract the target of an impl block (struct/trait name)
     fn extract_impl_target(content: &str, impl_node: Node) -> Option<String> {
-        let mut cursor = impl_node.walk();
-        for child in impl_node.children(&mut cursor) {
-            let kind = child.kind();
-
-            // Handle different type representations
-            match kind {
-                // Simple type: impl MyStruct
-                "type_identifier" => {
-                    let start = child.start_byte();
-                    let end = child.end_byte();
-                    return Some(content[start..end].to_string());
-                }
-
-                // Generic type: impl<T> MyStruct<T>
-                "generic_type" => {
-                    // Get the base type name (before <...>)
-                    let mut type_cursor = child.walk();
-                    for type_child in child.children(&mut type_cursor) {
-                        if type_child.kind() == "type_identifier" {
-                            let start = type_child.start_byte();
-                            let end = type_child.end_byte();
-                            return Some(content[start..end].to_string());
-                        }
-                    }
-                }
-
-                // Qualified path: impl module::MyStruct
-                "scoped_type_identifier" => {
-                    // Extract the final identifier after ::
-                    let mut type_cursor = child.walk();
-                    for type_child in child.children(&mut type_cursor) {
-                        if type_child.kind() == "type_identifier" {
-                            let start = type_child.start_byte();
-                            let end = type_child.end_byte();
-                            return Some(content[start..end].to_string());
-                        }
-                    }
-                }
-
-                _ => {}
-            }
+        if let Some(target_node) = impl_node.child_by_field_name("type") {
+            return Some(Self::type_repr(content, target_node));
         }
-        None
+
+        let mut cursor = impl_node.walk();
+        let children: Vec<Node> = impl_node.children(&mut cursor).collect();
+        let for_position = children.iter().position(|child| child.kind() == "for");
+
+        let mut candidates = children
+            .iter()
+            .enumerate()
+            .filter(|(_, child)| child.is_named() && Self::is_type_node(child));
+
+        let candidate = if let Some(pos) = for_position {
+            candidates.find(|(idx, _)| *idx > pos)
+        } else {
+            candidates.next()
+        };
+
+        candidate.map(|(_, node)| Self::type_repr(content, *node))
+    }
+
+    /// Render a type node without losing scoped paths or references
+    fn type_repr(content: &str, node: Node) -> String {
+        content[node.start_byte()..node.end_byte()]
+            .trim()
+            .to_string()
+    }
+
+    /// Identify nodes that represent Rust types
+    fn is_type_node(node: &Node) -> bool {
+        matches!(
+            node.kind(),
+            "type_identifier"
+                | "generic_type"
+                | "scoped_type_identifier"
+                | "qualified_type"
+                | "qualified_path_type"
+                | "reference_type"
+                | "pointer_type"
+                | "parenthesized_type"
+                | "tuple_type"
+                | "array_type"
+                | "slice_type"
+                | "unit_type"
+                | "bare_function_type"
+                | "primitive_type"
+        )
     }
 
     /// Extract chunks from Python code
@@ -248,7 +276,6 @@ impl AstAnalyzer {
                 }
             }
         }
-
     }
 
     /// Extract methods from Python class
@@ -270,12 +297,8 @@ impl AstAnalyzer {
                 let mut body_cursor = child.walk();
                 for method_node in child.children(&mut body_cursor) {
                     if method_node.kind() == "function_definition" {
-                        let mut chunk = self.node_to_chunk(
-                            content,
-                            file_path,
-                            method_node,
-                            ChunkType::Method,
-                        );
+                        let mut chunk =
+                            self.node_to_chunk(content, file_path, method_node, ChunkType::Method);
 
                         // Set parent scope and build qualified name
                         if let Some(ref name) = class_name {
@@ -283,7 +306,8 @@ impl AstAnalyzer {
 
                             // Build qualified name: "MyClass.method"
                             if let Some(ref method_name) = chunk.metadata.symbol_name {
-                                chunk.metadata.qualified_name = Some(format!("{name}.{method_name}"));
+                                chunk.metadata.qualified_name =
+                                    Some(format!("{name}.{method_name}"));
                             }
                         }
 
@@ -326,7 +350,6 @@ impl AstAnalyzer {
                 }
             }
         }
-
     }
 
     /// Extract methods from JavaScript/TypeScript class
@@ -352,20 +375,16 @@ impl AstAnalyzer {
                     // Extract various class members
                     if method_kind == "method_definition"
                         || method_kind == "field_definition"
-                        || method_kind == "public_field_definition" {
-
+                        || method_kind == "public_field_definition"
+                    {
                         let chunk_type = if method_kind == "method_definition" {
                             ChunkType::Method
                         } else {
                             ChunkType::Variable
                         };
 
-                        let mut chunk = self.node_to_chunk(
-                            content,
-                            file_path,
-                            method_node,
-                            chunk_type,
-                        );
+                        let mut chunk =
+                            self.node_to_chunk(content, file_path, method_node, chunk_type);
 
                         // Set parent scope to class name
                         if let Some(ref name) = class_name {
@@ -480,9 +499,7 @@ impl AstAnalyzer {
                 if let Some(last_part) = import.split("::").last() {
                     // Handle {A, B, C}
                     if last_part.contains('{') {
-                        let inner = last_part
-                            .trim_start_matches('{')
-                            .trim_end_matches('}');
+                        let inner = last_part.trim_start_matches('{').trim_end_matches('}');
                         for ident in inner.split(',') {
                             identifiers.push(ident.trim().to_string());
                         }
@@ -568,7 +585,6 @@ impl AstAnalyzer {
         doc_lines.reverse();
         doc_lines.join("\n")
     }
-
 
     /// Extract imports/dependencies from file for context
     fn extract_imports(&self, content: &str, root: Node) -> Vec<String> {

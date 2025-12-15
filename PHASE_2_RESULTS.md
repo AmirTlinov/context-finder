@@ -46,7 +46,7 @@
 **Example Enhanced Content**:
 ```rust
 use std::collections::HashMap
-use fastembed::TextEmbedding
+// replaced fastembed with ONNX Runtime (CUDA) embeddings
 
 /// Compute cosine similarity between two vectors
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -247,11 +247,11 @@ let results = hybrid_search.search("UserService", 50).await?;
 ### 3. Development Workflow
 ```bash
 # Developer makes changes to auth.rs
-$ context-finder-cli index .
+$ context-finder index .
 # Incremental: 2.6s (only auth.rs re-indexed)
 
 # AI agent searches updated code
-$ context-finder-cli search "authentication flow" --limit 5
+$ context-finder search "authentication flow" --limit 5
 # Returns fresh results with new auth.rs chunks
 ```
 
@@ -283,6 +283,6 @@ $ context-finder-cli search "authentication flow" --limit 5
 - ✅ 100% accuracy maintained
 - ✅ Clean architecture and comprehensive testing
 
-**Инструмент теперь не просто production-ready, а является flagship-quality solution для AI агентов, оптимизированный для максимальной эффективности и точности.**
+**The tool is no longer just production-ready: it is a flagship-quality solution for AI agents, optimized for maximum efficiency and accuracy.**
 
 🎉 **AI Agent Superweapon status achieved!**

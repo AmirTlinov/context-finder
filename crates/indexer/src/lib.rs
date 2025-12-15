@@ -33,10 +33,19 @@
 //! ```
 
 mod error;
+mod health;
 mod indexer;
 mod scanner;
 mod stats;
+mod watcher;
 
 pub use error::{IndexerError, Result};
-pub use indexer::ProjectIndexer;
+pub use health::append_failure_reason;
+pub use health::{health_file_path, read_health_snapshot, write_health_snapshot, HealthSnapshot};
+pub use indexer::{ModelIndexSpec, MultiModelProjectIndexer, ProjectIndexer};
+pub use scanner::FileScanner;
 pub use stats::IndexStats;
+pub use watcher::{
+    IndexUpdate, IndexerHealth, MultiModelStreamingIndexer, StreamingIndexer,
+    StreamingIndexerConfig,
+};

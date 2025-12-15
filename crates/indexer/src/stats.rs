@@ -23,7 +23,7 @@ pub struct IndexStats {
 }
 
 impl IndexStats {
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self {
             files: 0,

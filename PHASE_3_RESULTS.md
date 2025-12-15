@@ -392,8 +392,8 @@ if let Some((nodes, edges)) = search.graph_stats() {
 - ✅ 100% accuracy maintained
 - ✅ Flagship engineering quality
 
-**Инструмент теперь не просто ищет код, а ПОНИМАЕТ relationships и автоматически собирает контекст. AI агенты получили способность мгновенно понимать сложные кодовые структуры без manual exploration.**
+**The tool no longer just searches code: it understands relationships and automatically assembles context. AI agents can quickly understand complex code structures without manual exploration.**
 
-**Key Innovation**: Превращение search tool в intelligence engine через graph-based understanding.
+**Key Innovation**: Turning a search tool into an intelligence engine through graph-based understanding.
 
 🧠 **Intelligence unlocked!**

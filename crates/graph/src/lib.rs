@@ -30,13 +30,15 @@
 //!            └─ Return enriched context for AI agents
 //! ```
 
-mod types;
-mod builder;
-mod graph;
 mod assembler;
+mod builder;
 mod error;
+mod graph;
+mod graph_doc;
+mod types;
 
-pub use types::{CodeGraph, GraphNode, GraphEdge, RelationshipType, Symbol, SymbolType};
+pub use assembler::{AssembledContext, AssemblyStrategy, ContextAssembler, RelatedChunk};
 pub use builder::{GraphBuilder, GraphLanguage};
-pub use assembler::{ContextAssembler, AssemblyStrategy, AssembledContext, RelatedChunk};
-pub use error::{Result, GraphError};
+pub use error::{GraphError, Result};
+pub use graph_doc::{build_graph_docs, GraphDoc, GraphDocConfig, GRAPH_DOC_VERSION};
+pub use types::{CodeGraph, GraphEdge, GraphNode, RelationshipType, Symbol, SymbolType};

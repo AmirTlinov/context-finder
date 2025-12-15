@@ -21,7 +21,7 @@ pub struct CodeChunk {
 
 impl CodeChunk {
     /// Create a new code chunk
-    #[must_use] 
+    #[must_use]
     pub const fn new(
         file_path: String,
         start_line: usize,
@@ -39,19 +39,19 @@ impl CodeChunk {
     }
 
     /// Get the number of lines in this chunk
-    #[must_use] 
+    #[must_use]
     pub const fn line_count(&self) -> usize {
         self.end_line.saturating_sub(self.start_line) + 1
     }
 
     /// Get estimated token count
-    #[must_use] 
+    #[must_use]
     pub const fn estimated_tokens(&self) -> usize {
         self.metadata.estimated_tokens
     }
 
     /// Check if chunk contains a specific line
-    #[must_use] 
+    #[must_use]
     pub const fn contains_line(&self, line: usize) -> bool {
         line >= self.start_line && line <= self.end_line
     }
@@ -85,7 +85,16 @@ pub struct ChunkMetadata {
     pub documentation: Option<String>,
 
     /// Tags for categorization (async, public, deprecated, etc.)
+    #[serde(default)]
     pub tags: Vec<String>,
+
+    /// Tier/bundle markers (например, file/document/test)
+    #[serde(default)]
+    pub bundle_tags: Vec<String>,
+
+    /// Связанные относительные пути (тесты, конфиги, docs)
+    #[serde(default)]
+    pub related_paths: Vec<String>,
 }
 
 impl ChunkMetadata {
@@ -98,7 +107,7 @@ impl ChunkMetadata {
     }
 
     /// Builder: set chunk type
-    #[must_use] 
+    #[must_use]
     pub const fn chunk_type(mut self, chunk_type: ChunkType) -> Self {
         self.chunk_type = Some(chunk_type);
         self
@@ -126,14 +135,28 @@ impl ChunkMetadata {
     }
 
     /// Builder: set estimated tokens
-    #[must_use] 
+    #[must_use]
     pub const fn estimated_tokens(mut self, tokens: usize) -> Self {
         self.estimated_tokens = tokens;
         self
     }
 
+    /// Builder: add bundle tag
+    #[must_use]
+    pub fn add_bundle_tag(mut self, tag: impl Into<String>) -> Self {
+        self.bundle_tags.push(tag.into());
+        self
+    }
+
+    /// Builder: add related path
+    #[must_use]
+    pub fn add_related_path(mut self, path: impl Into<String>) -> Self {
+        self.related_paths.push(path.into());
+        self
+    }
+
     /// Estimate tokens from content (rough heuristic: ~0.75 tokens per word)
-    #[must_use] 
+    #[must_use]
     pub fn estimate_tokens_from_content(content: &str) -> usize {
         let chars = content.len();
         // Rough estimate: 4 chars per token on average for code
@@ -176,7 +199,7 @@ pub enum ChunkType {
 
 impl ChunkType {
     /// Get priority for chunking (higher = more important to keep intact)
-    #[must_use] 
+    #[must_use]
     pub const fn priority(self) -> u8 {
         match self {
             Self::Function | Self::Method => 100,
@@ -193,26 +216,22 @@ impl ChunkType {
     }
 
     /// Check if this chunk type should include contextual imports
-    #[must_use] 
+    #[must_use]
     pub const fn needs_context(self) -> bool {
         matches!(
             self,
-            Self::Function
-                | Self::Method
-                | Self::Class
-                | Self::Struct
-                | Self::Impl
+            Self::Function | Self::Method | Self::Class | Self::Struct | Self::Impl
         )
     }
 
     /// Check if this is a declaration type (vs usage)
-    #[must_use] 
+    #[must_use]
     pub const fn is_declaration(self) -> bool {
         !matches!(self, Self::Import | Self::Comment | Self::Other)
     }
 
     /// Get human-readable name
-    #[must_use] 
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Function => "function",

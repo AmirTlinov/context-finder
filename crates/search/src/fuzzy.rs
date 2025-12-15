@@ -7,7 +7,7 @@ pub struct FuzzySearch {
 }
 
 impl FuzzySearch {
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self {
             matcher: Matcher::new(nucleo_matcher::Config::DEFAULT),
@@ -24,22 +24,24 @@ impl FuzzySearch {
             nucleo_matcher::pattern::Normalization::Smart,
         );
 
-        let mut scored: Vec<(usize, u32)> = chunks
+        let mut scored: Vec<(usize, u32, bool)> = chunks
             .iter()
             .enumerate()
             .filter_map(|(idx, chunk)| {
+                let exact_symbol = chunk
+                    .metadata
+                    .symbol_name
+                    .as_ref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(query));
+
                 // Try matching against multiple targets
                 let path_haystack = nucleo_matcher::Utf32String::from(chunk.file_path.as_str());
                 let path_score = pattern.score(path_haystack.slice(..), &mut self.matcher);
 
-                let symbol_score = chunk
-                    .metadata
-                    .symbol_name
-                    .as_ref()
-                    .and_then(|name| {
-                        let symbol_haystack = nucleo_matcher::Utf32String::from(name.as_str());
-                        pattern.score(symbol_haystack.slice(..), &mut self.matcher)
-                    });
+                let symbol_score = chunk.metadata.symbol_name.as_ref().and_then(|name| {
+                    let symbol_haystack = nucleo_matcher::Utf32String::from(name.as_str());
+                    pattern.score(symbol_haystack.slice(..), &mut self.matcher)
+                });
 
                 // Safe Unicode truncation: find char boundary at or before 200 bytes
                 let content_preview = if chunk.content.len() > 200 {
@@ -60,21 +62,26 @@ impl FuzzySearch {
                     .flatten()
                     .max()?;
 
-                Some((idx, best_score))
+                Some((idx, best_score, exact_symbol))
             })
             .collect();
 
-        // Sort by score descending
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
-        scored.truncate(limit);
+        #[allow(clippy::cast_precision_loss)]
+        let max_score = scored
+            .iter()
+            .map(|(_, score, _)| *score as f32)
+            .fold(0.0f32, f32::max);
 
-        // Normalize scores to 0-1 range (nucleo scores are u32)
-        let max_score = scored.first().map_or(1.0, |(_, s)| *s as f32);
+        // Sort by exact symbol match first, then by score descending
+        scored.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| b.1.cmp(&a.1)));
+        scored.truncate(limit);
 
         scored
             .into_iter()
-            .map(|(idx, score)| {
-                let normalized = if max_score > 0.0 {
+            .map(|(idx, score, exact_symbol)| {
+                let normalized = if exact_symbol {
+                    1.0
+                } else if max_score > 0.0 {
                     score as f32 / max_score
                 } else {
                     0.0
@@ -141,11 +148,27 @@ mod tests {
     }
 
     #[test]
-    fn test_fuzzy_typo_tolerance() {
+    fn test_fuzzy_exact_symbol_match_is_prioritized() {
         let mut fuzzy = FuzzySearch::new();
         let chunks = vec![
-            create_chunk("test.rs", "process_data", "fn process_data() {}"),
+            create_chunk("test.rs", "get_user", "fn get_user() {}"),
+            create_chunk("test.rs", "get_user_profile", "fn get_user_profile() {}"),
         ];
+
+        let results = fuzzy.search("get_user", &chunks, 5);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0, 0);
+        assert_eq!(results[0].1, 1.0);
+    }
+
+    #[test]
+    fn test_fuzzy_typo_tolerance() {
+        let mut fuzzy = FuzzySearch::new();
+        let chunks = vec![create_chunk(
+            "test.rs",
+            "process_data",
+            "fn process_data() {}",
+        )];
 
         // "proces" (typo) should still match "process_data"
         let results = fuzzy.search("proces", &chunks, 5);

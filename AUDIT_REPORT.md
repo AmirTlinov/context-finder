@@ -39,7 +39,7 @@ Context-Finder has undergone a rigorous 8-phase quality audit with the **stricte
 - ✅ Made `EmbeddingModel::new()` non-async (no await statements)
 - ✅ Made `VectorStore::new()` non-async
 - ✅ Fixed significant_drop_tightening with proper lock scoping
-- ✅ Added `InitOptions` import for fastembed
+- ✅ Replaced fastembed backend with ONNX Runtime CUDA (tokenizers + batching)
 - ✅ Updated all call sites across workspace
 
 #### Search Crate (18 issues fixed)
@@ -97,7 +97,7 @@ Context-Finder has undergone a rigorous 8-phase quality audit with the **stricte
 - No deprecated crates
 
 ### Key Dependencies
-- **fastembed**: v4.9.1 (latest)
+- **onnxruntime**: 1.16 (via `ort` crate, CUDA EP)
 - **tokio**: v1.45.0 (latest)
 - **serde**: v1.0.217 (latest)
 - **tree-sitter**: v0.24.7 (latest)
@@ -172,7 +172,7 @@ context-code-chunker (workspace)
 └── log (logging)
 
 context-vector-store (workspace)
-├── fastembed (embeddings)
+├── ort (ONNX Runtime CUDA embeddings)
 ├── hnsw (vector search)
 ├── tokio (async runtime)
 └── serde (serialization)
@@ -370,7 +370,7 @@ The tool is production-ready and significantly enhances AI agent effectiveness t
 
 ## Appendix: Detailed Logs
 
-Detailed logs for each phase are available in:
+Run `./audit.sh` to generate logs under `.context-finder/audit/` (gitignored):
 - `audit_clippy.log` - Code quality analysis
 - `audit_security.log` - Security scan results
 - `audit_tests.log` - Test execution output
