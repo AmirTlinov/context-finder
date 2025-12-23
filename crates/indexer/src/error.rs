@@ -22,6 +22,9 @@ pub enum IndexerError {
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
 
+    #[error("Index budget exceeded")]
+    BudgetExceeded,
+
     #[error("{0}")]
     Other(String),
 }

@@ -9,19 +9,31 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
+use tokio::sync::Mutex;
 
 pub struct CommandContext {
     request_config: Option<Value>,
+    request_options: Option<crate::command::domain::RequestOptions>,
     profile_name: String,
+    resolved: Mutex<Option<ProjectContext>>,
 }
 
 impl CommandContext {
-    pub fn new(config: Option<Value>) -> Self {
+    pub fn new(
+        config: Option<Value>,
+        options: Option<crate::command::domain::RequestOptions>,
+    ) -> Self {
         Self {
             request_config: normalize_config(config),
+            request_options: options,
             profile_name: env::var("CONTEXT_FINDER_PROFILE")
                 .unwrap_or_else(|_| "quality".to_string()),
+            resolved: Mutex::new(None),
         }
+    }
+
+    pub fn request_options(&self) -> crate::command::domain::RequestOptions {
+        self.request_options.clone().unwrap_or_default()
     }
 
     pub async fn resolve_project(&self, provided: Option<PathBuf>) -> Result<ProjectContext> {
@@ -30,6 +42,12 @@ impl CommandContext {
         } else {
             env::current_dir().context("Failed to determine current directory")?
         };
+
+        if let Some(cached) = self.resolved.lock().await.as_ref() {
+            if cached.root == root {
+                return Ok(cached.clone());
+            }
+        }
 
         if !root.exists() {
             anyhow::bail!("Project path does not exist: {}", root.display());
@@ -71,7 +89,7 @@ impl CommandContext {
         let (profile, profile_path, mut profile_hints) = self.load_profile(&root).await?;
         hints.append(&mut profile_hints);
 
-        Ok(ProjectContext {
+        let resolved = ProjectContext {
             root,
             config: merged,
             config_path,
@@ -79,7 +97,10 @@ impl CommandContext {
             profile_path,
             profile_name: self.profile_name.clone(),
             hints,
-        })
+        };
+
+        *self.resolved.lock().await = Some(resolved.clone());
+        Ok(resolved)
     }
 
     async fn load_file_config(
@@ -167,6 +188,7 @@ impl CommandContext {
     }
 }
 
+#[derive(Clone)]
 pub struct ProjectContext {
     pub root: PathBuf,
     pub config: Option<Value>,

@@ -34,18 +34,28 @@
 
 mod error;
 mod health;
+mod index_state;
 mod indexer;
 mod scanner;
 mod stats;
 mod watcher;
+mod watermark_io;
 
 pub use error::{IndexerError, Result};
 pub use health::append_failure_reason;
 pub use health::{health_file_path, read_health_snapshot, write_health_snapshot, HealthSnapshot};
+pub use index_state::{
+    assess_staleness, IndexSnapshot, IndexState, ReindexAttempt, ReindexResult, StaleAssessment,
+    StaleReason, Watermark, INDEX_STATE_SCHEMA_VERSION,
+};
 pub use indexer::{ModelIndexSpec, MultiModelProjectIndexer, ProjectIndexer};
 pub use scanner::FileScanner;
 pub use stats::IndexStats;
 pub use watcher::{
     IndexUpdate, IndexerHealth, MultiModelStreamingIndexer, StreamingIndexer,
     StreamingIndexerConfig,
+};
+pub use watermark_io::{
+    compute_project_watermark, index_watermark_path_for_store, read_index_watermark,
+    write_index_watermark, PersistedIndexWatermark,
 };

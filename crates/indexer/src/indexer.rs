@@ -8,7 +8,9 @@ use context_vector_store::VectorStore;
 use context_vector_store::{corpus_path_for_project_root, ChunkCorpus};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+
+use crate::{compute_project_watermark, write_index_watermark};
 
 #[derive(Clone, Debug)]
 pub struct ModelIndexSpec {
@@ -110,26 +112,47 @@ impl ProjectIndexer {
 
     /// Index the project (with incremental support)
     pub async fn index(&self) -> Result<IndexStats> {
-        self.index_with_mode(false).await
+        self.index_with_mode(false, None).await
     }
 
     /// Index the project in full mode (skip incremental check)
     pub async fn index_full(&self) -> Result<IndexStats> {
-        self.index_with_mode(true).await
+        self.index_with_mode(true, None).await
+    }
+
+    /// Index the project with a best-effort time budget.
+    ///
+    /// Budget enforcement is cooperative and checked between major phases. When the budget is
+    /// exceeded, the index is **not** persisted to disk.
+    pub async fn index_with_budget(&self, max_duration: Duration) -> Result<IndexStats> {
+        self.index_with_mode(false, Some(Instant::now() + max_duration))
+            .await
+    }
+
+    /// Full index with a best-effort time budget.
+    pub async fn index_full_with_budget(&self, max_duration: Duration) -> Result<IndexStats> {
+        self.index_with_mode(true, Some(Instant::now() + max_duration))
+            .await
     }
 
     /// Index with specified mode
     #[allow(clippy::cognitive_complexity)]
     #[allow(clippy::too_many_lines)]
-    async fn index_with_mode(&self, force_full: bool) -> Result<IndexStats> {
+    async fn index_with_mode(
+        &self,
+        force_full: bool,
+        deadline: Option<Instant>,
+    ) -> Result<IndexStats> {
         let start = Instant::now();
         let mut stats = IndexStats::new();
 
         log::info!("Indexing project at {}", self.root.display());
+        check_budget(deadline)?;
 
         // 1. Scan for files
         let scanner = FileScanner::new(&self.root);
         let files = scanner.scan();
+        check_budget(deadline)?;
         let live_files: HashSet<String> = files.iter().map(|p| self.normalize_path(p)).collect();
 
         let corpus_path = corpus_path_for_project_root(&self.root);
@@ -204,6 +227,7 @@ impl ProjectIndexer {
             };
             (store, None)
         };
+        check_budget(deadline)?;
 
         // 3. Determine which files to process
         let files_to_process = if corpus_full_rebuild {
@@ -248,7 +272,7 @@ impl ProjectIndexer {
                                 .unwrap_or(file_path)
                                 .to_string_lossy()
                                 .to_string(),
-                            duration.as_secs(),
+                            duration.as_millis() as u64,
                         );
                     }
                 }
@@ -267,10 +291,13 @@ impl ProjectIndexer {
         };
 
         if !corpus_targets.is_empty() {
-            let results = self.process_files_parallel(&corpus_targets).await?;
+            let results = self
+                .process_files_parallel(&corpus_targets, deadline)
+                .await?;
 
             // Aggregate results
             for result in results {
+                check_budget(deadline)?;
                 match result {
                     Ok((relative_path, chunks, language, lines)) => {
                         stats.add_file(&language, lines);
@@ -295,11 +322,14 @@ impl ProjectIndexer {
         }
 
         // 5. Save store and mtimes
+        check_budget(deadline)?;
         if corpus_dirty {
             corpus.save(&corpus_path).await?;
         }
         store.save().await?;
         self.save_mtimes(&current_mtimes).await?;
+        let watermark = compute_project_watermark(&self.root).await?;
+        write_index_watermark(&self.store_path, watermark).await?;
 
         #[allow(clippy::cast_possible_truncation)]
         {
@@ -331,11 +361,11 @@ impl ProjectIndexer {
             // Check if file is new or modified
             let metadata = tokio::fs::metadata(file_path).await?;
             let modified = metadata.modified()?;
-            let mtime = modified.duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+            let mtime = modified.duration_since(SystemTime::UNIX_EPOCH)?.as_millis() as u64;
 
             let is_changed = existing_mtimes
                 .get(&relative_path)
-                .is_none_or(|&old_mtime| mtime > old_mtime); // New file
+                .is_none_or(|&old_mtime| mtime > normalize_mtime_ms(old_mtime));
 
             if is_changed {
                 changed.push(file_path.clone());
@@ -353,7 +383,9 @@ impl ProjectIndexer {
             .ok_or_else(|| IndexerError::InvalidPath("store path has no parent".into()))?
             .join("mtimes.json");
         let json = serde_json::to_string_pretty(mtimes)?;
-        tokio::fs::write(&mtimes_path, json).await?;
+        let tmp = mtimes_path.with_extension("json.tmp");
+        tokio::fs::write(&tmp, json).await?;
+        tokio::fs::rename(&tmp, &mtimes_path).await?;
         Ok(())
     }
 
@@ -369,7 +401,10 @@ impl ProjectIndexer {
         }
 
         let json = tokio::fs::read_to_string(&mtimes_path).await?;
-        let mtimes: HashMap<String, u64> = serde_json::from_str(&json)?;
+        let mut mtimes: HashMap<String, u64> = serde_json::from_str(&json)?;
+        for value in mtimes.values_mut() {
+            *value = normalize_mtime_ms(*value);
+        }
         Ok(mtimes)
     }
 
@@ -377,6 +412,7 @@ impl ProjectIndexer {
     async fn process_files_parallel(
         &self,
         files: &[PathBuf],
+        deadline: Option<Instant>,
     ) -> Result<
         Vec<
             std::result::Result<
@@ -394,6 +430,7 @@ impl ProjectIndexer {
         let mut aggregated = Vec::with_capacity(files.len());
 
         for file_chunk in files.chunks(MAX_CONCURRENT) {
+            check_budget(deadline)?;
             let mut tasks = Vec::with_capacity(file_chunk.len());
             for file_path in file_chunk {
                 let file_path = file_path.clone();
@@ -402,6 +439,7 @@ impl ProjectIndexer {
             }
 
             for task in tasks {
+                check_budget(deadline)?;
                 match task.await {
                     Ok(Ok((file_path, content, lines))) => {
                         let relative_path = self.normalize_path(&file_path);
@@ -515,6 +553,16 @@ fn model_id_dir_name(model_id: &str) -> String {
         .collect()
 }
 
+fn normalize_mtime_ms(value: u64) -> u64 {
+    // Backward-compatible upgrade: older `mtimes.json` persisted seconds since UNIX epoch.
+    // Milliseconds since epoch are ~1e12 in 2025; seconds are ~1e9.
+    if value < 100_000_000_000 {
+        value.saturating_mul(1000)
+    } else {
+        value
+    }
+}
+
 impl MultiModelProjectIndexer {
     #[allow(clippy::unused_async)]
     pub async fn new(root: impl AsRef<Path>) -> Result<Self> {
@@ -604,7 +652,8 @@ impl MultiModelProjectIndexer {
             if let Ok(metadata) = tokio::fs::metadata(&file_path).await {
                 if let Ok(modified) = metadata.modified() {
                     if let Ok(duration) = modified.duration_since(SystemTime::UNIX_EPOCH) {
-                        current_mtimes.insert(self.normalize_path(file_path), duration.as_secs());
+                        current_mtimes
+                            .insert(self.normalize_path(file_path), duration.as_millis() as u64);
                     }
                 }
             }
@@ -644,7 +693,11 @@ impl MultiModelProjectIndexer {
             let incremental = !force_full && !corpus_full_rebuild && store_path.exists();
             let existing_mtimes = if incremental && mtimes_path.exists() {
                 let json = tokio::fs::read_to_string(&mtimes_path).await?;
-                serde_json::from_str::<HashMap<String, u64>>(&json)?
+                let mut loaded = serde_json::from_str::<HashMap<String, u64>>(&json)?;
+                for value in loaded.values_mut() {
+                    *value = normalize_mtime_ms(*value);
+                }
+                loaded
             } else {
                 HashMap::new()
             };
@@ -657,7 +710,9 @@ impl MultiModelProjectIndexer {
                 }
             } else {
                 for (rel, mtime) in &current_mtimes {
-                    let is_changed = existing_mtimes.get(rel).is_none_or(|old| mtime > old);
+                    let is_changed = existing_mtimes
+                        .get(rel)
+                        .is_none_or(|old| *mtime > normalize_mtime_ms(*old));
                     if is_changed {
                         changed_files.insert(rel.clone());
                     }
@@ -736,7 +791,7 @@ impl MultiModelProjectIndexer {
         }
 
         // 5. Apply the chunk deltas per model (embed + update store).
-        for plan in plans {
+        for plan in &plans {
             let mut store = if plan.incremental && plan.store_path.exists() {
                 let loaded = VectorStore::load_with_templates_for_model(
                     &plan.store_path,
@@ -793,7 +848,16 @@ impl MultiModelProjectIndexer {
             // Persist mtimes for this model so incremental correctness is per-model (avoids
             // cross-model skew if users index subsets of experts).
             let json = serde_json::to_string_pretty(&current_mtimes)?;
-            tokio::fs::write(&plan.mtimes_path, json).await?;
+            let tmp = plan.mtimes_path.with_extension("json.tmp");
+            tokio::fs::write(&tmp, json).await?;
+            tokio::fs::rename(&tmp, &plan.mtimes_path).await?;
+        }
+
+        // Capture a project watermark at the end and persist it for each model store.
+        // This is a lightweight "freshness contract" used by the read path to detect stale indices.
+        let watermark = compute_project_watermark(&self.root).await?;
+        for plan in &plans {
+            write_index_watermark(&plan.store_path, watermark.clone()).await?;
         }
 
         #[allow(clippy::cast_possible_truncation)]
@@ -880,6 +944,15 @@ impl MultiModelProjectIndexer {
 
         Ok(aggregated)
     }
+}
+
+fn check_budget(deadline: Option<Instant>) -> Result<()> {
+    if let Some(deadline) = deadline {
+        if Instant::now() >= deadline {
+            return Err(IndexerError::BudgetExceeded);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

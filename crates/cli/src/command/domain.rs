@@ -1,9 +1,11 @@
 use anyhow::Result;
 pub use context_search::{ContextPackBudget, ContextPackItem, ContextPackOutput};
+pub use context_search::{
+    NextAction, NextActionKind, TaskPackItem, TaskPackOutput, TASK_PACK_VERSION,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
-use std::time::Instant;
 
 pub const DEFAULT_LIMIT: usize = 10;
 pub const DEFAULT_CONTEXT_WINDOW: usize = 20;
@@ -13,6 +15,8 @@ pub struct CommandRequest {
     pub action: CommandAction,
     #[serde(default = "empty_payload")]
     pub payload: Value,
+    #[serde(default)]
+    pub options: Option<RequestOptions>,
     #[serde(default)]
     pub config: Option<Value>,
 }
@@ -27,6 +31,8 @@ pub enum CommandAction {
     Search,
     SearchWithContext,
     ContextPack,
+    TaskPack,
+    TextSearch,
     Index,
     GetContext,
     ListSymbols,
@@ -51,16 +57,6 @@ pub struct CommandResponse {
 }
 
 impl CommandResponse {
-    pub fn error_with_hints(message: String, hints: Vec<Hint>) -> Self {
-        Self {
-            status: CommandStatus::Error,
-            message: Some(message),
-            hints,
-            data: Value::Null,
-            meta: ResponseMeta::default(),
-        }
-    }
-
     pub fn is_error(&self) -> bool {
         matches!(self.status, CommandStatus::Error)
     }
@@ -89,6 +85,52 @@ pub enum HintKind {
     Action,
     Warn,
     Deprecation,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RequestOptions {
+    #[serde(default)]
+    pub stale_policy: StalePolicy,
+    #[serde(default = "default_max_reindex_ms")]
+    pub max_reindex_ms: u64,
+    #[serde(default = "default_true")]
+    pub allow_filesystem_fallback: bool,
+    #[serde(default)]
+    pub include_paths: Vec<String>,
+    #[serde(default)]
+    pub exclude_paths: Vec<String>,
+    #[serde(default)]
+    pub file_pattern: Option<String>,
+}
+
+impl Default for RequestOptions {
+    fn default() -> Self {
+        Self {
+            stale_policy: StalePolicy::default(),
+            max_reindex_ms: default_max_reindex_ms(),
+            allow_filesystem_fallback: default_true(),
+            include_paths: Vec::new(),
+            exclude_paths: Vec::new(),
+            file_pattern: None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_reindex_ms() -> u64 {
+    3000
+}
+
+#[derive(Debug, Deserialize, Copy, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StalePolicy {
+    #[default]
+    Auto,
+    Warn,
+    Fail,
 }
 
 #[derive(Debug, Serialize, Default, Clone)]
@@ -154,6 +196,8 @@ pub struct ResponseMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_state: Option<context_indexer::IndexState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compare_avg_baseline_ms: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compare_avg_context_ms: Option<f32>,
@@ -167,7 +211,6 @@ pub struct CommandOutcome {
     pub data: Value,
     pub hints: Vec<Hint>,
     pub meta: ResponseMeta,
-    pub started: Instant,
 }
 
 impl CommandOutcome {
@@ -176,7 +219,6 @@ impl CommandOutcome {
             data: serde_json::to_value(value)?,
             hints: Vec::new(),
             meta: ResponseMeta::default(),
-            started: Instant::now(),
         })
     }
 }
@@ -451,9 +493,63 @@ pub struct SearchWithContextPayload {
     pub reuse_graph: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TextSearchPayload {
+    pub pattern: String,
+    #[serde(default)]
+    pub max_results: Option<usize>,
+    #[serde(default)]
+    pub case_sensitive: Option<bool>,
+    #[serde(default)]
+    pub whole_word: Option<bool>,
+    #[serde(default)]
+    pub project: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TextSearchMatch {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TextSearchOutput {
+    pub pattern: String,
+    pub source: String,
+    pub scanned_files: usize,
+    pub matched_files: usize,
+    pub skipped_large_files: usize,
+    pub returned: usize,
+    pub truncated: bool,
+    pub matches: Vec<TextSearchMatch>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ContextPackPayload {
     pub query: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub project: Option<PathBuf>,
+    #[serde(default)]
+    pub strategy: Option<SearchStrategy>,
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+    #[serde(default)]
+    pub max_related_per_primary: Option<usize>,
+    #[serde(default)]
+    pub trace: Option<bool>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub reuse_graph: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskPackPayload {
+    pub intent: String,
     #[serde(default)]
     pub limit: Option<usize>,
     #[serde(default)]

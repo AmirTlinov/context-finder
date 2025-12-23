@@ -9,10 +9,10 @@ use axum::{
 use cache::{CacheBackend, CacheConfig};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use command::{
-    classify_error, CommandAction, CommandRequest, CommandResponse, ContextPackOutput,
-    ContextPackPayload, EvalCacheMode, EvalCompareOutput, EvalComparePayload, EvalOutput,
-    EvalPayload, IndexPayload, IndexResponse, ListSymbolsPayload, MapOutput, MapPayload,
-    SearchOutput, SearchPayload, SearchStrategy, SearchWithContextPayload, SymbolsOutput,
+    CommandAction, CommandRequest, ContextPackOutput, ContextPackPayload, EvalCacheMode,
+    EvalCompareOutput, EvalComparePayload, EvalOutput, EvalPayload, IndexPayload, IndexResponse,
+    ListSymbolsPayload, MapOutput, MapPayload, SearchOutput, SearchPayload, SearchStrategy,
+    SearchWithContextPayload, SymbolsOutput,
 };
 use std::collections::HashSet;
 use std::env;
@@ -530,6 +530,7 @@ fn command_action_requires_embeddings(action: &CommandAction) -> bool {
         CommandAction::Search
             | CommandAction::SearchWithContext
             | CommandAction::ContextPack
+            | CommandAction::TaskPack
             | CommandAction::Index
             | CommandAction::GetContext
             | CommandAction::CompareSearch
@@ -669,10 +670,11 @@ async fn run_eval(args: EvalArgs, cache_cfg: CacheConfig) -> Result<()> {
     let request = CommandRequest {
         action: CommandAction::Eval,
         payload: serde_json::to_value(payload)?,
+        options: None,
         config: None,
     };
 
-    let response = command::execute(request, cache_cfg).await?;
+    let response = command::execute(request, cache_cfg).await;
 
     let eval_out = if response.is_error() {
         None
@@ -749,10 +751,11 @@ async fn run_eval_compare(args: EvalCompareArgs, cache_cfg: CacheConfig) -> Resu
     let request = CommandRequest {
         action: CommandAction::EvalCompare,
         payload: serde_json::to_value(payload)?,
+        options: None,
         config: None,
     };
 
-    let response = command::execute(request, cache_cfg).await?;
+    let response = command::execute(request, cache_cfg).await;
 
     let compare_out = if response.is_error() {
         None
@@ -823,14 +826,7 @@ async fn run_command(args: CommandArgs, cache_cfg: CacheConfig) -> Result<()> {
         }
     }
 
-    let response = match command::execute(request, cache_cfg).await {
-        Ok(resp) => resp,
-        Err(err) => {
-            let message = format!("{err:#}");
-            let hints = classify_error(&message);
-            CommandResponse::error_with_hints(message, hints)
-        }
-    };
+    let response = command::execute(request, cache_cfg).await;
 
     let output = if args.pretty {
         serde_json::to_string_pretty(&response)?
@@ -878,10 +874,11 @@ async fn run_index(args: IndexArgs, cache_cfg: CacheConfig) -> Result<()> {
     let request = CommandRequest {
         action: CommandAction::Index,
         payload: serde_json::to_value(payload)?,
+        options: None,
         config: None,
     };
 
-    let response = command::execute(request, cache_cfg).await?;
+    let response = command::execute(request, cache_cfg).await;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&response)?);
@@ -912,10 +909,11 @@ async fn run_search(args: SearchArgs, cache_cfg: CacheConfig) -> Result<()> {
     let request = CommandRequest {
         action: CommandAction::Search,
         payload: serde_json::to_value(payload)?,
+        options: None,
         config: None,
     };
 
-    let response = command::execute(request, cache_cfg).await?;
+    let response = command::execute(request, cache_cfg).await;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&response)?);
@@ -957,10 +955,11 @@ async fn run_get_context(args: GetContextArgs, cache_cfg: CacheConfig) -> Result
         let request = CommandRequest {
             action: CommandAction::Search,
             payload: serde_json::to_value(payload)?,
+            options: None,
             config: None,
         };
 
-        let response = command::execute(request, cache_cfg.clone()).await?;
+        let response = command::execute(request, cache_cfg.clone()).await;
         if response.is_error() {
             eprintln!(
                 "Error: {}",
@@ -1015,10 +1014,11 @@ async fn run_list_symbols(args: ListSymbolsArgs, cache_cfg: CacheConfig) -> Resu
     let request = CommandRequest {
         action: CommandAction::ListSymbols,
         payload: serde_json::to_value(payload)?,
+        options: None,
         config: None,
     };
 
-    let response = command::execute(request, cache_cfg).await?;
+    let response = command::execute(request, cache_cfg).await;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&response)?);
@@ -1067,10 +1067,11 @@ async fn run_map(args: MapArgs, cache_cfg: CacheConfig) -> Result<()> {
     let request = CommandRequest {
         action: CommandAction::Map,
         payload: serde_json::to_value(payload)?,
+        options: None,
         config: None,
     };
 
-    let response = command::execute(request, cache_cfg).await?;
+    let response = command::execute(request, cache_cfg).await;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&response)?);
@@ -1131,10 +1132,11 @@ async fn run_context(args: ContextArgs, cache_cfg: CacheConfig) -> Result<()> {
     let request = CommandRequest {
         action: CommandAction::SearchWithContext,
         payload: serde_json::to_value(payload)?,
+        options: None,
         config: None,
     };
 
-    let response = command::execute(request, cache_cfg).await?;
+    let response = command::execute(request, cache_cfg).await;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&response)?);
@@ -1214,10 +1216,11 @@ async fn run_context_pack(args: ContextPackArgs, cache_cfg: CacheConfig) -> Resu
     let request = CommandRequest {
         action: CommandAction::ContextPack,
         payload: serde_json::to_value(payload)?,
+        options: None,
         config: None,
     };
 
-    let response = command::execute(request, cache_cfg).await?;
+    let response = command::execute(request, cache_cfg).await;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&response)?);
@@ -1364,14 +1367,7 @@ async fn http_handler(
 ) -> Result<Response, StatusCode> {
     let request: CommandRequest =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let response = match command::execute(request, state.cache.clone()).await {
-        Ok(resp) => resp,
-        Err(err) => {
-            let message = format!("{err:#}");
-            let hints = classify_error(&message);
-            CommandResponse::error_with_hints(message, hints)
-        }
-    };
+    let response = command::execute(request, state.cache.clone()).await;
 
     let bytes = serde_json::to_vec(&response).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(HttpResponse::builder()

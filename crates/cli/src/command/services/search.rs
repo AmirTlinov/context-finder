@@ -5,8 +5,9 @@ use crate::command::context::{
 use crate::command::domain::{
     config_bool_path, config_string_path, config_usize_path, parse_payload, CommandOutcome,
     ContextPackBudget, ContextPackItem, ContextPackOutput, ContextPackPayload, Hint, HintKind,
-    RelatedCodeOutput, SearchOutput, SearchPayload, SearchResultOutput, SearchStrategy,
-    SearchWithContextPayload,
+    NextAction, NextActionKind, RelatedCodeOutput, SearchOutput, SearchPayload, SearchResultOutput,
+    SearchStrategy, SearchWithContextPayload, TaskPackItem, TaskPackOutput, TaskPackPayload,
+    TASK_PACK_VERSION,
 };
 use crate::command::infra::{GraphCacheFactory, HealthPort};
 use crate::command::warm;
@@ -467,6 +468,7 @@ impl SearchService {
         }
 
         let project_ctx = ctx.resolve_project(payload.project).await?;
+        let request_options = ctx.request_options();
         let warm = warm::global_warmer().prewarm(&project_ctx.root).await;
 
         let limit = payload
@@ -768,11 +770,12 @@ impl SearchService {
 
         let model_id = current_model_id().unwrap_or_else(|_| "bge-small".to_string());
 
-        let (items, budget) = pack_enriched_results(
+        let (items, budget, filtered_out) = pack_enriched_results(
             enriched_results,
             &project_ctx.profile,
             max_chars,
             max_related_per_primary,
+            &request_options,
         );
 
         let debug_hints = if trace {
@@ -880,9 +883,131 @@ impl SearchService {
                 text: hint,
             });
         }
+        if crate::command::path_filters::is_active(&request_options) && filtered_out > 0 {
+            outcome.hints.push(Hint {
+                kind: HintKind::Info,
+                text: format!("Path filters excluded {filtered_out} pack items"),
+            });
+        }
         self.health.attach(&project_ctx.root, &mut outcome).await;
         Ok(outcome)
     }
+
+    pub async fn task_pack(&self, payload: Value, ctx: &CommandContext) -> Result<CommandOutcome> {
+        let payload: TaskPackPayload = parse_payload(payload)?;
+        if payload.intent.trim().is_empty() {
+            return Err(anyhow!("Intent must not be empty"));
+        }
+
+        let ctx_payload = ContextPackPayload {
+            query: payload.intent.clone(),
+            limit: payload.limit,
+            project: payload.project,
+            strategy: payload.strategy,
+            max_chars: payload.max_chars,
+            max_related_per_primary: payload.max_related_per_primary,
+            trace: payload.trace,
+            language: payload.language,
+            reuse_graph: payload.reuse_graph,
+        };
+
+        let mut outcome = self
+            .context_pack(serde_json::to_value(ctx_payload)?, ctx)
+            .await?;
+
+        let pack: ContextPackOutput = serde_json::from_value(outcome.data.clone())
+            .context("Invalid context_pack output (expected ContextPackOutput)")?;
+
+        let task_pack = build_task_pack(&payload.intent, pack);
+        outcome.data = serde_json::to_value(task_pack)?;
+        Ok(outcome)
+    }
+}
+
+fn build_task_pack(intent: &str, pack: ContextPackOutput) -> TaskPackOutput {
+    let mut primary_files = Vec::new();
+    let mut seen = HashSet::new();
+    let mut primary = 0usize;
+    let mut related = 0usize;
+
+    let items: Vec<TaskPackItem> = pack
+        .items
+        .into_iter()
+        .map(|item| {
+            match item.role.as_str() {
+                "primary" => primary += 1,
+                _ => related += 1,
+            }
+            if item.role == "primary" && seen.insert(item.file.clone()) {
+                primary_files.push(item.file.clone());
+            }
+            TaskPackItem {
+                why: explain_pack_item(&item),
+                item,
+            }
+        })
+        .collect();
+
+    let digest = {
+        let files = primary_files.iter().take(3).cloned().collect::<Vec<_>>();
+        let files_hint = if files.is_empty() {
+            String::new()
+        } else {
+            format!(" Top files: {}.", files.join(", "))
+        };
+        Some(format!(
+            "Intent: {}. Pack: {} primary / {} related.{}",
+            intent.trim(),
+            primary,
+            related,
+            files_hint
+        ))
+    };
+
+    let mut next_actions = Vec::new();
+    for file in primary_files.into_iter().take(3) {
+        next_actions.push(NextAction {
+            kind: NextActionKind::OpenFile,
+            reason: "Inspect primary context".to_string(),
+            file: Some(file),
+            command: None,
+            query: None,
+        });
+    }
+
+    TaskPackOutput {
+        version: TASK_PACK_VERSION,
+        intent: intent.to_string(),
+        model_id: pack.model_id,
+        profile: pack.profile,
+        digest,
+        items,
+        next_actions,
+        budget: pack.budget,
+    }
+}
+
+fn explain_pack_item(item: &ContextPackItem) -> Vec<String> {
+    let mut why = Vec::new();
+    if item.role == "primary" {
+        why.push("Primary match".to_string());
+    } else {
+        why.push("Related context".to_string());
+    }
+    if let Some(symbol) = &item.symbol {
+        if !symbol.is_empty() {
+            why.push(format!("Symbol: {symbol}"));
+        }
+    }
+    if let Some(rel) = &item.relationship {
+        if !rel.is_empty() {
+            why.push(format!("Relationship: {}", rel.join(" / ")));
+        }
+    }
+    if let Some(distance) = item.distance {
+        why.push(format!("Graph distance: {distance}"));
+    }
+    why
 }
 
 fn pack_enriched_results(
@@ -890,10 +1015,12 @@ fn pack_enriched_results(
     profile: &SearchProfile,
     max_chars: usize,
     max_related_per_primary: usize,
-) -> (Vec<ContextPackItem>, ContextPackBudget) {
+    request_options: &crate::command::domain::RequestOptions,
+) -> (Vec<ContextPackItem>, ContextPackBudget, usize) {
     let mut used_chars = 0usize;
     let mut truncated = false;
     let mut dropped_items = 0usize;
+    let mut filtered_out = 0usize;
 
     let mut items: Vec<ContextPackItem> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -902,6 +1029,10 @@ fn pack_enriched_results(
         let primary = er.primary;
         let primary_id = primary.id.clone();
         if !seen.insert(primary_id.clone()) {
+            continue;
+        }
+        if !crate::command::path_filters::path_allowed(&primary.chunk.file_path, request_options) {
+            filtered_out += 1;
             continue;
         }
 
@@ -934,6 +1065,11 @@ fn pack_enriched_results(
 
         let mut related = er.related;
         related.retain(|rc| !profile.is_rejected(&rc.chunk.file_path));
+        let before_filters = related.len();
+        related.retain(|rc| {
+            crate::command::path_filters::path_allowed(&rc.chunk.file_path, request_options)
+        });
+        filtered_out += before_filters.saturating_sub(related.len());
         related.sort_by(|a, b| {
             b.relevance_score
                 .total_cmp(&a.relevance_score)
@@ -1024,6 +1160,7 @@ fn pack_enriched_results(
             truncated,
             dropped_items,
         },
+        filtered_out,
     )
 }
 
@@ -1644,7 +1781,9 @@ mod tests {
             strategy: AssemblyStrategy::Extended,
         }];
 
-        let (items, budget) = pack_enriched_results(enriched, &profile, 50_000, 100);
+        let request_options = crate::command::domain::RequestOptions::default();
+        let (items, budget, _filtered_out) =
+            pack_enriched_results(enriched, &profile, 50_000, 100, &request_options);
         assert!(!budget.truncated);
 
         let related_ids: Vec<String> = items
@@ -1657,5 +1796,52 @@ mod tests {
         assert_eq!(related_ids.len(), 2);
         assert_eq!(related_ids[0], "src/imp0.rs:1:1");
         assert_eq!(related_ids[1], "src/imp1.rs:1:1");
+    }
+
+    #[test]
+    fn packer_applies_path_filters_to_primary_items() {
+        let profile = SearchProfile::general();
+
+        let primary_a = SearchResult {
+            id: "src/main.rs:1:1".to_string(),
+            chunk: chunk("src/main.rs", 1, "fn main() {}"),
+            score: 1.0,
+        };
+        let primary_b = SearchResult {
+            id: "docs/readme.md:1:1".to_string(),
+            chunk: chunk("docs/readme.md", 1, "# docs"),
+            score: 0.9,
+        };
+
+        let enriched = vec![
+            EnrichedResult {
+                primary: primary_a,
+                related: Vec::new(),
+                total_lines: 1,
+                strategy: AssemblyStrategy::Extended,
+            },
+            EnrichedResult {
+                primary: primary_b,
+                related: Vec::new(),
+                total_lines: 1,
+                strategy: AssemblyStrategy::Extended,
+            },
+        ];
+
+        let request_options = crate::command::domain::RequestOptions {
+            include_paths: vec!["src".to_string()],
+            ..Default::default()
+        };
+        let (items, budget, filtered_out) =
+            pack_enriched_results(enriched, &profile, 50_000, 100, &request_options);
+        assert!(!budget.truncated);
+        assert!(filtered_out >= 1);
+
+        let primary_files: Vec<&str> = items
+            .iter()
+            .filter(|i| i.role == "primary")
+            .map(|i| i.file.as_str())
+            .collect();
+        assert_eq!(primary_files, vec!["src/main.rs"]);
     }
 }

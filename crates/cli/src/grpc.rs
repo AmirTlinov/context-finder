@@ -1,6 +1,6 @@
 use crate::cache::CacheConfig;
 use crate::command::infra::HealthPort;
-use crate::command::{classify_error, CommandRequest};
+use crate::command::CommandRequest;
 use tonic::{Request, Response, Status};
 
 pub mod proto {
@@ -35,14 +35,7 @@ impl CommandService for GrpcServer {
         let req: CommandRequest = serde_json::from_slice(&json)
             .map_err(|e| Status::invalid_argument(format!("invalid json: {e}")))?;
 
-        let resp = match crate::command::execute(req, self.cache.clone()).await {
-            Ok(r) => r,
-            Err(err) => {
-                let message = format!("{err:#}");
-                let hints = classify_error(&message);
-                crate::command::CommandResponse::error_with_hints(message, hints)
-            }
-        };
+        let resp = crate::command::execute(req, self.cache.clone()).await;
 
         let bytes = serde_json::to_vec(&resp)
             .map_err(|e| Status::internal(format!("serialize failed: {e}")))?;

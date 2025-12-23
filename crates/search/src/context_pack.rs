@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub const CONTEXT_PACK_VERSION: u32 = 1;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ContextPackOutput {
     pub version: u32,
     pub query: String,
@@ -12,7 +12,7 @@ pub struct ContextPackOutput {
     pub budget: ContextPackBudget,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ContextPackItem {
     pub id: String,
     pub role: String,
@@ -32,7 +32,7 @@ pub struct ContextPackItem {
     pub distance: Option<usize>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ContextPackBudget {
     pub max_chars: usize,
     pub used_chars: usize,

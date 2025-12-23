@@ -4,6 +4,7 @@ mod context;
 mod eval;
 mod index;
 mod search;
+mod text_search;
 
 pub(crate) use search::collect_chunks;
 
@@ -21,6 +22,7 @@ pub struct Services {
     eval: eval::EvalService,
     index: index::IndexService,
     search: search::SearchService,
+    text_search: text_search::TextSearchService,
 }
 
 impl Services {
@@ -36,6 +38,7 @@ impl Services {
             eval: eval::EvalService,
             index: index::IndexService::new(health.clone()),
             search: search::SearchService::new(graph, health, cache),
+            text_search: text_search::TextSearchService,
         }
     }
 
@@ -43,20 +46,22 @@ impl Services {
         &self,
         action: CommandAction,
         payload: Value,
-        ctx: CommandContext,
+        ctx: &CommandContext,
     ) -> Result<CommandOutcome> {
         match action {
-            CommandAction::Index => self.index.run(payload, &ctx).await,
-            CommandAction::Search => self.search.basic(payload, &ctx).await,
-            CommandAction::SearchWithContext => self.search.with_context(payload, &ctx).await,
-            CommandAction::ContextPack => self.search.context_pack(payload, &ctx).await,
-            CommandAction::GetContext => self.context.get(payload, &ctx).await,
-            CommandAction::ListSymbols => self.context.list_symbols(payload, &ctx).await,
-            CommandAction::ConfigRead => self.config.read(payload, &ctx).await,
-            CommandAction::CompareSearch => self.compare.run(payload, &ctx).await,
-            CommandAction::Map => self.context.map(payload, &ctx).await,
-            CommandAction::Eval => self.eval.run(payload, &ctx).await,
-            CommandAction::EvalCompare => self.eval.compare(payload, &ctx).await,
+            CommandAction::Index => self.index.run(payload, ctx).await,
+            CommandAction::Search => self.search.basic(payload, ctx).await,
+            CommandAction::SearchWithContext => self.search.with_context(payload, ctx).await,
+            CommandAction::ContextPack => self.search.context_pack(payload, ctx).await,
+            CommandAction::TaskPack => self.search.task_pack(payload, ctx).await,
+            CommandAction::TextSearch => self.text_search.run(payload, ctx).await,
+            CommandAction::GetContext => self.context.get(payload, ctx).await,
+            CommandAction::ListSymbols => self.context.list_symbols(payload, ctx).await,
+            CommandAction::ConfigRead => self.config.read(payload, ctx).await,
+            CommandAction::CompareSearch => self.compare.run(payload, ctx).await,
+            CommandAction::Map => self.context.map(payload, ctx).await,
+            CommandAction::Eval => self.eval.run(payload, ctx).await,
+            CommandAction::EvalCompare => self.eval.compare(payload, ctx).await,
         }
     }
 }
