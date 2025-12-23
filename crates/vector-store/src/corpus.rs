@@ -79,11 +79,12 @@ impl ChunkCorpus {
     }
 
     #[must_use]
-    pub fn files(&self) -> &BTreeMap<String, Vec<CodeChunk>> {
+    pub const fn files(&self) -> &BTreeMap<String, Vec<CodeChunk>> {
         &self.files
     }
 }
 
+#[must_use]
 pub fn corpus_path_for_project_root(root: &Path) -> PathBuf {
     root.join(".context-finder").join("corpus.json")
 }

@@ -14,7 +14,7 @@ fn chunk(code: &str) -> Vec<context_code_chunker::CodeChunk> {
 
 #[test]
 fn extracts_methods_inside_module_impl() {
-    let code = r#"
+    let code = r"
 mod api {
     pub struct Car;
 
@@ -23,7 +23,7 @@ mod api {
         fn stop(&self) {}
     }
 }
-"#;
+";
 
     let chunks = chunk(code);
     let methods: Vec<_> = chunks
@@ -34,8 +34,7 @@ mod api {
 
     assert!(
         methods.contains(&"drive") && methods.contains(&"stop"),
-        "expected method chunks inside module impl, got: {:?}",
-        methods
+        "expected method chunks inside module impl, got: {methods:?}"
     );
 }
 

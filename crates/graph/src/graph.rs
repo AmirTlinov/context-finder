@@ -219,15 +219,12 @@ impl CodeGraph {
                 // Has no incoming Calls edges
                 let no_callers = self.get_callers(n).is_empty();
                 // Is a function or method (not a type/struct)
-                let is_callable = self
-                    .get_node(n)
-                    .map(|nd| {
-                        matches!(
-                            nd.symbol.symbol_type,
-                            crate::types::SymbolType::Function | crate::types::SymbolType::Method
-                        )
-                    })
-                    .unwrap_or(false);
+                let is_callable = self.get_node(n).is_some_and(|nd| {
+                    matches!(
+                        nd.symbol.symbol_type,
+                        crate::types::SymbolType::Function | crate::types::SymbolType::Method
+                    )
+                });
                 no_callers && is_callable
             })
             .collect()
@@ -307,13 +304,11 @@ impl CodeGraph {
         usages
             .into_iter()
             .filter(|(n, _, _)| {
-                self.get_node(*n)
-                    .map(|nd| {
-                        nd.chunk_id.contains("test")
-                            || nd.chunk_id.contains("_test.")
-                            || nd.symbol.name.starts_with("test_")
-                    })
-                    .unwrap_or(false)
+                self.get_node(*n).is_some_and(|nd| {
+                    nd.chunk_id.contains("test")
+                        || nd.chunk_id.contains("_test.")
+                        || nd.symbol.name.starts_with("test_")
+                })
             })
             .map(|(n, _, _)| n)
             .collect()

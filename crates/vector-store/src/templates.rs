@@ -45,11 +45,11 @@ pub struct EmbeddingTemplates {
     pub graph_node: GraphNodeTemplates,
 }
 
-fn default_schema_version() -> u32 {
+const fn default_schema_version() -> u32 {
     EMBEDDING_TEMPLATES_SCHEMA_VERSION
 }
 
-fn default_max_chars() -> usize {
+const fn default_max_chars() -> usize {
     8192
 }
 
@@ -150,28 +150,36 @@ impl EmbeddingTemplates {
 
     #[must_use]
     pub fn doc_template_hash(&self) -> u64 {
+        use std::fmt::Write as _;
+
         let mut repr = String::new();
-        repr.push_str(&format!(
-            "schema_version={}\nmax_chars={}\n",
+
+        let _ = writeln!(
+            &mut repr,
+            "schema_version={}\nmax_chars={}",
             self.schema_version, self.max_chars
-        ));
-        repr.push_str(&format!("doc.default={}\n", self.document.default));
-        repr.push_str(&format!(
-            "doc.code={}\n",
+        );
+        let _ = writeln!(&mut repr, "doc.default={}", self.document.default);
+        let _ = writeln!(
+            &mut repr,
+            "doc.code={}",
             self.document.code.as_deref().unwrap_or_default()
-        ));
-        repr.push_str(&format!(
-            "doc.docs={}\n",
+        );
+        let _ = writeln!(
+            &mut repr,
+            "doc.docs={}",
             self.document.docs.as_deref().unwrap_or_default()
-        ));
-        repr.push_str(&format!(
-            "doc.config={}\n",
+        );
+        let _ = writeln!(
+            &mut repr,
+            "doc.config={}",
             self.document.config.as_deref().unwrap_or_default()
-        ));
-        repr.push_str(&format!(
-            "doc.test={}\n",
+        );
+        let _ = writeln!(
+            &mut repr,
+            "doc.test={}",
             self.document.test.as_deref().unwrap_or_default()
-        ));
+        );
         fnv1a64(repr.as_bytes())
     }
 
@@ -213,8 +221,7 @@ impl EmbeddingTemplates {
         let chunk_type = chunk
             .metadata
             .chunk_type
-            .map(|ct| ct.as_str())
-            .unwrap_or("");
+            .map_or("", context_code_chunker::ChunkType::as_str);
         let language = chunk.metadata.language.as_deref().unwrap_or("");
         let symbol = chunk.metadata.symbol_name.as_deref().unwrap_or("");
         let qualified_name = chunk.metadata.qualified_name.as_deref().unwrap_or("");
@@ -316,30 +323,35 @@ impl EmbeddingTemplates {
 
 #[must_use]
 pub fn classify_document_kind(chunk: &CodeChunk) -> DocumentKind {
-    let path = chunk.file_path.to_ascii_lowercase();
-    if path.ends_with(".md") || path.ends_with(".mdx") {
+    fn has_extension(ext: Option<&str>, candidates: &[&str]) -> bool {
+        ext.is_some_and(|ext| {
+            candidates
+                .iter()
+                .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+        })
+    }
+
+    let path = std::path::Path::new(chunk.file_path.as_str());
+    let ext = path.extension().and_then(|e| e.to_str());
+
+    if has_extension(ext, &["md", "mdx"]) {
         return DocumentKind::Docs;
     }
-    if path.ends_with(".toml")
-        || path.ends_with(".yaml")
-        || path.ends_with(".yml")
-        || path.ends_with(".json")
-        || path.ends_with(".ini")
-        || path.ends_with(".cfg")
-        || path.ends_with(".conf")
-    {
+    if has_extension(ext, &["toml", "yaml", "yml", "json", "ini", "cfg", "conf"]) {
         return DocumentKind::Config;
     }
-    if path.contains("/test")
-        || path.contains("\\test")
-        || path.contains("/tests/")
-        || path.contains("\\tests\\")
-        || path.contains("/__tests__/")
-        || path.contains("\\__tests__\\")
-    {
+    if path.components().any(|component| match component {
+        std::path::Component::Normal(s) => {
+            let s = s.to_string_lossy();
+            s.eq_ignore_ascii_case("test")
+                || s.eq_ignore_ascii_case("tests")
+                || s.eq_ignore_ascii_case("__tests__")
+        }
+        _ => false,
+    }) {
         return DocumentKind::Test;
     }
-    if path.contains('.') {
+    if ext.is_some() {
         return DocumentKind::Code;
     }
     DocumentKind::Other
@@ -532,8 +544,8 @@ fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
-    const OFFSET: u64 = 14695981039346656037;
-    const PRIME: u64 = 1099511628211;
+    const OFFSET: u64 = 14_695_981_039_346_656_037;
+    const PRIME: u64 = 1_099_511_628_211;
     let mut hash = OFFSET;
     for b in bytes {
         hash ^= u64::from(*b);

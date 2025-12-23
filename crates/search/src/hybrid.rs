@@ -167,6 +167,7 @@ impl HybridSearch {
 
     /// Batch search for multiple queries (more efficient than sequential searches)
     /// Returns results for each query in the same order
+    #[allow(clippy::too_many_lines)]
     pub async fn search_batch(
         &mut self,
         queries: &[&str],
@@ -364,6 +365,8 @@ impl HybridSearch {
 
     /// Normalize scores to 0-1 range using min-max normalization
     pub fn normalize_scores(results: &mut [SearchResult]) {
+        const MIN_DELTA: f32 = 1e-6;
+
         if results.is_empty() {
             return;
         }
@@ -401,7 +404,6 @@ impl HybridSearch {
         }
 
         // Avoid division by zero if all scores are equal (allow tiny jitter)
-        const MIN_DELTA: f32 = 1e-6;
         if (max_score - min_score).abs() < MIN_DELTA {
             // All scores are the same, set them all to 1.0
             for result in results {

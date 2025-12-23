@@ -83,7 +83,8 @@ pub struct GraphNodeStore {
 }
 
 impl GraphNodeStore {
-    pub fn meta(&self) -> &GraphNodeStoreMeta {
+    #[must_use]
+    pub const fn meta(&self) -> &GraphNodeStoreMeta {
         &self.meta
     }
 
@@ -262,13 +263,11 @@ async fn load_persisted_if_compatible(
         return Ok(None);
     }
 
-    let bytes = match tokio::fs::read(path).await {
-        Ok(b) => b,
-        Err(_) => return Ok(None),
+    let Ok(bytes) = tokio::fs::read(path).await else {
+        return Ok(None);
     };
-    let persisted: PersistedGraphNodeStore = match serde_json::from_slice(&bytes) {
-        Ok(p) => p,
-        Err(_) => return Ok(None),
+    let Ok(persisted) = serde_json::from_slice::<PersistedGraphNodeStore>(&bytes) else {
+        return Ok(None);
     };
     if persisted.schema_version != GRAPH_NODE_STORE_SCHEMA_VERSION {
         return Ok(None);

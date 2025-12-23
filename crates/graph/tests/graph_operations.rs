@@ -1,4 +1,4 @@
-//! Tests for CodeGraph operations
+//! Tests for `CodeGraph` operations
 
 use context_graph::{CodeGraph, GraphEdge, GraphNode, RelationshipType, Symbol, SymbolType};
 
@@ -21,7 +21,7 @@ fn make_node(name: &str, chunk_id: &str, file: &str) -> GraphNode {
     }
 }
 
-fn make_edge(rel: RelationshipType) -> GraphEdge {
+const fn make_edge(rel: RelationshipType) -> GraphEdge {
     GraphEdge {
         relationship: rel,
         weight: 1.0,

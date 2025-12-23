@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 const CACHE_MAGIC: &[u8; 4] = b"EC01";
 
 #[derive(Clone, Debug)]
-pub(crate) struct EmbeddingCache {
+pub struct EmbeddingCache {
     base_dir: PathBuf,
 }
 
 impl EmbeddingCache {
-    pub(crate) fn for_store_path(store_path: &Path) -> Self {
+    pub fn for_store_path(store_path: &Path) -> Self {
         let context_dir =
             find_context_dir(store_path).unwrap_or_else(|| PathBuf::from(".context-finder"));
         Self {
@@ -17,20 +17,20 @@ impl EmbeddingCache {
         }
     }
 
-    pub(crate) fn vector_path(
+    pub fn vector_path(
         &self,
         embedding_mode: &str,
         model_id: &str,
         template_hash: u64,
         doc_hash: u64,
     ) -> PathBuf {
-        let mode_dir = safe_component(embedding_mode);
+        let embed_mode_dir = safe_component(embedding_mode);
         let model_dir = safe_component(model_id);
         let template_dir = format!("{template_hash:016x}");
         let key = format!("{doc_hash:016x}");
         let (shard_a, shard_b) = shard_dirs(&key);
         self.base_dir
-            .join(mode_dir)
+            .join(embed_mode_dir)
             .join(model_dir)
             .join(template_dir)
             .join(shard_a)
@@ -38,7 +38,7 @@ impl EmbeddingCache {
             .join(format!("{key}.bin"))
     }
 
-    pub(crate) async fn get_vector(
+    pub async fn get_vector(
         &self,
         embedding_mode: &str,
         model_id: &str,
@@ -51,7 +51,7 @@ impl EmbeddingCache {
         decode_vector(&bytes, dimension)
     }
 
-    pub(crate) async fn put_vector(
+    pub async fn put_vector(
         &self,
         embedding_mode: &str,
         model_id: &str,
@@ -75,12 +75,7 @@ impl EmbeddingCache {
         Ok(())
     }
 
-    pub(crate) async fn prune_model_dir(
-        &self,
-        embedding_mode: &str,
-        model_id: &str,
-        max_bytes: u64,
-    ) {
+    pub async fn prune_model_dir(&self, embedding_mode: &str, model_id: &str, max_bytes: u64) {
         if max_bytes == 0 {
             return;
         }

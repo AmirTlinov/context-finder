@@ -158,7 +158,7 @@ mod tests {
         let results = fuzzy.search("get_user", &chunks, 5);
         assert!(!results.is_empty());
         assert_eq!(results[0].0, 0);
-        assert_eq!(results[0].1, 1.0);
+        assert!((results[0].1 - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]

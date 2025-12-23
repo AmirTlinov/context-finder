@@ -22,7 +22,7 @@ fn run_cli_raw(workdir: &Path, request: &str) -> (bool, Value) {
 
 fn run_cli(workdir: &Path, request: &str) -> Value {
     let (ok, body) = run_cli_raw(workdir, request);
-    assert!(ok, "stdout: {}\nstderr: {}", body, request);
+    assert!(ok, "stdout: {body}\nstderr: {request}");
     body
 }
 
@@ -71,9 +71,9 @@ fn incremental_index_purges_deleted_files() {
 
     fs::write(
         root.join("src/dead.rs"),
-        r#"
+        r"
         pub fn dead() -> i32 { 1 }
-        "#,
+        ",
     )
     .unwrap();
 

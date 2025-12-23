@@ -40,7 +40,7 @@ impl RRFFusion {
             weights.fuzzy * 100.0
         );
 
-        self.fuse_with_weights(
+        Self::fuse_with_weights(
             semantic_results,
             fuzzy_results,
             weights.semantic,
@@ -60,7 +60,7 @@ impl RRFFusion {
         semantic_results: &[(usize, f32)],
         fuzzy_results: &[(usize, f32)],
     ) -> Vec<(usize, f32)> {
-        self.fuse_with_weights(
+        Self::fuse_with_weights(
             semantic_results,
             fuzzy_results,
             self.semantic_weight,
@@ -72,7 +72,6 @@ impl RRFFusion {
     /// Fuse with explicit weights
     #[allow(clippy::cast_precision_loss)]
     fn fuse_with_weights(
-        &self,
         semantic_results: &[(usize, f32)],
         fuzzy_results: &[(usize, f32)],
         semantic_weight: f32,
@@ -127,8 +126,7 @@ impl AstBooster {
     fn compute_boost(chunk: &CodeChunk) -> f32 {
         let type_boost = chunk.metadata.chunk_type.map_or(1.0, |ct| match ct {
             ChunkType::Function | ChunkType::Method => 1.18,
-            ChunkType::Struct | ChunkType::Class => 1.05,
-            ChunkType::Enum | ChunkType::Interface => 1.05,
+            ChunkType::Struct | ChunkType::Class | ChunkType::Enum | ChunkType::Interface => 1.05,
             ChunkType::Variable | ChunkType::Const => 0.9,
             _ => f32::from(ct.priority()) / 100.0,
         });

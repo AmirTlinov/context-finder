@@ -58,6 +58,8 @@ fn render_graph_doc(
     node: &GraphNode,
     config: GraphDocConfig,
 ) -> (String, u64) {
+    use std::fmt::Write as _;
+
     let symbol = &node.symbol;
     let mut out = String::new();
 
@@ -67,19 +69,17 @@ fn render_graph_doc(
         .unwrap_or(symbol.name.as_str());
 
     out.push_str("kind: graph_node\n");
-    out.push_str(&format!("node_id: {}\n", node_key(node)));
-    out.push_str(&format!("chunk_id: {}\n", node.chunk_id));
-    out.push_str(&format!("symbol: {display_name}\n"));
-    out.push_str(&format!(
-        "symbol_type: {}\n",
+    let _ = writeln!(&mut out, "node_id: {}", node_key(node));
+    let _ = writeln!(&mut out, "chunk_id: {}", node.chunk_id);
+    let _ = writeln!(&mut out, "symbol: {display_name}");
+    let _ = writeln!(
+        &mut out,
+        "symbol_type: {}",
         symbol_type_name(&symbol.symbol_type)
-    ));
-    out.push_str(&format!("file: {}\n", symbol.file_path));
-    out.push_str(&format!(
-        "lines: {}-{}\n",
-        symbol.start_line, symbol.end_line
-    ));
-    out.push_str(&format!("graph_doc_version: {GRAPH_DOC_VERSION}\n"));
+    );
+    let _ = writeln!(&mut out, "file: {}", symbol.file_path);
+    let _ = writeln!(&mut out, "lines: {}-{}", symbol.start_line, symbol.end_line);
+    let _ = writeln!(&mut out, "graph_doc_version: {GRAPH_DOC_VERSION}");
 
     for direction in [Direction::Outgoing, Direction::Incoming] {
         let dir_name = match direction {
@@ -89,15 +89,14 @@ fn render_graph_doc(
 
         for rel in rel_order() {
             let neighbors = collect_neighbors(graph, idx, direction, rel, config);
-            out.push_str(&format!(
-                "{dir_name}.{}({}):\n",
+            let _ = writeln!(
+                &mut out,
+                "{dir_name}.{}({}):",
                 rel_name(rel),
                 neighbors.len()
-            ));
+            );
             for neighbor in neighbors {
-                out.push_str("- ");
-                out.push_str(&neighbor);
-                out.push('\n');
+                let _ = writeln!(&mut out, "- {neighbor}");
             }
         }
     }
@@ -145,7 +144,7 @@ fn node_key(node: &GraphNode) -> String {
     format!("{}#{}", node.chunk_id, display)
 }
 
-fn rel_order() -> [RelationshipType; 6] {
+const fn rel_order() -> [RelationshipType; 6] {
     [
         RelationshipType::Calls,
         RelationshipType::Uses,
@@ -156,7 +155,7 @@ fn rel_order() -> [RelationshipType; 6] {
     ]
 }
 
-fn symbol_type_name(kind: &SymbolType) -> &'static str {
+const fn symbol_type_name(kind: &SymbolType) -> &'static str {
     match kind {
         SymbolType::Function => "function",
         SymbolType::Method => "method",
@@ -170,7 +169,7 @@ fn symbol_type_name(kind: &SymbolType) -> &'static str {
     }
 }
 
-fn rel_name(rel: RelationshipType) -> &'static str {
+const fn rel_name(rel: RelationshipType) -> &'static str {
     match rel {
         RelationshipType::Calls => "calls",
         RelationshipType::Uses => "uses",
@@ -182,8 +181,8 @@ fn rel_name(rel: RelationshipType) -> &'static str {
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
-    const OFFSET: u64 = 14695981039346656037;
-    const PRIME: u64 = 1099511628211;
+    const OFFSET: u64 = 14_695_981_039_346_656_037;
+    const PRIME: u64 = 1_099_511_628_211;
     let mut hash = OFFSET;
     for b in bytes {
         hash ^= u64::from(*b);

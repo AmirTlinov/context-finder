@@ -77,7 +77,8 @@ pub async fn load_compare<T: for<'de> Deserialize<'de> + Clone>(
     }
 
     let age = unix_ms_now().saturating_sub(envelope.created_ms);
-    if age > cfg.ttl.as_millis() as u64 {
+    let ttl_ms = u64::try_from(cfg.ttl.as_millis()).unwrap_or(u64::MAX);
+    if age > ttl_ms {
         return Ok(None);
     }
 
@@ -96,22 +97,23 @@ pub async fn save_compare<T: Serialize>(
             store_mtime_ms,
             data: serde_json::to_value(data)?,
         };
-        MEM_CACHE.lock().expect("cache mutex poisoned").insert(
-            key.to_string(),
-            envelope,
-            cfg.capacity,
-        );
+        MEM_CACHE
+            .lock()
+            .expect("cache mutex poisoned")
+            .insert(key, envelope, cfg.capacity);
         return Ok(());
     }
 
     cfg.ensure_dir()?;
     let path = cfg.dir.join(format!("compare_{key}.json"));
-    let envelope = CacheEnvelope {
-        created_ms: unix_ms_now(),
-        store_mtime_ms,
-        data,
+    let bytes = {
+        let envelope = CacheEnvelope {
+            created_ms: unix_ms_now(),
+            store_mtime_ms,
+            data,
+        };
+        serde_json::to_vec_pretty(&envelope)?
     };
-    let bytes = serde_json::to_vec_pretty(&envelope)?;
     fs::write(&path, bytes).await?;
     Ok(())
 }
@@ -143,8 +145,7 @@ pub fn compare_cache_key(
 fn unix_ms_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 struct MemCache {
@@ -167,10 +168,10 @@ impl MemCache {
         self.order.push_front(key.to_string());
     }
 
-    fn insert<T: Serialize>(&mut self, key: String, envelope: CacheEnvelope<T>, capacity: usize) {
+    fn insert<T: Serialize>(&mut self, key: &str, envelope: CacheEnvelope<T>, capacity: usize) {
         if let Ok(val) = serde_json::to_value(envelope) {
-            self.map.insert(key.clone(), val);
-            self.touch(&key);
+            self.map.insert(key.to_string(), val);
+            self.touch(key);
             while self.order.len() > capacity {
                 if let Some(old) = self.order.pop_back() {
                     self.map.remove(&old);
@@ -188,7 +189,8 @@ impl MemCache {
     ) -> Option<T> {
         let val = self.map.get(key)?.clone();
         let envelope: CacheEnvelope<T> = serde_json::from_value(val).ok()?;
-        if unix_ms_now().saturating_sub(envelope.created_ms) > ttl.as_millis() as u64 {
+        let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+        if unix_ms_now().saturating_sub(envelope.created_ms) > ttl_ms {
             self.map.remove(key);
             return None;
         }

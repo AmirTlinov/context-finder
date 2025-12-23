@@ -47,7 +47,7 @@ pub struct RelatedChunk {
     pub relevance_score: f32,
 }
 
-fn relationship_rank(rel: RelationshipType) -> u8 {
+const fn relationship_rank(rel: RelationshipType) -> u8 {
     match rel {
         RelationshipType::Calls => 0,
         RelationshipType::Uses => 1,
@@ -217,7 +217,7 @@ impl ContextAssembler {
     }
 
     #[must_use]
-    pub fn graph(&self) -> &CodeGraph {
+    pub const fn graph(&self) -> &CodeGraph {
         &self.graph
     }
 }
@@ -298,11 +298,11 @@ mod tests {
         }
 
         let assembler = ContextAssembler::new(graph);
-        let assembled = assembler
+        let assembled_context = assembler
             .assemble_for_symbol("primary", AssemblyStrategy::Direct)
             .unwrap();
 
-        let ordered: Vec<(String, usize, usize)> = assembled
+        let ordered: Vec<(String, usize, usize)> = assembled_context
             .related_chunks
             .iter()
             .map(|rc| {

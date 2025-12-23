@@ -107,6 +107,7 @@ impl MultiModelHybridSearch {
         })
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new_with_corpus(
         sources: Vec<(String, VectorIndex)>,
         profile: SearchProfile,
@@ -355,7 +356,7 @@ impl MultiModelHybridSearch {
                     chunk.file_path, chunk.start_line, chunk.end_line
                 );
                 #[allow(clippy::cast_precision_loss)]
-                let score = (1.0 - (rank as f32) * 1e-3).max(0.0);
+                let score = (rank as f32).mul_add(-1e-3, 1.0).max(0.0);
                 Some(SearchResult { chunk, score, id })
             })
             .collect();
@@ -412,7 +413,7 @@ impl MultiModelHybridSearch {
                     chunk.file_path, chunk.start_line, chunk.end_line
                 );
                 #[allow(clippy::cast_precision_loss)]
-                let score = (1.0 - (rank as f32) * 1e-3).max(0.0);
+                let score = (rank as f32).mul_add(-1e-3, 1.0).max(0.0);
                 Some(SearchResult { chunk, score, id })
             })
             .collect();
@@ -437,7 +438,7 @@ impl MultiModelHybridSearch {
         if models.is_empty() {
             // Fallback: use any available model index to avoid hard-failing.
             let mut available: Vec<&str> = self.sources.keys().map(String::as_str).collect();
-            available.sort();
+            available.sort_unstable();
             if let Some(first) = available.first().copied() {
                 models.push(first);
             }
@@ -454,10 +455,10 @@ impl MultiModelHybridSearch {
         }
 
         // Embed queries per model first so we can run index search without holding any locks.
-        let mut embeds = Vec::with_capacity(models.len());
-        for model_id in &models {
+        let mut embeds: Vec<(&str, Vec<f32>)> = Vec::with_capacity(models.len());
+        for &model_id in &models {
             embeds.push((
-                model_id.to_string(),
+                model_id,
                 self.registry.embed(model_id, embedding_query).await?,
             ));
         }
@@ -467,7 +468,7 @@ impl MultiModelHybridSearch {
         let mut semantic_max: HashMap<usize, f32> = HashMap::new();
 
         for (model_id, query_vec) in embeds {
-            let Some(source) = self.sources.get(&model_id) else {
+            let Some(source) = self.sources.get(model_id) else {
                 continue;
             };
 
@@ -614,7 +615,7 @@ impl MultiModelContextSearch {
     }
 
     #[must_use]
-    pub fn assembler(&self) -> Option<&ContextAssembler> {
+    pub const fn assembler(&self) -> Option<&ContextAssembler> {
         self.assembler.as_ref()
     }
 
@@ -772,6 +773,7 @@ fn fuse_rrf(rankings: &[Vec<usize>], k: f32) -> Vec<usize> {
 
     for ranking in rankings {
         for (rank, idx) in ranking.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
             let score = 1.0 / (k + rank as f32 + 1.0);
             *scores.entry(*idx).or_insert(0.0) += score;
         }

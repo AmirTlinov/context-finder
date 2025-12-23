@@ -14,6 +14,7 @@ impl FileScanner {
     }
 
     /// Scan directory for source files (.gitignore aware)
+    #[must_use]
     pub fn scan(&self) -> Vec<PathBuf> {
         let mut files = Vec::new();
 
@@ -24,7 +25,7 @@ impl FileScanner {
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true);
-        builder.filter_entry(move |entry| !FileScanner::is_ignored_scope(entry.path(), &root));
+        builder.filter_entry(move |entry| !Self::is_ignored_scope(entry.path(), &root));
 
         for result in builder.build() {
             match result {
@@ -99,8 +100,7 @@ impl FileScanner {
         let is_json = path
             .extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("json"))
-            .unwrap_or(false);
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
         if !is_json {
             return false;
         }
@@ -114,8 +114,7 @@ impl FileScanner {
 
         parent
             .parent()
-            .map(|grand| Self::component_matches(grand, "bench"))
-            .unwrap_or(false)
+            .is_some_and(|grand| Self::component_matches(grand, "bench"))
     }
 
     fn component_matches(path: &Path, target: &str) -> bool {

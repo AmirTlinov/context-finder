@@ -57,7 +57,7 @@ impl IndexerHealth {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct StreamingIndexerConfig {
     pub debounce: Duration,
     pub max_batch_wait: Duration,
@@ -104,7 +104,7 @@ impl StreamingIndexer {
 
         spawn_index_loop(
             indexer,
-            config.clone(),
+            config,
             event_rx,
             command_rx,
             update_tx.clone(),
@@ -195,7 +195,7 @@ impl MultiModelStreamingIndexer {
 
         spawn_multi_model_index_loop(
             indexer,
-            config.clone(),
+            config,
             event_rx,
             command_rx,
             update_tx.clone(),
@@ -232,8 +232,10 @@ impl MultiModelStreamingIndexer {
                 "MultiModelStreamingIndexer models must not be empty".to_string(),
             ));
         }
-        let mut guard = self.inner.models.lock().await;
-        *guard = models;
+        {
+            let mut guard = self.inner.models.lock().await;
+            *guard = models;
+        }
         Ok(())
     }
 
@@ -280,6 +282,7 @@ fn create_fs_watcher(
     Ok(watcher)
 }
 
+#[allow(clippy::too_many_lines)]
 fn spawn_index_loop(
     indexer: Arc<ProjectIndexer>,
     config: StreamingIndexerConfig,
@@ -331,6 +334,7 @@ fn spawn_index_loop(
                             health.indexing = false;
                             health.pending_events = 0;
                             if duration > 0 {
+                                #[allow(clippy::cast_precision_loss)]
                                 let files_per_sec =
                                     cycle_stats.files as f32 / (duration as f32 / 1000.0);
                                 health.last_throughput_files_per_sec = Some(files_per_sec);
@@ -400,6 +404,7 @@ fn spawn_index_loop(
     });
 }
 
+#[allow(clippy::too_many_lines)]
 fn spawn_multi_model_index_loop(
     indexer: Arc<MultiModelProjectIndexer>,
     config: StreamingIndexerConfig,
@@ -470,6 +475,7 @@ fn spawn_multi_model_index_loop(
                             health.indexing = false;
                             health.pending_events = 0;
                             if duration > 0 {
+                                #[allow(clippy::cast_precision_loss)]
                                 let files_per_sec =
                                     cycle_stats.files as f32 / (duration as f32 / 1000.0);
                                 health.last_throughput_files_per_sec = Some(files_per_sec);
@@ -664,7 +670,7 @@ fn is_relevant_path(root: &Path, path: &Path) -> bool {
             if first == "bench" {
                 if let Some(seg2) = components.next() {
                     let s2 = seg2.as_os_str().to_string_lossy().to_lowercase();
-                    if s2 == "logs" && path.extension().map(|e| e == "json").unwrap_or(false) {
+                    if s2 == "logs" && path.extension().is_some_and(|e| e == "json") {
                         return false;
                     }
                 }
@@ -674,8 +680,7 @@ fn is_relevant_path(root: &Path, path: &Path) -> bool {
         // ignore .gitignore anywhere
         if relative
             .file_name()
-            .map(|f| f.to_string_lossy() == ".gitignore")
-            .unwrap_or(false)
+            .is_some_and(|f| f.to_string_lossy() == ".gitignore")
         {
             return false;
         }
@@ -753,11 +758,7 @@ impl DebounceState {
             return Some(time::Instant::now());
         }
 
-        let mut deadline = None;
-
-        if let Some(last) = self.last_event {
-            deadline = Some(last + self.debounce);
-        }
+        let mut deadline = self.last_event.map(|last| last + self.debounce);
 
         if let Some(first) = self.first_event {
             let forced = first + self.max_batch;
@@ -771,6 +772,7 @@ impl DebounceState {
         deadline.map(time::Instant::from_std)
     }
 
+    #[allow(clippy::missing_const_for_fn)]
     fn take_reason(&mut self) -> Option<String> {
         self.reason.take()
     }
@@ -796,11 +798,11 @@ impl DebounceState {
         self.recent_paths
             .retain(|(_, ts)| now.duration_since(*ts) <= self.dedup_window);
         let already = self.recent_paths.iter().any(|(p, _)| p == &key);
-        if !already {
+        if already {
+            false
+        } else {
             self.recent_paths.push_back((key, now));
             true
-        } else {
-            false
         }
     }
 }
@@ -819,7 +821,7 @@ fn compute_p95(history: &VecDeque<u64>) -> Option<u64> {
     }
     let mut sorted: Vec<u64> = history.iter().copied().collect();
     sorted.sort_unstable();
-    let idx = ((sorted.len() as f32 - 1.0) * 0.95).round() as usize;
+    let idx = ((sorted.len().saturating_sub(1) * 95) + 50) / 100;
     sorted.get(idx).copied()
 }
 
@@ -844,7 +846,8 @@ fn serialize_alerts(log: &VecDeque<AlertRecord>) -> String {
 fn current_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|dur| dur.as_millis() as u64)
+        .ok()
+        .and_then(|dur| u64::try_from(dur.as_millis()).ok())
         .unwrap_or(0)
 }
 

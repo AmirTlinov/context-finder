@@ -67,17 +67,18 @@ impl ExpertsConfig {
         if let Some(schema_version) = raw.schema_version {
             if schema_version != 1 {
                 return Err(anyhow!(
-                    "experts.schema_version {} is not supported (expected 1)",
-                    schema_version
+                    "experts.schema_version {schema_version} is not supported (expected 1)"
                 ));
             }
         }
 
         if let Some(semantic) = raw.semantic {
-            let default = semantic.default.filter(|v| !v.is_empty());
-            let default = default.unwrap_or_else(|| cfg.semantic.default.clone());
-
-            cfg.semantic.default = default.clone();
+            let default = semantic
+                .default
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| cfg.semantic.default.clone());
+            cfg.semantic.default = default;
+            let default = cfg.semantic.default.clone();
             cfg.semantic.identifier = semantic
                 .identifier
                 .filter(|v| !v.is_empty())
@@ -127,6 +128,7 @@ impl ExpertsConfig {
         Ok(())
     }
 
+    #[must_use]
     pub fn semantic_models(&self, kind: QueryKind) -> &[String] {
         match kind {
             QueryKind::Identifier => &self.semantic.identifier,
@@ -415,7 +417,7 @@ impl Default for GraphNodesConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
 struct RawGraphNodesConfig {
     enabled: Option<bool>,
     weight: Option<f32>,
@@ -424,6 +426,7 @@ struct RawGraphNodesConfig {
 }
 
 impl SearchProfile {
+    #[must_use]
     pub fn builtin(name: &str) -> Option<Self> {
         match name {
             "general" => Some(
@@ -445,6 +448,7 @@ impl SearchProfile {
         }
     }
 
+    #[must_use]
     pub fn general() -> Self {
         Self::builtin("general").expect("general profile is bundled")
     }
@@ -462,10 +466,7 @@ impl SearchProfile {
 
     pub fn from_bytes(profile_name: &str, bytes: &[u8], base: Option<&str>) -> Result<Self> {
         let raw = parse_raw(bytes).with_context(|| {
-            format!(
-                "Profile '{}' is not valid JSON/TOML configuration",
-                profile_name
-            )
+            format!("Profile '{profile_name}' is not valid JSON/TOML configuration")
         })?;
         let merged_raw = if let Some(base_name) = base {
             let base_raw = builtin_raw(base_name)?;
@@ -476,10 +477,12 @@ impl SearchProfile {
         Self::from_raw(merged_raw, profile_name)
     }
 
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    #[must_use]
     pub fn path_boost_weight(&self, path: &str) -> f32 {
         let lower = path.to_ascii_lowercase();
         let mut weight = 1.0;
@@ -491,6 +494,7 @@ impl SearchProfile {
         weight
     }
 
+    #[must_use]
     pub fn path_weight(&self, path: &str) -> f32 {
         let lower = path.to_ascii_lowercase();
         let mut weight = 1.0;
@@ -507,42 +511,50 @@ impl SearchProfile {
         weight
     }
 
+    #[must_use]
     pub fn is_rejected(&self, path: &str) -> bool {
         let lower = path.to_ascii_lowercase();
         self.paths.reject.iter().any(|m| m.matches(&lower))
     }
 
+    #[must_use]
     pub fn is_noise(&self, path: &str) -> bool {
         let lower = path.to_ascii_lowercase();
         self.paths.reject.iter().any(|m| m.matches(&lower))
             || self.paths.noise.iter().any(|m| m.matches(&lower))
     }
 
-    pub fn min_fuzzy_score(&self) -> f32 {
+    #[must_use]
+    pub const fn min_fuzzy_score(&self) -> f32 {
         self.rerank.thresholds.min_fuzzy_score
     }
 
-    pub fn min_semantic_score(&self) -> f32 {
+    #[must_use]
+    pub const fn min_semantic_score(&self) -> f32 {
         self.rerank.thresholds.min_semantic_score
     }
 
-    pub fn rerank_config(&self) -> &RerankConfig {
+    #[must_use]
+    pub const fn rerank_config(&self) -> &RerankConfig {
         &self.rerank
     }
 
-    pub fn graph_nodes(&self) -> &GraphNodesConfig {
+    #[must_use]
+    pub const fn graph_nodes(&self) -> &GraphNodesConfig {
         &self.graph_nodes
     }
 
-    pub fn embedding(&self) -> &EmbeddingTemplates {
+    #[must_use]
+    pub const fn embedding(&self) -> &EmbeddingTemplates {
         &self.embedding
     }
 
     #[must_use]
-    pub fn experts(&self) -> &ExpertsConfig {
+    pub const fn experts(&self) -> &ExpertsConfig {
         &self.experts
     }
 
+    #[must_use]
     pub fn must_hit_matches(
         &self,
         tokens: &[String],
@@ -567,8 +579,7 @@ impl SearchProfile {
         if let Some(schema_version) = raw.schema_version {
             if schema_version != 1 {
                 return Err(anyhow!(
-                    "profile.schema_version {} is not supported (expected 1)",
-                    schema_version
+                    "profile.schema_version {schema_version} is not supported (expected 1)"
                 ));
             }
         }
@@ -579,7 +590,7 @@ impl SearchProfile {
             .unwrap_or_else(|| fallback_name.to_string());
         let description = raw.description;
         let paths = PathRules::from_raw(raw.paths, raw.must_hit)?;
-        let rerank = RerankConfig::from_raw(raw.rerank)?;
+        let rerank = RerankConfig::from_raw(raw.rerank);
         let graph_nodes = GraphNodesConfig::from_raw(raw.graph_nodes)?;
         let embedding = build_embedding_templates(raw.embedding)
             .with_context(|| format!("Invalid embedding template config for profile '{name}'"))?;
@@ -697,22 +708,19 @@ impl PathRules {
 }
 
 impl RerankConfig {
-    fn from_raw(raw: Option<RawRerankConfig>) -> Result<Self> {
-        let thresholds = merge_thresholds(raw.as_ref().and_then(|r| r.thresholds.clone()));
-        let bm25 = merge_bm25(raw.as_ref().and_then(|r| r.bm25.clone()));
-        let boosts = merge_boosts(raw.as_ref().and_then(|r| r.boosts.clone()));
-        let must_hit = merge_rerank_must_hit(raw.as_ref().and_then(|r| r.must_hit.clone()));
-        Ok(Self {
-            thresholds,
-            bm25,
-            boosts,
-            must_hit,
-        })
+    fn from_raw(raw: Option<RawRerankConfig>) -> Self {
+        let raw = raw.unwrap_or_default();
+        Self {
+            thresholds: merge_thresholds(raw.thresholds),
+            bm25: merge_bm25(raw.bm25),
+            boosts: merge_boosts(raw.boosts),
+            must_hit: merge_rerank_must_hit(raw.must_hit),
+        }
     }
 }
 
 impl Matcher {
-    fn new(kind: MatchKind, needle: String) -> Result<Self> {
+    fn new(kind: MatchKind, needle: &str) -> Result<Self> {
         let needle = needle.to_ascii_lowercase();
         let glob = if kind == MatchKind::Glob {
             Some(
@@ -744,7 +752,7 @@ fn build_weighted_matchers(raw: Vec<RawWeightedRule>) -> Result<Vec<WeightedMatc
         if rule.pattern.trim().is_empty() {
             continue;
         }
-        let matcher = Matcher::new(rule.kind, rule.pattern)?;
+        let matcher = Matcher::new(rule.kind, &rule.pattern)?;
         matchers.push(WeightedMatcher {
             matcher,
             weight: rule.weight,
@@ -759,7 +767,7 @@ fn build_matchers(raw: Vec<RawRule>) -> Result<Vec<Matcher>> {
         if rule.pattern.trim().is_empty() {
             continue;
         }
-        matchers.push(Matcher::new(rule.kind, rule.pattern)?);
+        matchers.push(Matcher::new(rule.kind, &rule.pattern)?);
     }
     Ok(matchers)
 }
@@ -770,7 +778,7 @@ fn build_must_hit(raw: Vec<RawMustHitRule>) -> Result<Vec<MustHitRule>> {
         if rule.pattern.trim().is_empty() {
             continue;
         }
-        let matcher = Matcher::new(rule.kind, rule.pattern)?;
+        let matcher = Matcher::new(rule.kind, &rule.pattern)?;
         let tokens: Vec<String> = rule
             .tokens
             .into_iter()
@@ -790,7 +798,7 @@ fn builtin_raw(name: &str) -> Result<RawProfile> {
     match name {
         "general" => parse_raw(BUILTIN_GENERAL.as_bytes()),
         "targeted/venorus" | "venorus" => parse_raw(BUILTIN_TARGETED_VENORUS.as_bytes()),
-        other => Err(anyhow!("Base profile '{}' not bundled", other)),
+        other => Err(anyhow!("Base profile '{other}' not bundled")),
     }
 }
 
@@ -843,7 +851,7 @@ fn merge_raw_profiles(mut base: RawProfile, overlay: RawProfile) -> RawProfile {
         // (`fallback_name` in `from_raw`) should become the effective name unless the overlay
         // explicitly sets one.
         name: overlay.name,
-        description: overlay.description.or(base.description.take()),
+        description: overlay.description.or_else(|| base.description.take()),
         paths,
         must_hit,
         rerank,
@@ -958,12 +966,17 @@ fn merge_graph_nodes_raw(
     mut base: RawGraphNodesConfig,
     overlay: RawGraphNodesConfig,
 ) -> RawGraphNodesConfig {
-    base.enabled = overlay.enabled.or(base.enabled);
-    base.weight = overlay.weight.or(base.weight);
-    base.top_k = overlay.top_k.or(base.top_k);
-    base.max_neighbors_per_relation = overlay
-        .max_neighbors_per_relation
-        .or(base.max_neighbors_per_relation);
+    let RawGraphNodesConfig {
+        enabled,
+        weight,
+        top_k,
+        max_neighbors_per_relation,
+    } = overlay;
+    base.enabled = enabled.or(base.enabled);
+    base.weight = weight.or(base.weight);
+    base.top_k = top_k.or(base.top_k);
+    base.max_neighbors_per_relation =
+        max_neighbors_per_relation.or(base.max_neighbors_per_relation);
     base
 }
 
@@ -1092,13 +1105,8 @@ fn parse_raw(bytes: &[u8]) -> Result<RawProfile> {
     serde_json::from_value(value).map_err(|err| anyhow!("Profile parse error: {err}"))
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_profile_value(value: &serde_json::Value) -> Result<()> {
-    let serde_json::Value::Object(root) = value else {
-        return Err(anyhow!("Profile config must be a JSON object"));
-    };
-
-    let mut unknown = Vec::new();
-
     fn push_unknown(unknown: &mut Vec<String>, base: &str, key: &str) {
         if base.is_empty() {
             unknown.push(key.to_string());
@@ -1120,19 +1128,27 @@ fn validate_profile_value(value: &serde_json::Value) -> Result<()> {
         }
     }
 
-    fn object_at(value: &serde_json::Value) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    const fn object_at(
+        value: &serde_json::Value,
+    ) -> Option<&serde_json::Map<String, serde_json::Value>> {
         match value {
             serde_json::Value::Object(obj) => Some(obj),
             _ => None,
         }
     }
 
-    fn array_at(value: &serde_json::Value) -> Option<&[serde_json::Value]> {
+    const fn array_at(value: &serde_json::Value) -> Option<&[serde_json::Value]> {
         match value {
             serde_json::Value::Array(arr) => Some(arr.as_slice()),
             _ => None,
         }
     }
+
+    let serde_json::Value::Object(root) = value else {
+        return Err(anyhow!("Profile config must be a JSON object"));
+    };
+
+    let mut unknown = Vec::new();
 
     // Top-level keys.
     validate_object_keys(
@@ -1362,7 +1378,7 @@ mod tests {
     fn path_boost_weight_skips_penalties() {
         let profile = SearchProfile::builtin("general").unwrap();
         assert!(profile.path_weight("docs/README.md") < 1.0);
-        assert_eq!(profile.path_boost_weight("docs/README.md"), 1.0);
+        assert!((profile.path_boost_weight("docs/README.md") - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1450,7 +1466,7 @@ mod tests {
 
     #[test]
     fn matches_glob_rules() {
-        let matcher = Matcher::new(MatchKind::Glob, "**/*.rs".to_string()).unwrap();
+        let matcher = Matcher::new(MatchKind::Glob, "**/*.rs").unwrap();
         assert!(matcher.matches("src/lib.rs"));
         assert!(!matcher.matches("docs/readme.md"));
     }

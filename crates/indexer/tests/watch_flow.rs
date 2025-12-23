@@ -73,9 +73,7 @@ async fn streaming_indexer_latency_under_two_seconds() {
     let elapsed = start.elapsed();
     assert!(
         elapsed < Duration::from_secs(2),
-        "streaming index latency too high: {:?} (update: {:?})",
-        elapsed,
-        update
+        "streaming index latency too high: {elapsed:?} (update: {update:?})"
     );
 }
 
@@ -157,10 +155,10 @@ async fn wait_for_success(
 ) -> Option<IndexUpdate> {
     tokio::time::timeout(timeout, async {
         loop {
-            match updates.recv().await {
-                Ok(update) if update.success => break Some(update),
-                Ok(_) => continue,
-                Err(_) => continue,
+            if let Ok(update) = updates.recv().await {
+                if update.success {
+                    break Some(update);
+                }
             }
         }
     })

@@ -22,7 +22,7 @@ fn run_cli_raw(workdir: &Path, request: &str) -> (bool, Value) {
 
 fn run_cli(workdir: &Path, request: &str) -> Value {
     let (ok, body) = run_cli_raw(workdir, request);
-    assert!(ok, "stdout: {}\nstderr: {}", body, request);
+    assert!(ok, "stdout: {body}\nstderr: {request}");
     body
 }
 

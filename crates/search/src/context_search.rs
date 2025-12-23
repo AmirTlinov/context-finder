@@ -52,7 +52,7 @@ impl ContextSearch {
 
     /// Borrow the current assembler (if available)
     #[must_use]
-    pub fn assembler(&self) -> Option<&ContextAssembler> {
+    pub const fn assembler(&self) -> Option<&ContextAssembler> {
         self.assembler.as_ref()
     }
 

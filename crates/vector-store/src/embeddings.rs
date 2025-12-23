@@ -40,7 +40,7 @@ impl EmbeddingMode {
     }
 }
 
-pub(crate) fn current_embedding_mode_id() -> Result<&'static str> {
+pub fn current_embedding_mode_id() -> Result<&'static str> {
     match EmbeddingMode::from_env()? {
         EmbeddingMode::Fast => Ok("fast"),
         EmbeddingMode::Stub => Ok("stub"),
@@ -138,6 +138,12 @@ struct StubBackend {
 }
 
 impl StubBackend {
+    #[cfg(not(test))]
+    const fn new(dimension: usize) -> Self {
+        Self { dimension }
+    }
+
+    #[cfg(test)]
     fn new(dimension: usize) -> Self {
         Self {
             dimension,
@@ -197,27 +203,39 @@ impl<B> LoadWaiter<B> {
 
     fn set_ok(&self, backend: Arc<B>) {
         let (lock, cv) = &*self.state;
-        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        guard.done = true;
-        guard.backend = Some(backend);
-        guard.error = None;
+        {
+            let mut guard = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.done = true;
+            guard.backend = Some(backend);
+            guard.error = None;
+        }
         cv.notify_all();
     }
 
     fn set_err(&self, error: String) {
         let (lock, cv) = &*self.state;
-        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        guard.done = true;
-        guard.backend = None;
-        guard.error = Some(error);
+        {
+            let mut guard = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.done = true;
+            guard.backend = None;
+            guard.error = Some(error);
+        }
         cv.notify_all();
     }
 
     fn wait(&self) -> Result<Arc<B>> {
         let (lock, cv) = &*self.state;
-        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         while !guard.done {
-            guard = cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+            guard = cv
+                .wait(guard)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         if let Some(backend) = &guard.backend {
             return Ok(backend.clone());
@@ -333,7 +351,7 @@ pub fn model_dir() -> PathBuf {
     // caches). This allows running `context-finder` from an arbitrary project directory while
     // still resolving the tool's own `./models/` folder.
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(mut dir) = exe.parent().map(|p| p.to_path_buf()) {
+        if let Some(mut dir) = exe.parent().map(std::path::Path::to_path_buf) {
             loop {
                 let candidate = dir.join("models");
                 if candidate.join("manifest.json").exists() {
@@ -365,8 +383,7 @@ pub fn model_dir() -> PathBuf {
     }
 
     std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
+        .map_or_else(|_| PathBuf::from("."), PathBuf::from)
         .join(".cache")
         .join("context-finder")
         .join("models")
@@ -378,10 +395,10 @@ impl ModelId {
         Self(normalized)
     }
 
-    fn from_env() -> Result<Self> {
+    fn from_env() -> Self {
         let model_name = std::env::var("CONTEXT_FINDER_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "bge-small".to_string());
-        Ok(Self::from_raw(&model_name))
+        Self::from_raw(&model_name)
     }
 
     fn normalize(raw: &str) -> String {
@@ -446,10 +463,19 @@ impl ModelId {
                     .path
                     .strip_prefix(&prefix)
                     .unwrap_or(asset.path.as_str());
-                if onnx_rel_path.is_none() && asset.path.ends_with(".onnx") {
+                let asset_path = std::path::Path::new(asset.path.as_str());
+                if onnx_rel_path.is_none()
+                    && asset_path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("onnx"))
+                {
                     onnx_rel_path = Some(safe_rel_path_from_manifest(&model.id, rel)?);
                 }
-                if tokenizer_rel_path.is_none() && asset.path.ends_with("tokenizer.json") {
+                if tokenizer_rel_path.is_none()
+                    && asset_path
+                        .file_name()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("tokenizer.json"))
+                {
                     tokenizer_rel_path = Some(safe_rel_path_from_manifest(&model.id, rel)?);
                 }
             }
@@ -606,99 +632,73 @@ impl OrtBackend {
             let ids_shape = ids_array.raw_dim().into_dyn();
 
             let ids_tensor = Tensor::from_array(ids_array.into_dyn())
-                .map_err(to_embedding_error)?
+                .map_err(|e| to_embedding_error(&e))?
                 .upcast();
             let mask_tensor = Tensor::from_array(mask_array.into_dyn())
-                .map_err(to_embedding_error)?
+                .map_err(|e| to_embedding_error(&e))?
                 .upcast();
             let type_tensor = Tensor::from_array(type_array.into_dyn())
-                .map_err(to_embedding_error)?
+                .map_err(|e| to_embedding_error(&e))?
                 .upcast();
 
-            let mut session = self.session.lock().map_err(|_| {
-                VectorStoreError::EmbeddingError("Failed to lock ONNX session".into())
-            })?;
+            let array = {
+                let mut session = self.session.lock().map_err(|_| {
+                    VectorStoreError::EmbeddingError("Failed to lock ONNX session".into())
+                })?;
 
-            let mut available: HashMap<String, DynTensor> = HashMap::new();
-            available.insert("input_ids".to_string(), ids_tensor);
-            available.insert("attention_mask".to_string(), mask_tensor);
-            available.insert("token_type_ids".to_string(), type_tensor);
+                let mut available: HashMap<String, DynTensor> = HashMap::new();
+                available.insert("input_ids".to_string(), ids_tensor);
+                available.insert("attention_mask".to_string(), mask_tensor);
+                available.insert("token_type_ids".to_string(), type_tensor);
 
-            let mut feed: HashMap<String, DynTensor> = HashMap::new();
+                let mut feed: HashMap<String, DynTensor> = HashMap::new();
 
-            for input in &session.inputs {
-                let key = input.name.clone();
-                if let Some(value) = available.get(&key) {
-                    feed.insert(key, value.clone());
-                } else {
-                    let zeros = zero_tensor(&ids_shape, input).map_err(|e| {
+                for input in &session.inputs {
+                    let key = input.name.clone();
+                    if let Some(value) = available.get(&key) {
+                        feed.insert(key, value.clone());
+                    } else {
+                        let zeros = zero_tensor(&ids_shape, input).map_err(|e| {
+                            VectorStoreError::EmbeddingError(format!(
+                                "Unsupported ONNX input '{key}': {e}"
+                            ))
+                        })?;
+                        feed.insert(key, zeros);
+                    }
+                }
+
+                let outputs = session.run(SessionInputs::from(feed)).map_err(|e| {
+                    VectorStoreError::EmbeddingError(format!("ONNX forward failed: {e}"))
+                })?;
+
+                if outputs.len() == 0 {
+                    return Err(VectorStoreError::EmbeddingError(
+                        "ONNX returned no outputs".to_string(),
+                    ));
+                }
+
+                let array = outputs[0]
+                    .try_extract_array::<f32>()
+                    .map_err(|e| {
                         VectorStoreError::EmbeddingError(format!(
-                            "Unsupported ONNX input '{key}': {e}"
+                            "Failed to decode ONNX output: {e}"
                         ))
-                    })?;
-                    feed.insert(key, zeros);
-                }
-            }
+                    })?
+                    .to_owned();
 
-            let outputs = session.run(SessionInputs::from(feed)).map_err(|e| {
-                VectorStoreError::EmbeddingError(format!("ONNX forward failed: {e}"))
-            })?;
+                drop(outputs);
+                drop(session);
 
-            if outputs.len() == 0 {
-                return Err(VectorStoreError::EmbeddingError(
-                    "ONNX returned no outputs".to_string(),
-                ));
-            }
-
-            let array = outputs[0]
-                .try_extract_array::<f32>()
-                .map_err(|e| {
-                    VectorStoreError::EmbeddingError(format!("Failed to decode ONNX output: {e}"))
-                })?
-                .to_owned();
-
-            match array.ndim() {
-                2 => {
-                    let embeddings = array.into_dimensionality::<Ix2>().map_err(|e| {
-                        VectorStoreError::EmbeddingError(format!("Bad output shape: {e}"))
-                    })?;
-                    for row in embeddings.outer_iter() {
-                        let mut emb = row.to_owned().to_vec();
-                        ensure_dimension(&emb, self.dimension)?;
-                        normalize(&mut emb);
-                        results.push(emb);
-                    }
-                }
-                3 => {
-                    let hidden = array.into_dimensionality::<Ix3>().map_err(|e| {
-                        VectorStoreError::EmbeddingError(format!("Bad output shape: {e}"))
-                    })?;
-                    for (idx, sample) in hidden.outer_iter().enumerate() {
-                        let attn = mask_rows
-                            .get(idx)
-                            .cloned()
-                            .unwrap_or_else(|| vec![1; sample.len_of(Axis(0))]);
-                        let pooled = mean_pool(sample.view(), &attn);
-                        let mut emb = pooled;
-                        ensure_dimension(&emb, self.dimension)?;
-                        normalize(&mut emb);
-                        results.push(emb);
-                    }
-                }
-                _ => {
-                    return Err(VectorStoreError::EmbeddingError(format!(
-                        "Unexpected ONNX output dims: {:?}",
-                        array.shape()
-                    )));
-                }
-            }
+                array
+            };
+            results.extend(embeddings_from_output(array, &mask_rows, self.dimension)?);
         }
 
         Ok(results)
     }
 }
 
-fn ensure_dimension(vec: &[f32], expected: usize) -> Result<()> {
+const fn ensure_dimension(vec: &[f32], expected: usize) -> Result<()> {
     if vec.len() != expected {
         return Err(VectorStoreError::InvalidDimension {
             expected,
@@ -706,6 +706,52 @@ fn ensure_dimension(vec: &[f32], expected: usize) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn embeddings_from_output(
+    array: ndarray::ArrayD<f32>,
+    mask_rows: &[Vec<i64>],
+    expected_dimension: usize,
+) -> Result<Vec<Vec<f32>>> {
+    let mut out = Vec::new();
+    match array.ndim() {
+        2 => {
+            let embeddings = array
+                .into_dimensionality::<Ix2>()
+                .map_err(|e| VectorStoreError::EmbeddingError(format!("Bad output shape: {e}")))?;
+            out.reserve(embeddings.len_of(Axis(0)));
+            for row in embeddings.outer_iter() {
+                let mut emb = row.to_owned().to_vec();
+                ensure_dimension(&emb, expected_dimension)?;
+                normalize(&mut emb);
+                out.push(emb);
+            }
+        }
+        3 => {
+            let hidden = array
+                .into_dimensionality::<Ix3>()
+                .map_err(|e| VectorStoreError::EmbeddingError(format!("Bad output shape: {e}")))?;
+            out.reserve(hidden.len_of(Axis(0)));
+            for (idx, sample) in hidden.outer_iter().enumerate() {
+                let attn = mask_rows
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| vec![1; sample.len_of(Axis(0))]);
+                let pooled = mean_pool(sample.view(), &attn);
+                let mut emb = pooled;
+                ensure_dimension(&emb, expected_dimension)?;
+                normalize(&mut emb);
+                out.push(emb);
+            }
+        }
+        _ => {
+            return Err(VectorStoreError::EmbeddingError(format!(
+                "Unexpected ONNX output dims: {:?}",
+                array.shape()
+            )));
+        }
+    }
+    Ok(out)
 }
 
 fn mean_pool(sample: ndarray::ArrayView2<'_, f32>, mask: &[i64]) -> Vec<f32> {
@@ -753,16 +799,16 @@ fn build_flat_tensors(
         let encoding_types = encoding.get_type_ids();
 
         for idx in 0..seq_len {
-            ids.push(*encoding_ids.get(idx).unwrap_or(&0) as i64);
-            masks.push(*encoding_masks.get(idx).unwrap_or(&0) as i64);
-            type_ids.push(*encoding_types.get(idx).unwrap_or(&0) as i64);
+            ids.push(i64::from(*encoding_ids.get(idx).unwrap_or(&0)));
+            masks.push(i64::from(*encoding_masks.get(idx).unwrap_or(&0)));
+            type_ids.push(i64::from(*encoding_types.get(idx).unwrap_or(&0)));
         }
 
         mask_rows.push(
             encoding_masks
                 .iter()
                 .take(seq_len)
-                .map(|v| *v as i64)
+                .map(|v| i64::from(*v))
                 .collect(),
         );
     }
@@ -771,17 +817,12 @@ fn build_flat_tensors(
 }
 
 fn normalize(vec: &mut [f32]) {
-    let norm = vec
-        .iter()
-        .map(|v| (*v as f64) * (*v as f64))
-        .sum::<f64>()
-        .sqrt();
+    let norm = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
     if norm == 0.0 {
         return;
     }
-    let norm_f = norm as f32;
     for value in vec {
-        *value /= norm_f;
+        *value /= norm;
     }
 }
 
@@ -792,7 +833,8 @@ fn stub_embed(text: &str, dimension: usize) -> Vec<f32> {
     for _ in 0..dimension {
         let bits = splitmix64(&mut state);
         let high = (bits >> 32) as u32;
-        let unit = (high as f32) / (u32::MAX as f32);
+        let mantissa = high >> 9;
+        let unit = f32::from_bits(0x3f80_0000 | mantissa) - 1.0;
         vec.push(unit.mul_add(2.0, -1.0));
     }
     normalize(&mut vec);
@@ -808,7 +850,7 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn splitmix64(state: &mut u64) -> u64 {
+const fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = *state;
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -816,7 +858,7 @@ fn splitmix64(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn to_embedding_error(error: OrtError) -> VectorStoreError {
+fn to_embedding_error(error: &OrtError) -> VectorStoreError {
     VectorStoreError::EmbeddingError(format!("{error}"))
 }
 
@@ -898,12 +940,7 @@ fn ensure_gpu_libraries_present() -> Result<()> {
         paths.push(PathBuf::from(path));
     }
     if let Ok(ld) = env::var("LD_LIBRARY_PATH") {
-        paths.extend(
-            ld.split(':')
-                .filter(|p| !p.is_empty())
-                .map(PathBuf::from)
-                .collect::<Vec<PathBuf>>(),
-        );
+        paths.extend(ld.split(':').filter(|p| !p.is_empty()).map(PathBuf::from));
     }
 
     let mut has_provider = false;
@@ -922,9 +959,7 @@ fn ensure_gpu_libraries_present() -> Result<()> {
 
     if !has_provider || !has_cublas {
         return Err(VectorStoreError::EmbeddingError(format!(
-            "CUDA libraries missing: provider={} cublasLt={}. Configure ORT_LIB_LOCATION/LD_LIBRARY_PATH to point to onnxruntime GPU libs and NVIDIA cuBLAS.",
-            has_provider,
-            has_cublas
+            "CUDA libraries missing: provider={has_provider} cublasLt={has_cublas}. Configure ORT_LIB_LOCATION/LD_LIBRARY_PATH to point to onnxruntime GPU libs and NVIDIA cuBLAS."
         )));
     }
 
@@ -936,17 +971,17 @@ fn zero_tensor(shape: &ndarray::IxDyn, input: &Input) -> Result<DynTensor> {
         ort::value::ValueType::Tensor { ty, .. } => match ty {
             TensorElementType::Int64 => {
                 Tensor::from_array(ndarray::Array::<i64, _>::zeros(shape.clone()))
-                    .map_err(to_embedding_error)?
+                    .map_err(|e| to_embedding_error(&e))?
                     .upcast()
             }
             TensorElementType::Bool => {
                 Tensor::from_array(ndarray::Array::from_elem(shape.clone(), false))
-                    .map_err(to_embedding_error)?
+                    .map_err(|e| to_embedding_error(&e))?
                     .upcast()
             }
             TensorElementType::Float32 => {
                 Tensor::from_array(ndarray::Array::<f32, _>::zeros(shape.clone()))
-                    .map_err(to_embedding_error)?
+                    .map_err(|e| to_embedding_error(&e))?
                     .upcast()
             }
             other => {
@@ -984,16 +1019,22 @@ impl EmbeddingModel {
     pub fn new_for_model(model_id: &str) -> Result<Self> {
         let mode = EmbeddingMode::from_env()?;
         let id = ModelId::from_raw(model_id);
-        Self::from_mode_and_id(mode, id)
+        Self::from_mode_and_id(mode, &id)
     }
 
     fn from_env() -> Result<Self> {
         let mode = EmbeddingMode::from_env()?;
-        let id = ModelId::from_env()?;
-        Self::from_mode_and_id(mode, id)
+        let id = ModelId::from_env();
+        Self::from_mode_and_id(mode, &id)
     }
 
-    fn from_mode_and_id(mode: EmbeddingMode, id: ModelId) -> Result<Self> {
+    fn from_mode_and_id(mode: EmbeddingMode, id: &ModelId) -> Result<Self> {
+        // Slow path: either wait for in-flight load or become the loader.
+        enum Lookup {
+            Wait(LoadWaiter<OrtBackend>),
+            Load(LoadWaiter<OrtBackend>),
+        }
+
         let spec = id.spec()?;
 
         if mode == EmbeddingMode::Stub {
@@ -1007,7 +1048,7 @@ impl EmbeddingModel {
         let cache = BACKENDS
             .get_or_init(|| Mutex::new(BackendCache::new(backend_cache_capacity_from_env())));
         if let Ok(mut guard) = cache.lock() {
-            if let Some(backend) = guard.get_ready(&id) {
+            if let Some(backend) = guard.get_ready(id) {
                 return Ok(Self {
                     dimension: spec.dimension,
                     backend: EmbeddingBackend::Ort(backend),
@@ -1015,20 +1056,14 @@ impl EmbeddingModel {
             }
         }
 
-        // Slow path: either wait for in-flight load or become the loader.
-        enum Lookup {
-            Wait(LoadWaiter<OrtBackend>),
-            Load(LoadWaiter<OrtBackend>),
-        }
-
         let lookup = {
             let mut guard = cache.lock().map_err(|_| {
                 VectorStoreError::EmbeddingError("Failed to lock backend cache".into())
             })?;
-            match guard.entries.get(&id) {
+            match guard.entries.get(id) {
                 Some(BackendEntry::Ready(backend)) => {
                     let backend = backend.clone();
-                    guard.touch(&id);
+                    guard.touch(id);
                     return Ok(Self {
                         dimension: spec.dimension,
                         backend: EmbeddingBackend::Ort(backend),
@@ -1046,18 +1081,26 @@ impl EmbeddingModel {
                 match loaded {
                     Ok(backend) => {
                         let backend = Arc::new(backend);
-                        let mut guard = cache.lock().map_err(|_| {
-                            VectorStoreError::EmbeddingError("Failed to lock backend cache".into())
-                        })?;
-                        guard.finish_ok(&id, backend.clone());
+                        {
+                            let mut guard = cache.lock().map_err(|_| {
+                                VectorStoreError::EmbeddingError(
+                                    "Failed to lock backend cache".into(),
+                                )
+                            })?;
+                            guard.finish_ok(id, backend.clone());
+                        }
                         waiter.set_ok(backend.clone());
                         backend
                     }
                     Err(err) => {
-                        let mut guard = cache.lock().map_err(|_| {
-                            VectorStoreError::EmbeddingError("Failed to lock backend cache".into())
-                        })?;
-                        guard.finish_err(&id);
+                        {
+                            let mut guard = cache.lock().map_err(|_| {
+                                VectorStoreError::EmbeddingError(
+                                    "Failed to lock backend cache".into(),
+                                )
+                            })?;
+                            guard.finish_err(id);
+                        }
                         waiter.set_err(format!("{err:#}"));
                         return Err(err);
                     }
@@ -1096,7 +1139,7 @@ impl EmbeddingModel {
             return Ok(vec![]);
         }
 
-        let owned: Vec<String> = texts.into_iter().map(|t| t.to_string()).collect();
+        let owned: Vec<String> = texts.into_iter().map(ToString::to_string).collect();
         match &self.backend {
             EmbeddingBackend::Stub(stub) => Ok(stub.embed_batch(&owned)),
             EmbeddingBackend::Ort(backend) => {
@@ -1128,7 +1171,7 @@ impl EmbeddingModel {
 
 /// Returns the normalized embedding model id for the current process environment.
 pub fn current_model_id() -> Result<String> {
-    Ok(ModelId::from_env()?.to_string())
+    Ok(ModelId::from_env().to_string())
 }
 
 /// A multi-model registry that keeps a small LRU of hot ONNX Runtime sessions.
@@ -1178,7 +1221,7 @@ impl ModelRegistry {
 
     #[must_use]
     pub fn available_models(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.specs.keys().map(|id| id.to_string()).collect();
+        let mut ids: Vec<String> = self.specs.keys().map(ToString::to_string).collect();
         ids.sort();
         ids
     }
@@ -1208,7 +1251,7 @@ impl ModelRegistry {
         match self.mode {
             EmbeddingMode::Stub => Ok(StubBackend::new(spec.dimension).embed_batch(&owned)),
             EmbeddingMode::Fast => {
-                let backend = self.backend_for(&id, spec)?;
+                let backend = self.backend_for(&id, &spec)?;
                 spawn_blocking(move || backend.embed_batch_blocking(&owned))
                     .await
                     .map_err(|e| VectorStoreError::EmbeddingError(format!("Join error: {e}")))?
@@ -1258,16 +1301,16 @@ impl ModelRegistry {
         })
     }
 
-    fn backend_for(&self, id: &ModelId, spec: ModelSpec) -> Result<Arc<OrtBackend>> {
+    fn backend_for(&self, id: &ModelId, spec: &ModelSpec) -> Result<Arc<OrtBackend>> {
+        enum Lookup {
+            Wait(LoadWaiter<OrtBackend>),
+            Load(LoadWaiter<OrtBackend>),
+        }
+
         if let Ok(mut guard) = self.cache.lock() {
             if let Some(backend) = guard.get_ready(id) {
                 return Ok(backend);
             }
-        }
-
-        enum Lookup {
-            Wait(LoadWaiter<OrtBackend>),
-            Load(LoadWaiter<OrtBackend>),
         }
 
         let lookup = {
@@ -1288,26 +1331,30 @@ impl ModelRegistry {
         match lookup {
             Lookup::Wait(waiter) => waiter.wait(),
             Lookup::Load(waiter) => {
-                let loaded = OrtBackend::new(&spec, &self.model_dir);
+                let loaded = OrtBackend::new(spec, &self.model_dir);
                 match loaded {
                     Ok(backend) => {
                         let backend = Arc::new(backend);
-                        let mut guard = self.cache.lock().map_err(|_| {
-                            VectorStoreError::EmbeddingError(
-                                "Failed to lock model registry cache".into(),
-                            )
-                        })?;
-                        guard.finish_ok(id, backend.clone());
+                        {
+                            let mut guard = self.cache.lock().map_err(|_| {
+                                VectorStoreError::EmbeddingError(
+                                    "Failed to lock model registry cache".into(),
+                                )
+                            })?;
+                            guard.finish_ok(id, backend.clone());
+                        }
                         waiter.set_ok(backend.clone());
                         Ok(backend)
                     }
                     Err(err) => {
-                        let mut guard = self.cache.lock().map_err(|_| {
-                            VectorStoreError::EmbeddingError(
-                                "Failed to lock model registry cache".into(),
-                            )
-                        })?;
-                        guard.finish_err(id);
+                        {
+                            let mut guard = self.cache.lock().map_err(|_| {
+                                VectorStoreError::EmbeddingError(
+                                    "Failed to lock model registry cache".into(),
+                                )
+                            })?;
+                            guard.finish_err(id);
+                        }
                         waiter.set_err(format!("{err:#}"));
                         Err(err)
                     }
@@ -1371,10 +1418,19 @@ fn load_all_model_specs(model_dir: &Path) -> Result<HashMap<ModelId, ModelSpec>>
                 .path
                 .strip_prefix(&prefix)
                 .unwrap_or(asset.path.as_str());
-            if onnx_rel_path.is_none() && asset.path.ends_with(".onnx") {
+            let asset_path = std::path::Path::new(asset.path.as_str());
+            if onnx_rel_path.is_none()
+                && asset_path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("onnx"))
+            {
                 onnx_rel_path = Some(safe_rel_path_from_manifest(&model.id, rel)?);
             }
-            if tokenizer_rel_path.is_none() && asset.path.ends_with("tokenizer.json") {
+            if tokenizer_rel_path.is_none()
+                && asset_path
+                    .file_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("tokenizer.json"))
+            {
                 tokenizer_rel_path = Some(safe_rel_path_from_manifest(&model.id, rel)?);
             }
         }
@@ -1438,9 +1494,8 @@ mod tests {
 }
 "#;
         std::fs::write(dir.path.join("manifest.json"), manifest).expect("write manifest");
-        let err = match load_all_model_specs(&dir.path) {
-            Ok(_) => panic!("expected load_all_model_specs to reject traversal paths"),
-            Err(err) => err,
+        let Err(err) = load_all_model_specs(&dir.path) else {
+            panic!("expected load_all_model_specs to reject traversal paths");
         };
         assert!(
             err.to_string()
@@ -1461,9 +1516,8 @@ mod tests {
 }
 "#;
         std::fs::write(dir.path.join("manifest.json"), manifest).expect("write manifest");
-        let err = match load_all_model_specs(&dir.path) {
-            Ok(_) => panic!("expected load_all_model_specs to reject absolute paths"),
-            Err(err) => err,
+        let Err(err) = load_all_model_specs(&dir.path) else {
+            panic!("expected load_all_model_specs to reject absolute paths");
         };
         assert!(
             err.to_string()
@@ -1546,7 +1600,9 @@ mod tests {
             }
 
             let lookup = {
-                let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+                let mut guard = cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 match guard.entries.get(id) {
                     Some(BackendEntry::Ready(backend)) => {
                         let backend = backend.clone();
@@ -1564,8 +1620,12 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(10));
                     let value = loads.fetch_add(1, Ordering::SeqCst) + 1;
                     let backend = Arc::new(DummyBackend { value });
-                    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-                    guard.finish_ok(id, backend.clone());
+                    {
+                        let mut guard = cache
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        guard.finish_ok(id, backend.clone());
+                    }
                     waiter.set_ok(backend.clone());
                     backend
                 }

@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 
+const MAX_FAILURES: usize = 5;
+
 /// Snapshot persisted to `.context-finder/health.json` so other processes can
 /// report the last successful indexing run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +59,7 @@ pub async fn write_health_snapshot(
             .ok()
             .map(|m| m.len());
     let files_per_sec = if stats.time_ms > 0 {
+        #[allow(clippy::cast_precision_loss)]
         Some(stats.files as f32 / (stats.time_ms as f32 / 1000.0))
     } else {
         None
@@ -103,28 +106,29 @@ pub async fn append_failure_reason(
     detail: &str,
     p95_duration_ms: Option<u64>,
 ) -> Result<()> {
-    let mut snapshot = read_health_snapshot(root).await?.unwrap_or(HealthSnapshot {
-        last_success_unix_ms: 0,
-        last_duration_ms: None,
-        p95_duration_ms: None,
-        files_indexed: None,
-        chunks_indexed: None,
-        reason: "failure".to_string(),
-        failure_reasons: Vec::new(),
-        last_failure_unix_ms: None,
-        last_failure_reason: None,
-        index_size_bytes: None,
-        graph_cache_size_bytes: None,
-        failure_count: None,
-        files_per_sec: None,
-        pending_events: None,
-    });
+    let mut snapshot = read_health_snapshot(root)
+        .await?
+        .unwrap_or_else(|| HealthSnapshot {
+            last_success_unix_ms: 0,
+            last_duration_ms: None,
+            p95_duration_ms: None,
+            files_indexed: None,
+            chunks_indexed: None,
+            reason: "failure".to_string(),
+            failure_reasons: Vec::new(),
+            last_failure_unix_ms: None,
+            last_failure_reason: None,
+            index_size_bytes: None,
+            graph_cache_size_bytes: None,
+            failure_count: None,
+            files_per_sec: None,
+            pending_events: None,
+        });
 
     snapshot.failure_reasons.push(format!("{reason}: {detail}"));
     snapshot.p95_duration_ms = snapshot.p95_duration_ms.or(p95_duration_ms);
     snapshot.last_failure_unix_ms = Some(current_unix_ms());
     snapshot.last_failure_reason = Some(detail.to_string());
-    const MAX_FAILURES: usize = 5;
     if snapshot.failure_reasons.len() > MAX_FAILURES {
         let start = snapshot.failure_reasons.len() - MAX_FAILURES;
         snapshot.failure_reasons = snapshot.failure_reasons.split_off(start);
@@ -152,6 +156,7 @@ pub async fn read_health_snapshot(root: &Path) -> Result<Option<HealthSnapshot>>
     }
 }
 
+#[must_use]
 pub fn health_file_path(root: &Path) -> PathBuf {
     root.join(".context-finder").join("health.json")
 }
@@ -159,6 +164,7 @@ pub fn health_file_path(root: &Path) -> PathBuf {
 fn current_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|dur| dur.as_millis() as u64)
+        .ok()
+        .and_then(|dur| u64::try_from(dur.as_millis()).ok())
         .unwrap_or(0)
 }

@@ -4,14 +4,14 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
-pub(crate) struct CandidateSignal {
-    pub idx: usize,
-    pub fused: f32,
-    pub semantic: Option<f32>,
-    pub fuzzy: Option<f32>,
+struct CandidateSignal {
+    idx: usize,
+    fused: f32,
+    semantic: Option<f32>,
+    fuzzy: Option<f32>,
 }
 
-pub(crate) fn rerank_candidates(
+pub fn rerank_candidates(
     profile: &SearchProfile,
     chunks: &[CodeChunk],
     tokens: &[String],
@@ -117,12 +117,10 @@ impl CandidateSignal {
             .map(|s| s >= cfg.thresholds.min_semantic_score);
         let meets_fuzzy = self.fuzzy.map(|s| s >= cfg.thresholds.min_fuzzy_score);
 
-        match (meets_semantic, meets_fuzzy) {
-            (Some(true), _) | (_, Some(true)) => true,
-            (Some(false), Some(false)) => false,
-            (Some(false), None) | (None, Some(false)) => false,
-            (None, None) => true,
-        }
+        !matches!(
+            (meets_semantic, meets_fuzzy),
+            (Some(false) | None, Some(false)) | (Some(false), None)
+        )
     }
 }
 
@@ -166,7 +164,7 @@ impl Bm25Context {
         }
 
         let doc_count = docs.len().max(1);
-        let avg_len = (total_len as f32) / doc_count as f32;
+        let avg_len = usize_to_f32_saturating(total_len) / usize_to_f32_saturating(doc_count);
 
         Self {
             cfg,
@@ -185,8 +183,8 @@ impl Bm25Context {
             return 0.0;
         }
 
-        let dl = doc_tokens.len() as f32;
-        let total_docs = self.docs.len().max(1) as f32;
+        let dl = usize_to_f32_saturating(doc_tokens.len());
+        let total_docs = usize_to_f32_saturating(self.docs.len().max(1));
         let mut score = 0.0;
 
         for token in query_tokens {
@@ -194,10 +192,12 @@ impl Bm25Context {
             if freq <= 0.0 {
                 continue;
             }
-            let df = *self.doc_freq.get(token).unwrap_or(&0) as f32;
+            let df = usize_to_f32_saturating(*self.doc_freq.get(token).unwrap_or(&0));
             let idf = bm25_idf(total_docs, df);
-            let denom =
-                freq + self.cfg.k1 * (1.0 - self.cfg.b + self.cfg.b * dl / self.avg_len.max(1e-3));
+            let denom = self.cfg.k1.mul_add(
+                1.0 - self.cfg.b + self.cfg.b * dl / self.avg_len.max(1e-3),
+                freq,
+            );
             if denom > 0.0 {
                 score += idf * (freq * (self.cfg.k1 + 1.0)) / denom;
             }
@@ -229,15 +229,22 @@ fn tokenize_content(content: &str, window: usize, allow_list: &HashSet<String>) 
     tokens
 }
 
+#[allow(clippy::cast_precision_loss)]
+const fn usize_to_f32_saturating(value: usize) -> f32 {
+    value as f32
+}
+
 fn term_frequency(doc_tokens: &[String], needle: &str) -> f32 {
-    doc_tokens
-        .iter()
-        .filter(|token| token.as_str() == needle)
-        .count() as f32
+    usize_to_f32_saturating(
+        doc_tokens
+            .iter()
+            .filter(|token| token.as_str() == needle)
+            .count(),
+    )
 }
 
 fn bm25_idf(total_docs: f32, df: f32) -> f32 {
-    ((total_docs - df + 0.5) / (df + 0.5) + 1.0).ln()
+    ((total_docs - df + 0.5) / (df + 0.5)).ln_1p()
 }
 
 fn path_bonus(chunk: &CodeChunk, tokens: &[String], boosts: &RerankBoosts) -> f32 {
@@ -268,7 +275,9 @@ fn symbol_bonus(chunk: &CodeChunk, tokens: &[String], boosts: &RerankBoosts) -> 
 }
 
 fn is_yaml_path(path: &str) -> bool {
-    path.ends_with(".yaml") || path.ends_with(".yml")
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml"))
 }
 
 fn inject_must_hits(
@@ -278,7 +287,7 @@ fn inject_must_hits(
     reranked: &mut Vec<(usize, f32)>,
     base_bonus: f32,
 ) {
-    let base = reranked.first().map(|(_, score)| *score).unwrap_or(0.0);
+    let base = reranked.first().map_or(0.0, |(_, score)| *score);
     let target = base + base_bonus.max(0.0);
     for (idx, boost) in profile.must_hit_matches(tokens, chunks) {
         if let Some((_, score)) = reranked.iter_mut().find(|(existing, _)| *existing == idx) {

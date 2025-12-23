@@ -25,8 +25,14 @@ fn normalize_scores_skips_non_finite_and_handles_singleton() {
 
     HybridSearch::normalize_scores(&mut results);
 
-    assert_eq!(results[0].score, 0.0, "NaN must be reset to 0");
-    assert_eq!(results[1].score, 1.0, "Max score should normalize to 1");
+    assert!(
+        results[0].score.abs() < f32::EPSILON,
+        "NaN must be reset to 0"
+    );
+    assert!(
+        (results[1].score - 1.0).abs() < f32::EPSILON,
+        "Max score should normalize to 1"
+    );
 }
 
 #[test]

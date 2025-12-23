@@ -120,6 +120,7 @@ impl ProjectIndexer {
 
     /// Index with specified mode
     #[allow(clippy::cognitive_complexity)]
+    #[allow(clippy::too_many_lines)]
     async fn index_with_mode(&self, force_full: bool) -> Result<IndexStats> {
         let start = Instant::now();
         let mut stats = IndexStats::new();
@@ -515,6 +516,7 @@ fn model_id_dir_name(model_id: &str) -> String {
 }
 
 impl MultiModelProjectIndexer {
+    #[allow(clippy::unused_async)]
     pub async fn new(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
 
@@ -541,13 +543,23 @@ impl MultiModelProjectIndexer {
     /// Design goals:
     /// - Scan + chunk once (union of changed files across models),
     /// - Keep incremental correctness per model (per-model mtimes + purge),
-    /// - Avoid process-global env mutation (explicit model_id wiring).
+    /// - Avoid process-global env mutation (explicit `model_id` wiring).
     #[allow(clippy::cognitive_complexity)]
+    #[allow(clippy::too_many_lines)]
     pub async fn index_models(
         &self,
         models: &[ModelIndexSpec],
         force_full: bool,
     ) -> Result<IndexStats> {
+        struct ModelPlan {
+            model_id: String,
+            store_path: PathBuf,
+            mtimes_path: PathBuf,
+            templates: EmbeddingTemplates,
+            incremental: bool,
+            changed_files: HashSet<String>,
+        }
+
         let started = Instant::now();
         if models.is_empty() {
             return Err(IndexerError::Other(
@@ -599,15 +611,6 @@ impl MultiModelProjectIndexer {
         }
 
         // 3. Load per-model mtimes, compute union of changed files.
-        struct ModelPlan {
-            model_id: String,
-            store_path: PathBuf,
-            mtimes_path: PathBuf,
-            templates: EmbeddingTemplates,
-            incremental: bool,
-            changed_files: HashSet<String>,
-        }
-
         let mut plans: Vec<ModelPlan> = Vec::with_capacity(models.len());
         let mut union_changed: HashSet<String> = HashSet::new();
         let mut abs_by_rel: HashMap<String, PathBuf> = HashMap::new();

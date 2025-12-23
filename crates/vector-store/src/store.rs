@@ -54,6 +54,13 @@ struct PersistedVectorEntryV3 {
     doc_hash: u64,
 }
 
+struct PersistedStoreData {
+    chunks: HashMap<String, StoredChunk>,
+    id_map_raw: HashMap<usize, String>,
+    stored_next_id: usize,
+    stored_dimension: usize,
+}
+
 impl VectorIndex {
     pub async fn load(path: &Path) -> Result<Self> {
         log::info!("Loading VectorIndex from {}", path.display());
@@ -62,12 +69,12 @@ impl VectorIndex {
 
         let schema_version = save_data
             .get("schema_version")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(1);
 
         let (chunks, id_map_raw, vectors, dimension) =
-            if schema_version == VECTOR_STORE_SCHEMA_VERSION as u64 {
-                let persisted: PersistedVectorStoreV3 = serde_json::from_value(save_data.clone())?;
+            if schema_version == u64::from(VECTOR_STORE_SCHEMA_VERSION) {
+                let persisted: PersistedVectorStoreV3 = serde_json::from_value(save_data)?;
                 (
                     HashMap::new(),
                     persisted.id_map.into_iter().collect(),
@@ -83,10 +90,11 @@ impl VectorIndex {
                     serde_json::from_value(save_data["chunks"].clone())?;
                 let id_map_raw: HashMap<usize, String> =
                     serde_json::from_value(save_data["id_map"].clone())?;
-                let dimension = save_data
+                let dimension: usize = save_data
                     .get("dimension")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(384) as usize;
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|v| usize::try_from(v).ok())
+                    .unwrap_or(384);
                 (chunks, id_map_raw, HashMap::new(), dimension)
             } else {
                 return Err(crate::VectorStoreError::EmbeddingError(format!(
@@ -633,79 +641,15 @@ impl VectorStore {
 
         let schema_version = save_data
             .get("schema_version")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(1);
 
-        let (chunks, id_map_raw, stored_next_id, stored_dimension) = if schema_version
-            == VECTOR_STORE_SCHEMA_VERSION as u64
-        {
-            let persisted: PersistedVectorStoreV3 = serde_json::from_value(save_data.clone())?;
-            let corpus_path = corpus_path_for_store_path(path);
-            let corpus = ChunkCorpus::load(&corpus_path).await.map_err(|err| {
-                crate::VectorStoreError::EmbeddingError(format!(
-                    "Failed to load chunk corpus at {}: {err}",
-                    corpus_path.display()
-                ))
-            })?;
-
-            let mut chunks: HashMap<String, StoredChunk> =
-                HashMap::with_capacity(persisted.vectors.len());
-            let mut missing_chunks = 0usize;
-            let mut missing_examples: Vec<String> = Vec::new();
-            for (id, entry) in persisted.vectors {
-                let Some(chunk) = corpus.get_chunk(&id) else {
-                    missing_chunks += 1;
-                    if missing_examples.len() < 3 {
-                        missing_examples.push(id.clone());
-                    }
-                    continue;
-                };
-                chunks.insert(
-                    id.clone(),
-                    StoredChunk {
-                        chunk: chunk.clone(),
-                        vector: entry.vector,
-                        id,
-                        doc_hash: entry.doc_hash,
-                    },
-                );
-            }
-            if missing_chunks > 0 {
-                let examples = if missing_examples.is_empty() {
-                    String::new()
-                } else {
-                    format!(" (examples: {})", missing_examples.join(", "))
-                };
-                log::warn!(
-                        "VectorStore {}: dropped {missing_chunks} stale vectors because their chunks are missing in corpus {}{examples}",
-                        path.display(),
-                        corpus_path.display()
-                    );
-            }
-
-            (
-                chunks,
-                persisted.id_map.into_iter().collect(),
-                persisted.next_id,
-                persisted.dimension,
-            )
-        } else if schema_version == 1 {
-            let chunks: HashMap<String, StoredChunk> =
-                serde_json::from_value(save_data["chunks"].clone())?;
-            let id_map_raw: HashMap<usize, String> =
-                serde_json::from_value(save_data["id_map"].clone())?;
-            #[allow(clippy::cast_possible_truncation)]
-            let stored_next_id: usize = save_data["next_id"].as_u64().unwrap_or(0) as usize;
-            let stored_dimension = save_data
-                .get("dimension")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(384) as usize;
-            (chunks, id_map_raw, stored_next_id, stored_dimension)
-        } else {
-            return Err(crate::VectorStoreError::EmbeddingError(format!(
-                "Unsupported VectorStore schema_version {schema_version}"
-            )));
-        };
+        let PersistedStoreData {
+            chunks,
+            id_map_raw,
+            stored_next_id,
+            stored_dimension,
+        } = Self::load_persisted_store_data(path, schema_version, save_data).await?;
 
         let embedder = EmbeddingModel::new_for_model(model_id)?;
         let embedding_mode = crate::embeddings::current_embedding_mode_id()?.to_string();
@@ -725,6 +669,143 @@ impl VectorStore {
             }
         }
 
+        let (id_map, reverse_id_map) = Self::repair_id_maps(&chunks, id_map_raw);
+
+        let next_id: usize = id_map.keys().max().copied().map_or(stored_next_id, |id| {
+            id.saturating_add(1).max(stored_next_id)
+        });
+
+        let mut index = HnswIndex::new(dimension);
+
+        // Rebuild index using id_map
+        for (&numeric_id, string_id) in &id_map {
+            if let Some(stored) = chunks.get(string_id) {
+                index.add(numeric_id, &stored.vector)?;
+            }
+        }
+
+        log::info!("Loaded {} chunks", chunks.len());
+
+        let mut store = Self {
+            chunks,
+            index,
+            embedder,
+            path: path.to_path_buf(),
+            next_id,
+            id_map,
+            reverse_id_map,
+            model_id: model_id.to_string(),
+            embedding_mode,
+            dimension,
+            templates,
+            embedding_cache: EmbeddingCache::for_store_path(path),
+        };
+
+        store
+            .reconcile_with_persisted_state(stored_dimension, cached_meta.as_ref())
+            .await?;
+
+        Ok(store)
+    }
+
+    async fn load_persisted_store_data(
+        path: &Path,
+        schema_version: u64,
+        save_data: serde_json::Value,
+    ) -> Result<PersistedStoreData> {
+        if schema_version == u64::from(VECTOR_STORE_SCHEMA_VERSION) {
+            let persisted: PersistedVectorStoreV3 = serde_json::from_value(save_data)?;
+            Self::load_v3_store_data(path, persisted).await
+        } else if schema_version == 1 {
+            Self::load_v1_store_data(&save_data)
+        } else {
+            Err(crate::VectorStoreError::EmbeddingError(format!(
+                "Unsupported VectorStore schema_version {schema_version}"
+            )))
+        }
+    }
+
+    async fn load_v3_store_data(
+        path: &Path,
+        persisted: PersistedVectorStoreV3,
+    ) -> Result<PersistedStoreData> {
+        let corpus_path = corpus_path_for_store_path(path);
+        let corpus = ChunkCorpus::load(&corpus_path).await.map_err(|err| {
+            crate::VectorStoreError::EmbeddingError(format!(
+                "Failed to load chunk corpus at {}: {err}",
+                corpus_path.display()
+            ))
+        })?;
+
+        let mut chunks: HashMap<String, StoredChunk> =
+            HashMap::with_capacity(persisted.vectors.len());
+        let mut missing_chunks = 0usize;
+        let mut missing_examples: Vec<String> = Vec::new();
+        for (id, entry) in persisted.vectors {
+            let Some(chunk) = corpus.get_chunk(&id) else {
+                missing_chunks += 1;
+                if missing_examples.len() < 3 {
+                    missing_examples.push(id.clone());
+                }
+                continue;
+            };
+            chunks.insert(
+                id.clone(),
+                StoredChunk {
+                    chunk: chunk.clone(),
+                    vector: entry.vector,
+                    id,
+                    doc_hash: entry.doc_hash,
+                },
+            );
+        }
+        if missing_chunks > 0 {
+            let examples = if missing_examples.is_empty() {
+                String::new()
+            } else {
+                format!(" (examples: {})", missing_examples.join(", "))
+            };
+            log::warn!(
+                "VectorStore {}: dropped {missing_chunks} stale vectors because their chunks are missing in corpus {}{examples}",
+                path.display(),
+                corpus_path.display()
+            );
+        }
+
+        Ok(PersistedStoreData {
+            chunks,
+            id_map_raw: persisted.id_map.into_iter().collect(),
+            stored_next_id: persisted.next_id,
+            stored_dimension: persisted.dimension,
+        })
+    }
+
+    fn load_v1_store_data(save_data: &serde_json::Value) -> Result<PersistedStoreData> {
+        let chunks: HashMap<String, StoredChunk> =
+            serde_json::from_value(save_data["chunks"].clone())?;
+        let id_map_raw: HashMap<usize, String> =
+            serde_json::from_value(save_data["id_map"].clone())?;
+        let stored_next_id: usize = save_data["next_id"]
+            .as_u64()
+            .and_then(|v| usize::try_from(v).ok())
+            .unwrap_or(0);
+        let stored_dimension: usize = save_data
+            .get("dimension")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| usize::try_from(v).ok())
+            .unwrap_or(384);
+        Ok(PersistedStoreData {
+            chunks,
+            id_map_raw,
+            stored_next_id,
+            stored_dimension,
+        })
+    }
+
+    fn repair_id_maps(
+        chunks: &HashMap<String, StoredChunk>,
+        id_map_raw: HashMap<usize, String>,
+    ) -> (HashMap<usize, String>, HashMap<String, usize>) {
         let mut id_pairs: Vec<(usize, String)> = id_map_raw.into_iter().collect();
         id_pairs.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -755,73 +836,51 @@ impl VectorStore {
             );
         }
 
-        let next_id = id_map
-            .keys()
-            .max()
-            .copied()
-            .map(|id| id.saturating_add(1).max(stored_next_id))
-            .unwrap_or(stored_next_id);
+        (id_map, reverse_id_map)
+    }
 
-        let mut index = HnswIndex::new(dimension);
-
-        // Rebuild index using id_map
-        for (&numeric_id, string_id) in &id_map {
-            if let Some(stored) = chunks.get(string_id) {
-                index.add(numeric_id, &stored.vector)?;
-            }
-        }
-
-        log::info!("Loaded {} chunks", chunks.len());
-
-        let mut store = Self {
-            chunks,
-            index,
-            embedder,
-            path: path.to_path_buf(),
-            next_id,
-            id_map,
-            reverse_id_map,
-            model_id: model_id.to_string(),
-            embedding_mode,
-            dimension,
-            templates,
-            embedding_cache: EmbeddingCache::for_store_path(path),
-        };
-
-        if store.dimension != stored_dimension {
+    async fn reconcile_with_persisted_state(
+        &mut self,
+        stored_dimension: usize,
+        cached_meta: Option<&StoreMetaInfo>,
+    ) -> Result<()> {
+        if self.dimension != stored_dimension {
             log::warn!(
                 "Embedding dimension changed ({} → {}), re-embedding stored vectors",
                 stored_dimension,
-                store.dimension
+                self.dimension
             );
-            store.reembed_all_chunks().await?;
-            store.save().await?;
-            return Ok(store);
+            self.reembed_all_chunks().await?;
+            self.save().await?;
+            return Ok(());
         }
 
-        if let Some(meta) = cached_meta.as_ref() {
-            if meta.embedding_mode != store.embedding_mode {
-                log::warn!(
-                    "Embedding mode changed ({} → {}), re-embedding stored vectors",
-                    meta.embedding_mode,
-                    store.embedding_mode
-                );
-                store.reembed_all_chunks().await?;
-                store.save().await?;
-                return Ok(store);
-            }
-            if meta.doc_template_hash != store.templates.doc_template_hash() {
-                log::warn!(
-                    "Embedding doc template changed ({} → {}), re-embedding stored vectors",
-                    meta.doc_template_hash,
-                    store.templates.doc_template_hash()
-                );
-                store.reembed_all_chunks().await?;
-                store.save().await?;
-            }
+        let Some(meta) = cached_meta else {
+            return Ok(());
+        };
+
+        if meta.embedding_mode != self.embedding_mode {
+            log::warn!(
+                "Embedding mode changed ({} → {}), re-embedding stored vectors",
+                meta.embedding_mode,
+                self.embedding_mode
+            );
+            self.reembed_all_chunks().await?;
+            self.save().await?;
+            return Ok(());
         }
 
-        Ok(store)
+        if meta.doc_template_hash != self.templates.doc_template_hash() {
+            log::warn!(
+                "Embedding doc template changed ({} → {}), re-embedding stored vectors",
+                meta.doc_template_hash,
+                self.templates.doc_template_hash()
+            );
+            self.reembed_all_chunks().await?;
+            self.save().await?;
+        }
+
+        Ok(())
     }
 
     async fn reembed_all_chunks(&mut self) -> Result<()> {
@@ -981,8 +1040,8 @@ async fn load_meta_info(store_path: &Path) -> Option<StoreMetaInfo> {
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
-    const OFFSET: u64 = 14695981039346656037;
-    const PRIME: u64 = 1099511628211;
+    const OFFSET: u64 = 14_695_981_039_346_656_037;
+    const PRIME: u64 = 1_099_511_628_211;
     let mut hash = OFFSET;
     for b in bytes {
         hash ^= u64::from(*b);
