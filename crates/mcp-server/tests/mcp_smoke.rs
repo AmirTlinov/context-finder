@@ -66,6 +66,7 @@ async fn mcp_exposes_core_tools_and_map_has_no_side_effects() -> Result<()> {
     for expected in [
         "map",
         "file_slice",
+        "list_files",
         "batch",
         "doctor",
         "search",
@@ -163,12 +164,40 @@ async fn mcp_exposes_core_tools_and_map_has_no_side_effects() -> Result<()> {
             .and_then(Value::as_str),
         Some("quality")
     );
+    let project = doctor_json
+        .get("project")
+        .context("doctor did not return project info")?;
+    let project_root = project
+        .get("root")
+        .and_then(Value::as_str)
+        .context("doctor project.root missing")?;
+    let corpus_path = project
+        .get("corpus_path")
+        .and_then(Value::as_str)
+        .context("doctor project.corpus_path missing")?;
+
+    let expected_root = root.canonicalize().context("canonicalize temp root")?;
+    let reported_root = PathBuf::from(project_root)
+        .canonicalize()
+        .context("canonicalize reported root")?;
     assert_eq!(
-        doctor_json
-            .get("project")
-            .and_then(|v| v.get("has_corpus"))
-            .and_then(Value::as_bool),
-        Some(false)
+        reported_root, expected_root,
+        "doctor reported unexpected root (got: {project_root})"
+    );
+
+    let expected_corpus_path = expected_root.join(".context-finder").join("corpus.json");
+    assert_eq!(
+        PathBuf::from(corpus_path),
+        expected_corpus_path,
+        "doctor reported unexpected corpus_path"
+    );
+    assert_eq!(
+        project
+            .get("has_corpus")
+            .and_then(Value::as_bool)
+            .context("doctor project.has_corpus missing")?,
+        expected_corpus_path.exists(),
+        "doctor has_corpus must match corpus_path existence"
     );
 
     // Create a minimal corpus + index to validate drift diagnostics without requiring embedding models.
@@ -525,6 +554,141 @@ async fn mcp_file_slice_reads_bounded_lines_and_rejects_escape() -> Result<()> {
     assert!(
         escape_text.contains("outside project root"),
         "unexpected escape error message: {escape_text}"
+    );
+
+    service.cancel().await.context("shutdown mcp service")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_list_files_lists_paths_and_is_bounded() -> Result<()> {
+    let bin = locate_context_finder_mcp_bin()?;
+
+    let mut cmd = Command::new(bin);
+    cmd.env_remove("CONTEXT_FINDER_MODEL_DIR");
+    cmd.env("CONTEXT_FINDER_PROFILE", "quality");
+    cmd.env("RUST_LOG", "warn");
+
+    let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
+    let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))
+        .await
+        .context("timeout starting MCP server")??;
+
+    let tmp = tempfile::tempdir().context("tempdir")?;
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).context("mkdir src")?;
+    std::fs::write(root.join("src").join("main.rs"), "fn main() {}\n").context("write main.rs")?;
+    std::fs::create_dir_all(root.join("docs")).context("mkdir docs")?;
+    std::fs::write(root.join("docs").join("README.md"), "# Hello\n").context("write docs")?;
+    std::fs::write(root.join("README.md"), "Root\n").context("write root readme")?;
+
+    assert!(
+        !root.join(".context-finder").exists(),
+        "temp project unexpectedly has .context-finder before list_files"
+    );
+
+    let list_args = serde_json::json!({
+        "path": root.to_string_lossy(),
+        "file_pattern": "src/*",
+        "limit": 50,
+        "max_chars": 20_000,
+    });
+    let list_result = tokio::time::timeout(
+        Duration::from_secs(10),
+        service.call_tool(CallToolRequestParam {
+            name: "list_files".into(),
+            arguments: list_args.as_object().cloned(),
+        }),
+    )
+    .await
+    .context("timeout calling list_files")??;
+
+    assert_ne!(
+        list_result.is_error,
+        Some(true),
+        "list_files returned error"
+    );
+    let list_text = list_result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .context("list_files did not return text content")?;
+    let list_json: Value =
+        serde_json::from_str(list_text).context("list_files output is not valid JSON")?;
+
+    assert_eq!(
+        list_json.get("source").and_then(Value::as_str),
+        Some("filesystem")
+    );
+    let files = list_json
+        .get("files")
+        .and_then(Value::as_array)
+        .context("list_files files is not an array")?;
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        files[0].as_str(),
+        Some("src/main.rs"),
+        "unexpected file path: {files:?}"
+    );
+    assert_eq!(
+        list_json.get("truncated").and_then(Value::as_bool),
+        Some(false)
+    );
+
+    for file in files {
+        let Some(file) = file.as_str() else {
+            continue;
+        };
+        assert!(
+            !file.starts_with('/'),
+            "list_files must return relative paths (got: {file})"
+        );
+        assert!(
+            !file.contains(".."),
+            "list_files must not return traversal paths (got: {file})"
+        );
+    }
+
+    let limited_args = serde_json::json!({
+        "path": root.to_string_lossy(),
+        "limit": 1,
+        "max_chars": 20_000,
+    });
+    let limited_result = tokio::time::timeout(
+        Duration::from_secs(10),
+        service.call_tool(CallToolRequestParam {
+            name: "list_files".into(),
+            arguments: limited_args.as_object().cloned(),
+        }),
+    )
+    .await
+    .context("timeout calling list_files (limited)")??;
+    assert_ne!(
+        limited_result.is_error,
+        Some(true),
+        "list_files (limited) returned error"
+    );
+    let limited_text = limited_result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .context("list_files (limited) did not return text content")?;
+    let limited_json: Value = serde_json::from_str(limited_text)
+        .context("list_files (limited) output is not valid JSON")?;
+    assert_eq!(
+        limited_json.get("truncated").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        limited_json.get("truncation").and_then(Value::as_str),
+        Some("limit")
+    );
+
+    assert!(
+        !root.join(".context-finder").exists(),
+        "list_files created .context-finder side effects"
     );
 
     service.cancel().await.context("shutdown mcp service")?;

@@ -419,6 +419,110 @@ async fn compute_map_result(root: &Path, depth: usize, limit: usize) -> Result<M
     })
 }
 
+async fn compute_list_files_result(
+    root: &Path,
+    file_pattern: Option<&str>,
+    limit: usize,
+    max_chars: usize,
+) -> Result<ListFilesResult> {
+    let file_pattern = file_pattern.map(str::trim).filter(|s| !s.is_empty());
+
+    let mut used_chars = 0usize;
+    let mut truncated = false;
+    let mut truncation: Option<ListFilesTruncation> = None;
+    let mut files: Vec<String> = Vec::new();
+    let source: String;
+    let scanned_files: usize;
+
+    match ContextFinderService::load_chunk_corpus(root).await? {
+        Some(corpus) => {
+            source = "corpus".to_string();
+
+            let mut candidates: Vec<&String> = corpus.files().keys().collect();
+            candidates.sort_by(|a, b| a.cmp(b));
+            scanned_files = candidates.len();
+
+            for file in candidates {
+                if !ContextFinderService::matches_file_pattern(file, file_pattern) {
+                    continue;
+                }
+                if files.len() >= limit {
+                    truncated = true;
+                    truncation = Some(ListFilesTruncation::Limit);
+                    break;
+                }
+
+                let file_chars = file.chars().count();
+                let extra_chars = if files.is_empty() {
+                    file_chars
+                } else {
+                    1 + file_chars
+                };
+                if used_chars.saturating_add(extra_chars) > max_chars {
+                    truncated = true;
+                    truncation = Some(ListFilesTruncation::MaxChars);
+                    break;
+                }
+
+                files.push(file.clone());
+                used_chars += extra_chars;
+            }
+        }
+        None => {
+            source = "filesystem".to_string();
+
+            let scanner = FileScanner::new(root);
+            let scanned = scanner.scan();
+            scanned_files = scanned.len();
+
+            let mut candidates: Vec<String> = scanned
+                .into_iter()
+                .filter_map(|p| normalize_relative_path(root, &p))
+                .collect();
+            candidates.sort();
+
+            for file in candidates {
+                if !ContextFinderService::matches_file_pattern(&file, file_pattern) {
+                    continue;
+                }
+                if files.len() >= limit {
+                    truncated = true;
+                    truncation = Some(ListFilesTruncation::Limit);
+                    break;
+                }
+
+                let file_chars = file.chars().count();
+                let extra_chars = if files.is_empty() {
+                    file_chars
+                } else {
+                    1 + file_chars
+                };
+                if used_chars.saturating_add(extra_chars) > max_chars {
+                    truncated = true;
+                    truncation = Some(ListFilesTruncation::MaxChars);
+                    break;
+                }
+
+                files.push(file);
+                used_chars += extra_chars;
+            }
+        }
+    }
+
+    Ok(ListFilesResult {
+        source,
+        file_pattern: file_pattern.map(str::to_string),
+        scanned_files,
+        returned: files.len(),
+        used_chars,
+        limit,
+        max_chars,
+        truncated,
+        truncation,
+        files,
+    })
+}
+
 // ============================================================================
 // MCP Engine Cache (per-project, long-lived)
 // ============================================================================
@@ -955,6 +1059,49 @@ pub struct FileSliceResult {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListFilesRequest {
+    /// Project directory path
+    #[schemars(description = "Project directory path")]
+    pub path: Option<String>,
+
+    /// Optional file path filter (simple glob: '*' and '?' supported). If no glob metachars are
+    /// present, treated as substring match against the relative file path.
+    #[schemars(description = "Optional file path filter (glob or substring)")]
+    pub file_pattern: Option<String>,
+
+    /// Maximum number of files to return (default: 200)
+    #[schemars(description = "Maximum number of file paths to return (bounded)")]
+    pub limit: Option<usize>,
+
+    /// Maximum number of UTF-8 characters across returned file paths (default: 20000)
+    #[schemars(description = "Maximum number of UTF-8 characters across returned file paths")]
+    pub max_chars: Option<usize>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ListFilesTruncation {
+    Limit,
+    MaxChars,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ListFilesResult {
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_pattern: Option<String>,
+    pub scanned_files: usize,
+    pub returned: usize,
+    pub used_chars: usize,
+    pub limit: usize,
+    pub max_chars: usize,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<ListFilesTruncation>,
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DoctorRequest {
     /// Project directory path (optional)
     #[schemars(description = "Project directory path (optional)")]
@@ -1013,6 +1160,7 @@ pub struct DoctorProjectResult {
 pub enum BatchToolName {
     Map,
     FileSlice,
+    ListFiles,
     TextSearch,
     Doctor,
     Search,
@@ -1994,6 +2142,56 @@ impl ContextFinderService {
         )]))
     }
 
+    /// List project files within the project root (safe file enumeration for agents).
+    #[tool(
+        description = "List project file paths (relative to project root). Safe replacement for `ls/find/rg --files`; supports glob/substring filtering and bounded output."
+    )]
+    pub async fn list_files(
+        &self,
+        Parameters(request): Parameters<ListFilesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        const DEFAULT_LIMIT: usize = 200;
+        const MAX_LIMIT: usize = 50_000;
+        const DEFAULT_MAX_CHARS: usize = 20_000;
+        const MAX_MAX_CHARS: usize = 500_000;
+
+        let root_path = PathBuf::from(request.path.unwrap_or_else(|| ".".to_string()));
+        let root = match root_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid path: {e}"
+                ))]));
+            }
+        };
+        self.touch_daemon_best_effort(&root);
+
+        let limit = request.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+        let max_chars = request
+            .max_chars
+            .unwrap_or(DEFAULT_MAX_CHARS)
+            .clamp(1, MAX_MAX_CHARS);
+        let result = match compute_list_files_result(
+            &root,
+            request.file_pattern.as_deref(),
+            limit,
+            max_chars,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Error: {err:#}"
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
     /// Execute multiple Context Finder tools in a single call (agent-friendly batch).
     #[tool(
         description = "Execute multiple Context Finder tools in one call. Returns a single bounded JSON result with per-item status (partial success) and a global max_chars budget."
@@ -2095,6 +2293,13 @@ impl ContextFinderService {
                     Ok(req) => self.file_slice(Parameters(req)).await,
                     Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
                         "Invalid input for file_slice: {err}"
+                    ))])),
+                },
+                BatchToolName::ListFiles => match serde_json::from_value::<ListFilesRequest>(input)
+                {
+                    Ok(req) => self.list_files(Parameters(req)).await,
+                    Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid input for list_files: {err}"
                     ))])),
                 },
                 BatchToolName::TextSearch => {
@@ -3867,7 +4072,10 @@ fn prepare_item_input(
         }
     }
 
-    if matches!(tool, BatchToolName::ContextPack | BatchToolName::FileSlice) {
+    if matches!(
+        tool,
+        BatchToolName::ContextPack | BatchToolName::FileSlice | BatchToolName::ListFiles
+    ) {
         if let serde_json::Value::Object(ref mut map) = input {
             if !map.contains_key("max_chars") {
                 let cap = remaining_chars.saturating_sub(300).clamp(1, 20_000);
@@ -4359,6 +4567,67 @@ mod tests {
 
         // `map` must not create indexes/corpus.
         assert!(!root.join(".context-finder").exists());
+    }
+
+    #[tokio::test]
+    async fn list_files_works_without_index_and_is_bounded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs").join("README.md"), "# Hello\n").unwrap();
+
+        std::fs::write(root.join("README.md"), "Root\n").unwrap();
+
+        assert!(!root.join(".context-finder").exists());
+
+        let result = compute_list_files_result(root, None, 50, 20_000)
+            .await
+            .unwrap();
+        assert_eq!(result.source, "filesystem");
+        assert!(result.files.contains(&"src/main.rs".to_string()));
+        assert!(result.files.contains(&"docs/README.md".to_string()));
+        assert!(result.files.contains(&"README.md".to_string()));
+        assert!(!result.truncated);
+
+        let filtered = compute_list_files_result(root, Some("docs"), 50, 20_000)
+            .await
+            .unwrap();
+        assert_eq!(filtered.files, vec!["docs/README.md".to_string()]);
+
+        let globbed = compute_list_files_result(root, Some("src/*"), 50, 20_000)
+            .await
+            .unwrap();
+        assert_eq!(globbed.files, vec!["src/main.rs".to_string()]);
+
+        let limited = compute_list_files_result(root, None, 1, 20_000)
+            .await
+            .unwrap();
+        assert!(limited.truncated);
+        assert_eq!(limited.truncation, Some(ListFilesTruncation::Limit));
+        assert_eq!(limited.files.len(), 1);
+
+        let tiny = compute_list_files_result(root, None, 50, 3).await.unwrap();
+        assert!(tiny.truncated);
+        assert_eq!(tiny.truncation, Some(ListFilesTruncation::MaxChars));
+
+        assert!(!root.join(".context-finder").exists());
+    }
+
+    #[test]
+    fn batch_prepare_item_input_injects_max_chars_for_list_files() {
+        let input = serde_json::json!({});
+        let prepared = prepare_item_input(input, Some("/root"), BatchToolName::ListFiles, 5_000);
+
+        let obj = prepared.as_object().expect("prepared input must be object");
+        assert_eq!(obj.get("path").and_then(|v| v.as_str()), Some("/root"));
+        assert!(
+            obj.get("max_chars").is_some(),
+            "expected max_chars to be injected for list_files"
+        );
     }
 
     #[tokio::test]
