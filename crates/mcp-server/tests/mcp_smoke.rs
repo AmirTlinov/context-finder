@@ -65,6 +65,7 @@ async fn mcp_exposes_core_tools_and_map_has_no_side_effects() -> Result<()> {
     let tool_names: HashSet<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
     for expected in [
         "map",
+        "file_slice",
         "batch",
         "doctor",
         "search",
@@ -295,14 +296,8 @@ async fn mcp_exposes_core_tools_and_map_has_no_side_effects() -> Result<()> {
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].get("id").and_then(Value::as_str), Some("map"));
     assert_eq!(items[0].get("status").and_then(Value::as_str), Some("ok"));
-    assert_eq!(
-        items[1].get("id").and_then(Value::as_str),
-        Some("doctor")
-    );
-    assert_eq!(
-        items[1].get("status").and_then(Value::as_str),
-        Some("ok")
-    );
+    assert_eq!(items[1].get("id").and_then(Value::as_str), Some("doctor"));
+    assert_eq!(items[1].get("status").and_then(Value::as_str), Some("ok"));
     assert_eq!(
         batch_json
             .get("budget")
@@ -378,10 +373,158 @@ async fn mcp_batch_truncates_when_budget_is_too_small() -> Result<()> {
         .get("items")
         .and_then(Value::as_array)
         .context("batch items is not an array")?;
-    assert!(!items.is_empty(), "batch returned no items after truncation");
+    assert!(
+        !items.is_empty(),
+        "batch returned no items after truncation"
+    );
     assert_eq!(
         items[0].get("status").and_then(Value::as_str),
         Some("error")
+    );
+
+    service.cancel().await.context("shutdown mcp service")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_file_slice_reads_bounded_lines_and_rejects_escape() -> Result<()> {
+    let bin = locate_context_finder_mcp_bin()?;
+
+    let mut cmd = Command::new(bin);
+    cmd.env_remove("CONTEXT_FINDER_MODEL_DIR");
+    cmd.env("CONTEXT_FINDER_PROFILE", "quality");
+    cmd.env("RUST_LOG", "warn");
+
+    let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
+    let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))
+        .await
+        .context("timeout starting MCP server")??;
+
+    let tmp = tempfile::tempdir().context("tempdir")?;
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).context("mkdir src")?;
+    std::fs::write(root.join("src").join("main.rs"), "line-1\nline-2\nline-3\n")
+        .context("write main.rs")?;
+
+    assert!(
+        !root.join(".context-finder").exists(),
+        "temp project unexpectedly has .context-finder before file_slice"
+    );
+
+    let slice_args = serde_json::json!({
+        "path": root.to_string_lossy(),
+        "file": "src/main.rs",
+        "start_line": 2,
+        "max_lines": 2,
+        "max_chars": 2000,
+    });
+    let slice_result = tokio::time::timeout(
+        Duration::from_secs(10),
+        service.call_tool(CallToolRequestParam {
+            name: "file_slice".into(),
+            arguments: slice_args.as_object().cloned(),
+        }),
+    )
+    .await
+    .context("timeout calling file_slice")??;
+
+    assert_ne!(
+        slice_result.is_error,
+        Some(true),
+        "file_slice returned error"
+    );
+    let slice_text = slice_result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .context("file_slice did not return text content")?;
+    let slice_json: Value =
+        serde_json::from_str(slice_text).context("file_slice output is not valid JSON")?;
+
+    assert_eq!(
+        slice_json.get("file").and_then(Value::as_str),
+        Some("src/main.rs")
+    );
+    assert_eq!(
+        slice_json.get("start_line").and_then(Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(slice_json.get("end_line").and_then(Value::as_u64), Some(3));
+    assert_eq!(
+        slice_json.get("returned_lines").and_then(Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        slice_json.get("truncated").and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        slice_json.get("content").and_then(Value::as_str),
+        Some("line-2\nline-3")
+    );
+    assert!(
+        slice_json
+            .get("file_size_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+    );
+    assert!(
+        slice_json
+            .get("content_sha256")
+            .and_then(Value::as_str)
+            .map(|s| s.len())
+            .unwrap_or(0)
+            == 64
+    );
+
+    assert!(
+        !root.join(".context-finder").exists(),
+        "file_slice created .context-finder side effects"
+    );
+
+    let outside_parent = root.parent().context("temp root has no parent")?;
+    let outside = tempfile::NamedTempFile::new_in(outside_parent).context("outside temp file")?;
+    std::fs::write(outside.path(), "nope").context("write outside file")?;
+    let outside_name = outside
+        .path()
+        .file_name()
+        .context("outside temp file has no file name")?
+        .to_string_lossy()
+        .into_owned();
+
+    let escape_args = serde_json::json!({
+        "path": root.to_string_lossy(),
+        "file": format!("../{outside_name}"),
+        "start_line": 1,
+        "max_lines": 10,
+        "max_chars": 2000,
+    });
+    let escape_result = tokio::time::timeout(
+        Duration::from_secs(10),
+        service.call_tool(CallToolRequestParam {
+            name: "file_slice".into(),
+            arguments: escape_args.as_object().cloned(),
+        }),
+    )
+    .await
+    .context("timeout calling file_slice (escape)")??;
+
+    assert_eq!(
+        escape_result.is_error,
+        Some(true),
+        "file_slice escape should error"
+    );
+    let escape_text = escape_result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .unwrap_or_default();
+    assert!(
+        escape_text.contains("outside project root"),
+        "unexpected escape error message: {escape_text}"
     );
 
     service.cancel().await.context("shutdown mcp service")?;

@@ -24,7 +24,9 @@ use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, S
 use rmcp::schemars;
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -905,6 +907,54 @@ pub struct TextSearchMatch {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FileSliceRequest {
+    /// Project directory path
+    #[schemars(description = "Project directory path")]
+    pub path: Option<String>,
+
+    /// File path (relative to project root)
+    #[schemars(description = "File path (relative to project root)")]
+    pub file: String,
+
+    /// First line to include (1-based, default: 1)
+    #[schemars(description = "First line to include (1-based)")]
+    pub start_line: Option<usize>,
+
+    /// Maximum number of lines to return (default: 200)
+    #[schemars(description = "Maximum number of lines to return (bounded)")]
+    pub max_lines: Option<usize>,
+
+    /// Maximum number of UTF-8 characters for the returned slice (default: 20000)
+    #[schemars(description = "Maximum number of UTF-8 characters for the returned slice")]
+    pub max_chars: Option<usize>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileSliceTruncation {
+    MaxLines,
+    MaxChars,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct FileSliceResult {
+    pub file: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub returned_lines: usize,
+    pub used_chars: usize,
+    pub max_lines: usize,
+    pub max_chars: usize,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<FileSliceTruncation>,
+    pub file_size_bytes: u64,
+    pub file_mtime_ms: u64,
+    pub content_sha256: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DoctorRequest {
     /// Project directory path (optional)
     #[schemars(description = "Project directory path (optional)")]
@@ -962,6 +1012,7 @@ pub struct DoctorProjectResult {
 #[serde(rename_all = "snake_case")]
 pub enum BatchToolName {
     Map,
+    FileSlice,
     TextSearch,
     Doctor,
     Search,
@@ -981,7 +1032,9 @@ pub struct BatchRequest {
     pub path: Option<String>,
 
     /// Maximum number of UTF-8 characters for the serialized batch result (best effort).
-    #[schemars(description = "Maximum number of UTF-8 characters for the serialized batch result (best effort).")]
+    #[schemars(
+        description = "Maximum number of UTF-8 characters for the serialized batch result (best effort)."
+    )]
     pub max_chars: Option<usize>,
 
     /// If true, stop processing after the first item error.
@@ -1773,6 +1826,174 @@ impl ContextFinderService {
         )]))
     }
 
+    /// Read a bounded slice of a file within the project root (safe file access for agents).
+    #[tool(
+        description = "Read a bounded slice of a file (by line) within the project root. Safe replacement for ad-hoc `cat/sed` reads; enforces max_lines/max_chars and prevents path traversal."
+    )]
+    pub async fn file_slice(
+        &self,
+        Parameters(request): Parameters<FileSliceRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        const DEFAULT_MAX_LINES: usize = 200;
+        const MAX_MAX_LINES: usize = 5_000;
+        const DEFAULT_MAX_CHARS: usize = 20_000;
+        const MAX_MAX_CHARS: usize = 500_000;
+
+        let root_path = PathBuf::from(request.path.unwrap_or_else(|| ".".to_string()));
+        let root = match root_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid path: {e}"
+                ))]));
+            }
+        };
+        self.touch_daemon_best_effort(&root);
+
+        let file_str = request.file.trim();
+        if file_str.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "File must not be empty",
+            )]));
+        }
+
+        let candidate = {
+            let input_path = Path::new(file_str);
+            if input_path.is_absolute() {
+                PathBuf::from(input_path)
+            } else {
+                root.join(input_path)
+            }
+        };
+
+        let canonical_file = match candidate.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid file '{file_str}': {e}"
+                ))]));
+            }
+        };
+
+        if !canonical_file.starts_with(&root) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "File '{file_str}' is outside project root"
+            ))]));
+        }
+
+        let display_file = normalize_relative_path(&root, &canonical_file).unwrap_or_else(|| {
+            canonical_file
+                .to_string_lossy()
+                .into_owned()
+                .replace('\\', "/")
+        });
+
+        let meta = match std::fs::metadata(&canonical_file) {
+            Ok(m) => m,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to stat '{display_file}': {e}"
+                ))]));
+            }
+        };
+        let file_size_bytes = meta.len();
+        let file_mtime_ms = meta.modified().map(unix_ms).unwrap_or(0);
+
+        let start_line = request.start_line.unwrap_or(1).max(1);
+        let max_lines = request
+            .max_lines
+            .unwrap_or(DEFAULT_MAX_LINES)
+            .clamp(1, MAX_MAX_LINES);
+        let max_chars = request
+            .max_chars
+            .unwrap_or(DEFAULT_MAX_CHARS)
+            .clamp(1, MAX_MAX_CHARS);
+
+        let file = match std::fs::File::open(&canonical_file) {
+            Ok(f) => f,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to open '{display_file}': {e}"
+                ))]));
+            }
+        };
+        let reader = BufReader::new(file);
+
+        let mut content = String::new();
+        let mut used_chars = 0usize;
+        let mut returned_lines = 0usize;
+        let mut end_line = 0usize;
+        let mut truncated = false;
+        let mut truncation: Option<FileSliceTruncation> = None;
+
+        for (idx, line) in reader.lines().enumerate() {
+            let line_no = idx + 1;
+            let line = match line {
+                Ok(l) => l,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Failed to read '{display_file}': {e}"
+                    ))]));
+                }
+            };
+
+            if line_no < start_line {
+                continue;
+            }
+
+            if returned_lines >= max_lines {
+                truncated = true;
+                truncation = Some(FileSliceTruncation::MaxLines);
+                break;
+            }
+
+            let line_chars = line.chars().count();
+            let extra_chars = if returned_lines == 0 {
+                line_chars
+            } else {
+                1 + line_chars
+            };
+            if used_chars.saturating_add(extra_chars) > max_chars {
+                truncated = true;
+                truncation = Some(FileSliceTruncation::MaxChars);
+                break;
+            }
+
+            if returned_lines > 0 {
+                content.push('\n');
+                used_chars += 1;
+            }
+            content.push_str(&line);
+            used_chars += line_chars;
+            returned_lines += 1;
+            end_line = line_no;
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let content_sha256 = hex_encode_lower(&hasher.finalize());
+
+        let result = FileSliceResult {
+            file: display_file,
+            start_line,
+            end_line,
+            returned_lines,
+            used_chars,
+            max_lines,
+            max_chars,
+            truncated,
+            truncation,
+            file_size_bytes,
+            file_mtime_ms,
+            content_sha256,
+            content,
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
     /// Execute multiple Context Finder tools in a single call (agent-friendly batch).
     #[tool(
         description = "Execute multiple Context Finder tools in one call. Returns a single bounded JSON result with per-item status (partial success) and a global max_chars budget."
@@ -1855,7 +2076,12 @@ impl ContextFinderService {
                 .budget
                 .max_chars
                 .saturating_sub(output.budget.used_chars);
-            let input = prepare_item_input(item.input, inferred_path.as_deref(), item.tool, remaining_chars);
+            let input = prepare_item_input(
+                item.input,
+                inferred_path.as_deref(),
+                item.tool,
+                remaining_chars,
+            );
 
             let tool_result: Result<CallToolResult, McpError> = match item.tool {
                 BatchToolName::Map => match serde_json::from_value::<MapRequest>(input) {
@@ -1864,13 +2090,21 @@ impl ContextFinderService {
                         "Invalid input for map: {err}"
                     ))])),
                 },
-                BatchToolName::TextSearch => match serde_json::from_value::<TextSearchRequest>(input)
+                BatchToolName::FileSlice => match serde_json::from_value::<FileSliceRequest>(input)
                 {
-                    Ok(req) => self.text_search(Parameters(req)).await,
+                    Ok(req) => self.file_slice(Parameters(req)).await,
                     Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid input for text_search: {err}"
+                        "Invalid input for file_slice: {err}"
                     ))])),
                 },
+                BatchToolName::TextSearch => {
+                    match serde_json::from_value::<TextSearchRequest>(input) {
+                        Ok(req) => self.text_search(Parameters(req)).await,
+                        Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Invalid input for text_search: {err}"
+                        ))])),
+                    }
+                }
                 BatchToolName::Doctor => match serde_json::from_value::<DoctorRequest>(input) {
                     Ok(req) => self.doctor(Parameters(req)).await,
                     Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1889,13 +2123,14 @@ impl ContextFinderService {
                         "Invalid input for context: {err}"
                     ))])),
                 },
-                BatchToolName::ContextPack => match serde_json::from_value::<ContextPackRequest>(input)
-                {
-                    Ok(req) => self.context_pack(Parameters(req)).await,
-                    Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Invalid input for context_pack: {err}"
-                    ))])),
-                },
+                BatchToolName::ContextPack => {
+                    match serde_json::from_value::<ContextPackRequest>(input) {
+                        Ok(req) => self.context_pack(Parameters(req)).await,
+                        Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Invalid input for context_pack: {err}"
+                        ))])),
+                    }
+                }
                 BatchToolName::Index => match serde_json::from_value::<IndexRequest>(input) {
                     Ok(req) => self.index(Parameters(req)).await,
                     Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -3632,11 +3867,14 @@ fn prepare_item_input(
         }
     }
 
-    if matches!(tool, BatchToolName::ContextPack) {
+    if matches!(tool, BatchToolName::ContextPack | BatchToolName::FileSlice) {
         if let serde_json::Value::Object(ref mut map) = input {
             if !map.contains_key("max_chars") {
                 let cap = remaining_chars.saturating_sub(300).clamp(1, 20_000);
-                map.insert("max_chars".to_string(), serde_json::Value::Number(cap.into()));
+                map.insert(
+                    "max_chars".to_string(),
+                    serde_json::Value::Number(cap.into()),
+                );
             }
         }
     }
@@ -3762,6 +4000,15 @@ fn compute_used_chars(output: &BatchResult) -> anyhow::Result<usize> {
     tmp.budget.used_chars = used;
     let raw = serde_json::to_string(&tmp)?;
     Ok(raw.chars().count())
+}
+
+fn hex_encode_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+    for b in bytes {
+        write!(&mut out, "{:02x}", b).expect("write to String is infallible");
+    }
+    out
 }
 
 // ============================================================================
