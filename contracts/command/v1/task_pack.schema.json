@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/command/v1/task_pack.schema.json",
+  "title": "Task Pack Output (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "intent", "model_id", "profile", "items", "next_actions", "budget"],
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "intent": {
+      "type": "string",
+      "description": "The engineering task or goal the pack is meant to support."
+    },
+    "model_id": { "type": "string" },
+    "profile": { "type": "string" },
+    "digest": {
+      "type": "string",
+      "description": "Optional short summary of the relevant context (bounded)."
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "role",
+          "file",
+          "start_line",
+          "end_line",
+          "score",
+          "imports",
+          "content",
+          "why"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "role": { "type": "string", "enum": ["primary", "related"] },
+          "file": { "type": "string" },
+          "start_line": { "type": "integer", "minimum": 0 },
+          "end_line": { "type": "integer", "minimum": 0 },
+          "symbol": { "type": "string" },
+          "type": { "type": "string" },
+          "score": { "type": "number" },
+          "imports": { "type": "array", "items": { "type": "string" } },
+          "content": { "type": "string" },
+          "relationship": { "type": "array", "items": { "type": "string" } },
+          "distance": { "type": "integer", "minimum": 0 },
+          "why": {
+            "type": "array",
+            "description": "Human/agent-readable explanation of why this chunk is included.",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "next_actions": {
+      "type": "array",
+      "description": "Structured recommendations for what to do next.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "reason"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["open_file", "run", "query", "update_contract"]
+          },
+          "reason": { "type": "string" },
+          "file": { "type": "string" },
+          "command": { "type": "string" },
+          "query": { "type": "string" }
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_chars", "used_chars", "truncated", "dropped_items"],
+      "properties": {
+        "max_chars": { "type": "integer", "minimum": 0 },
+        "used_chars": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "dropped_items": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
+

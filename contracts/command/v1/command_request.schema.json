@@ -13,6 +13,8 @@
         "search",
         "search_with_context",
         "context_pack",
+        "task_pack",
+        "text_search",
         "index",
         "get_context",
         "list_symbols",
@@ -29,6 +31,11 @@
       "default": {},
       "additionalProperties": true
     },
+    "options": {
+      "description": "Optional cross-cutting request options (freshness policy, filters, budgets).",
+      "default": null,
+      "anyOf": [{ "type": "null" }, { "$ref": "./request_options.schema.json" }]
+    },
     "config": {
       "description": "Optional per-request config overrides merged into the effective project config.",
       "default": null,
@@ -36,6 +43,5 @@
       "additionalProperties": true
     }
   },
-  "$comment": "Rust source of truth: crates/cli/src/command/domain.rs::CommandRequest / CommandAction"
+  "$comment": "Rust source of truth: crates/cli/src/command/domain.rs::CommandRequest / CommandAction / RequestOptions"
 }
-

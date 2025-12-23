@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/command/v1/request_options.schema.json",
+  "title": "Context Finder CommandRequest Options (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "stale_policy": {
+      "type": "string",
+      "description": "How to handle a missing/stale index for read operations that depend on it.",
+      "enum": ["auto", "warn", "fail"],
+      "default": "auto"
+    },
+    "max_reindex_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Time budget for automatic (re)index (best-effort). 0 disables auto-index even when stale_policy=auto.",
+      "default": 3000
+    },
+    "allow_filesystem_fallback": {
+      "type": "boolean",
+      "description": "Allow bounded filesystem scanning fallback for text search and diagnostics when an index is missing or stale.",
+      "default": true
+    },
+    "include_paths": {
+      "type": "array",
+      "description": "Optional path allowlist. Paths are repo-relative. Interpreted as prefixes unless a glob is detected.",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "exclude_paths": {
+      "type": "array",
+      "description": "Optional path denylist. Paths are repo-relative. Interpreted as prefixes unless a glob is detected.",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "file_pattern": {
+      "type": "string",
+      "description": "Optional glob pattern applied after include/exclude filters (e.g. \"**/*.rs\")."
+    }
+  }
+}
+

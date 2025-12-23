@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/command/v1/watermark.schema.json",
+  "title": "Context Finder Watermark (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind"],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "description": "What kind of watermark this is and which fields are required.",
+      "enum": ["git", "filesystem"]
+    },
+    "computed_at_unix_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "When the watermark was computed (unix ms)."
+    },
+    "git_head": {
+      "type": "string",
+      "description": "Git HEAD commit hash (when kind=git)."
+    },
+    "git_dirty": {
+      "type": "boolean",
+      "description": "Whether the working tree has uncommitted changes (when kind=git)."
+    },
+    "file_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of files considered in the filesystem watermark (when kind=filesystem)."
+    },
+    "max_mtime_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Maximum modification time among considered files (unix ms; when kind=filesystem)."
+    },
+    "total_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total size (bytes) among considered files (when kind=filesystem)."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "git" } } },
+      "then": { "required": ["git_head", "git_dirty"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "filesystem" } } },
+      "then": { "required": ["file_count", "max_mtime_ms", "total_bytes"] }
+    }
+  ]
+}
+

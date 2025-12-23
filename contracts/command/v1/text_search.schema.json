@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/command/v1/text_search.schema.json",
+  "title": "Text Search Output (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pattern",
+    "source",
+    "scanned_files",
+    "matched_files",
+    "skipped_large_files",
+    "returned",
+    "truncated",
+    "matches"
+  ],
+  "properties": {
+    "pattern": { "type": "string" },
+    "source": {
+      "type": "string",
+      "description": "Where matches were derived from.",
+      "enum": ["corpus", "filesystem"]
+    },
+    "scanned_files": { "type": "integer", "minimum": 0 },
+    "matched_files": { "type": "integer", "minimum": 0 },
+    "skipped_large_files": { "type": "integer", "minimum": 0 },
+    "returned": { "type": "integer", "minimum": 0 },
+    "truncated": { "type": "boolean" },
+    "matches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "line", "column", "text"],
+        "properties": {
+          "file": { "type": "string" },
+          "line": { "type": "integer", "minimum": 0 },
+          "column": { "type": "integer", "minimum": 0 },
+          "text": { "type": "string" }
+        }
+      }
+    }
+  },
+  "$comment": "Rust source of truth: crates/cli/src/command/domain.rs::TextSearchOutput"
+}
+

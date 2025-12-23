@@ -25,11 +25,38 @@ json_files = sorted(contracts.rglob("*.json"))
 if not json_files:
     fail("no *.json files found under contracts/")
 
+def walk_refs(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "$ref" and isinstance(v, str):
+                yield v
+            else:
+                yield from walk_refs(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from walk_refs(item)
+
 for p in json_files:
     try:
-        json.loads(p.read_text(encoding="utf-8"))
+        value = json.loads(p.read_text(encoding="utf-8"))
     except Exception as e:
         fail(f"invalid JSON: {p.relative_to(root)} ({e})")
+
+# 1b) Ensure local $refs resolve (JSON Schema + OpenAPI)
+for p in json_files:
+    value = json.loads(p.read_text(encoding="utf-8"))
+    base_dir = p.parent
+    for ref in walk_refs(value):
+        if ref.startswith("#"):
+            continue
+        if ref.startswith("http://") or ref.startswith("https://"):
+            continue
+        ref_path = ref.split("#", 1)[0]
+        if not ref_path:
+            continue
+        resolved = (base_dir / ref_path).resolve()
+        if not resolved.exists():
+            fail(f"$ref not found: {p.relative_to(root)} -> {ref}")
 
 # 2) OpenAPI sanity + $ref existence
 openapi_path = contracts / "http" / "v1" / "openapi.json"

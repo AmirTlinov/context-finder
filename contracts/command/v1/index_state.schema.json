@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/command/v1/index_state.schema.json",
+  "title": "Context Finder IndexState (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "model_id", "profile", "project_watermark", "index", "stale"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "project_root": {
+      "type": "string",
+      "description": "Absolute project root path used for the request (diagnostics only)."
+    },
+    "model_id": { "type": "string" },
+    "profile": { "type": "string" },
+    "project_watermark": {
+      "$ref": "./watermark.schema.json",
+      "description": "Current project watermark computed at request time."
+    },
+    "index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exists"],
+      "properties": {
+        "exists": { "type": "boolean" },
+        "path": { "type": "string" },
+        "mtime_ms": { "type": "integer", "minimum": 0 },
+        "built_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "watermark": {
+          "$ref": "./watermark.schema.json",
+          "description": "Project watermark captured at index build time (when available)."
+        }
+      }
+    },
+    "stale": { "type": "boolean" },
+    "stale_reasons": {
+      "type": "array",
+      "description": "Machine-readable stale reason codes.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "index_missing",
+          "index_corrupt",
+          "watermark_missing",
+          "git_head_mismatch",
+          "git_dirty_mismatch",
+          "filesystem_changed"
+        ]
+      },
+      "default": []
+    },
+    "reindex": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "Best-effort auto-(re)index attempt metadata (when stale_policy=auto).",
+      "required": ["attempted", "performed"],
+      "properties": {
+        "attempted": { "type": "boolean" },
+        "performed": { "type": "boolean" },
+        "budget_ms": { "type": "integer", "minimum": 0 },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "result": {
+          "type": "string",
+          "enum": ["ok", "budget_exceeded", "failed", "skipped"]
+        },
+        "error": { "type": "string" }
+      }
+    }
+  }
+}
+

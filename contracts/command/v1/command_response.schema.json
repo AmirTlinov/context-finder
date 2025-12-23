@@ -72,6 +72,10 @@
         "health_pending_events": { "type": "integer", "minimum": 0 },
         "profile": { "type": "string" },
         "profile_path": { "type": "string" },
+        "index_state": {
+          "description": "Index freshness and watermark information for this response.",
+          "allOf": [{ "$ref": "./index_state.schema.json" }]
+        },
         "compare_avg_baseline_ms": { "type": "number", "minimum": 0 },
         "compare_avg_context_ms": { "type": "number", "minimum": 0 },
         "compare_avg_overlap_ratio": { "type": "number", "minimum": 0 },
@@ -79,6 +83,5 @@
       }
     }
   },
-  "$comment": "Rust source of truth: crates/cli/src/command/domain.rs::CommandResponse / ResponseMeta / HintKind"
+  "$comment": "Rust source of truth: crates/cli/src/command/domain.rs::CommandResponse / ResponseMeta / HintKind / IndexState"
 }
-

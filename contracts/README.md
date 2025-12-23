@@ -26,6 +26,11 @@ here first, then implemented in code.
 - `contracts/command/v1/command_request.schema.json`
 - `contracts/command/v1/command_response.schema.json`
 - `contracts/command/v1/context_pack.schema.json` (schema for `data` when action is `context_pack`)
+- `contracts/command/v1/task_pack.schema.json` (schema for `data` when action is `task_pack`)
+- `contracts/command/v1/text_search.schema.json` (schema for `data` when action is `text_search`)
+- `contracts/command/v1/request_options.schema.json` (cross-cutting options: freshness policy, filters, budgets)
+- `contracts/command/v1/index_state.schema.json` (response diagnostics: watermarks + stale reasons + auto-index metadata)
+- `contracts/command/v1/watermark.schema.json` (git/fs watermark primitive)
 - `contracts/command/v1/health_report.schema.json` (HTTP `GET /health` response)
 
 Primary code source:
@@ -72,4 +77,3 @@ Primary code source:
    - `scripts/validate_contracts.sh`
    - `CONTEXT_FINDER_EMBEDDING_MODE=stub cargo test --workspace`
 5. Update prose docs (`docs/…`) only to explain and link back to the contract.
-
