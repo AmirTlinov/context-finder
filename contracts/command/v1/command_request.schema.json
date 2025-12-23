@@ -15,6 +15,7 @@
         "context_pack",
         "task_pack",
         "text_search",
+        "batch",
         "index",
         "get_context",
         "list_symbols",

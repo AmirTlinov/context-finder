@@ -1,3 +1,4 @@
+mod batch;
 mod compare;
 mod config;
 mod context;
@@ -49,12 +50,25 @@ impl Services {
         ctx: &CommandContext,
     ) -> Result<CommandOutcome> {
         match action {
+            CommandAction::Batch => batch::run(self, payload, ctx).await,
+            _ => self.route_item(action, payload, ctx).await,
+        }
+    }
+
+    async fn route_item(
+        &self,
+        action: CommandAction,
+        payload: Value,
+        ctx: &CommandContext,
+    ) -> Result<CommandOutcome> {
+        match action {
             CommandAction::Index => self.index.run(payload, ctx).await,
             CommandAction::Search => self.search.basic(payload, ctx).await,
             CommandAction::SearchWithContext => self.search.with_context(payload, ctx).await,
             CommandAction::ContextPack => self.search.context_pack(payload, ctx).await,
             CommandAction::TaskPack => self.search.task_pack(payload, ctx).await,
             CommandAction::TextSearch => self.text_search.run(payload, ctx).await,
+            CommandAction::Batch => unreachable!("batch action is handled by route()"),
             CommandAction::GetContext => self.context.get(payload, ctx).await,
             CommandAction::ListSymbols => self.context.list_symbols(payload, ctx).await,
             CommandAction::ConfigRead => self.config.read(payload, ctx).await,

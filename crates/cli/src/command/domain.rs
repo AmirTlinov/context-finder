@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 pub const DEFAULT_LIMIT: usize = 10;
 pub const DEFAULT_CONTEXT_WINDOW: usize = 20;
+pub const BATCH_VERSION: u32 = 1;
 
 #[derive(Debug, Deserialize)]
 pub struct CommandRequest {
@@ -25,7 +26,7 @@ fn empty_payload() -> Value {
     Value::Object(Default::default())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandAction {
     Search,
@@ -33,6 +34,7 @@ pub enum CommandAction {
     ContextPack,
     TaskPack,
     TextSearch,
+    Batch,
     Index,
     GetContext,
     ListSymbols,
@@ -41,6 +43,53 @@ pub enum CommandAction {
     Map,
     Eval,
     EvalCompare,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BatchPayload {
+    #[serde(default)]
+    pub project: Option<PathBuf>,
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+    #[serde(default)]
+    pub stop_on_error: bool,
+    pub items: Vec<BatchItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BatchItem {
+    pub id: String,
+    pub action: CommandAction,
+    #[serde(default = "empty_payload")]
+    pub payload: Value,
+}
+
+#[derive(Debug, Serialize, Default, Clone)]
+pub struct BatchBudget {
+    pub max_chars: usize,
+    pub used_chars: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct BatchItemResult {
+    pub id: String,
+    pub status: CommandStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<Hint>,
+    #[serde(default)]
+    pub data: Value,
+    #[serde(default)]
+    pub meta: ResponseMeta,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct BatchOutput {
+    pub version: u32,
+    pub items: Vec<BatchItemResult>,
+    pub budget: BatchBudget,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,7 +111,7 @@ impl CommandResponse {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandStatus {
     Ok,

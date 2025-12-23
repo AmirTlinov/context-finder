@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/command/v1/batch.schema.json",
+  "title": "Context Finder Batch action payload/result (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["payload", "result"],
+  "properties": {
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items"],
+      "properties": {
+        "project": {
+          "type": "string",
+          "description": "Project root directory. Defaults to current working directory."
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum number of UTF-8 characters for the serialized batch result (best effort)."
+        },
+        "stop_on_error": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, stop processing after the first item error."
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/batch_item" }
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "items", "budget"],
+      "properties": {
+        "version": { "type": "integer", "const": 1 },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/batch_item_result" }
+        },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_chars", "used_chars", "truncated"],
+          "properties": {
+            "max_chars": { "type": "integer", "minimum": 0 },
+            "used_chars": { "type": "integer", "minimum": 0 },
+            "truncated": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "batch_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "action"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Caller-provided identifier used to correlate results."
+        },
+        "action": {
+          "type": "string",
+          "description": "Command identifier for this item (snake_case).",
+          "enum": [
+            "search",
+            "search_with_context",
+            "context_pack",
+            "task_pack",
+            "text_search",
+            "index",
+            "get_context",
+            "list_symbols",
+            "config_read",
+            "compare_search",
+            "map",
+            "eval",
+            "eval_compare"
+          ]
+        },
+        "payload": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": true,
+          "description": "Action-specific payload for the item."
+        }
+      }
+    },
+    "batch_item_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "data", "meta"],
+      "properties": {
+        "id": { "type": "string" },
+        "status": { "type": "string", "enum": ["ok", "error"] },
+        "message": { "type": "string" },
+        "hints": { "$ref": "./command_response.schema.json#/properties/hints" },
+        "data": {
+          "description": "Action-specific output for this item. For item errors: usually null.",
+          "default": null
+        },
+        "meta": { "$ref": "./command_response.schema.json#/properties/meta" }
+      }
+    }
+  },
+  "$comment": "Rust source of truth: crates/cli/src/command/domain.rs::{BatchPayload,BatchItem,BatchOutput}"
+}

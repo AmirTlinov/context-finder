@@ -45,6 +45,8 @@ impl CommandHandler {
 
         let ctx = context::CommandContext::new(config, options);
         let request_options = ctx.request_options();
+        let attach_index_state_fallback =
+            freshness::action_requires_index(&action) || matches!(action, CommandAction::Index);
 
         let mut guard_index_state = None;
         let mut guard_hints = Vec::new();
@@ -154,7 +156,7 @@ impl CommandHandler {
             }
         };
 
-        if response.meta.index_state.is_none() {
+        if response.meta.index_state.is_none() && attach_index_state_fallback {
             if let Ok(project_ctx) = ctx
                 .resolve_project(freshness::extract_project_path(&payload_for_meta))
                 .await

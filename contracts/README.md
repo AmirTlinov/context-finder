@@ -25,6 +25,7 @@ here first, then implemented in code.
 
 - `contracts/command/v1/command_request.schema.json`
 - `contracts/command/v1/command_response.schema.json`
+- `contracts/command/v1/batch.schema.json` (schema for `payload`/`data` when action is `batch`)
 - `contracts/command/v1/context_pack.schema.json` (schema for `data` when action is `context_pack`)
 - `contracts/command/v1/task_pack.schema.json` (schema for `data` when action is `task_pack`)
 - `contracts/command/v1/text_search.schema.json` (schema for `data` when action is `text_search`)
