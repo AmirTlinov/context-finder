@@ -190,6 +190,18 @@ Batch tool (one MCP call → many tools, bounded output):
 }
 ```
 
+File slice tool (bounded, root-locked file read; designed to replace ad-hoc `cat`/`sed` in agent loops):
+
+```jsonc
+{
+  "path": "/path/to/project",
+  "file": "src/lib.rs",
+  "start_line": 120,
+  "max_lines": 80,
+  "max_chars": 8000
+}
+```
+
 ## JSON Command API
 
 For programmatic access, use the `command` subcommand:

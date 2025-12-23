@@ -8,6 +8,7 @@ If you’re tired of “search → open file → search again → maybe the righ
 
 - **Agent-first output:** `context-pack` returns a single JSON payload bounded by `max_chars`.
 - **One-call orchestration:** `action=batch` runs multiple actions under one `max_chars` budget (partial success per item).
+- **Safe file reads:** MCP `file_slice` returns a bounded file window (root-locked, line-based, hashed).
 - **Freshness by default:** every response can carry `meta.index_state`; `options.stale_policy=auto|warn|fail` controls (re)index behavior.
 - **Stable integration surfaces:** CLI JSON, HTTP, gRPC, MCP — all treated as contracts.
 - **Hybrid retrieval:** semantic + fuzzy + fusion + profile-driven boosts.
@@ -144,6 +145,18 @@ Agent-friendly tip: the MCP tool `batch` lets you execute multiple tools in one 
     { "id": "map", "tool": "map", "input": { "depth": 2, "limit": 40 } },
     { "id": "pack", "tool": "context_pack", "input": { "query": "stale policy gate", "limit": 6 } }
   ]
+}
+```
+
+When you need the *exact* contents of a file region (without `cat`/`sed`), use the MCP tool `file_slice`:
+
+```jsonc
+{
+  "path": "/path/to/project",
+  "file": "src/lib.rs",
+  "start_line": 120,
+  "max_lines": 80,
+  "max_chars": 8000
 }
 ```
 
