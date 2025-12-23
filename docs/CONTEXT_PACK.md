@@ -8,6 +8,15 @@ Canonical schema (source of truth):
 
 - [contracts/command/v1/context_pack.schema.json](../contracts/command/v1/context_pack.schema.json)
 
+## Filtering (recommended)
+
+For agent workloads, reduce noise early by filtering paths at the request level:
+
+- `options.include_paths` / `options.exclude_paths` (prefix match on relative paths)
+- `options.file_pattern` (substring match, or `glob` when it contains `*` / `?`)
+
+These filters are applied during pack assembly (so they affect `budget` deterministically).
+
 ## Schema (data)
 
 ```jsonc

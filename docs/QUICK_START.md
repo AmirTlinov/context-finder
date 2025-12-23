@@ -1,8 +1,8 @@
-# Quick Start: Context Finder
+# Quick Start: Context Finder MCP
 
-## What is Context Finder?
+## What is Context Finder MCP?
 
-Context Finder is a semantic code search tool designed for AI agents and coding assistants. It indexes codebases using tree-sitter AST parsing and ONNX embeddings, enabling fast semantic search.
+Context Finder MCP is a semantic code navigation tool designed for AI agents and coding assistants. It indexes codebases using tree-sitter AST parsing and ONNX embeddings, enabling fast semantic search and bounded context packs.
 
 ## Installation
 
@@ -186,6 +186,16 @@ context-finder command --file request.json
 echo '{"action": "search", "payload": {"query": "test"}}' | context-finder command
 ```
 
+Cross-cutting options are supported under `options` (freshness policy, budgets, path filters):
+
+```bash
+context-finder command --json '{
+  "action": "context_pack",
+  "options": { "stale_policy": "auto", "max_reindex_ms": 1500, "include_paths": ["src"] },
+  "payload": { "query": "rate limiter", "limit": 6, "project": "." }
+}'
+```
+
 ### Available Actions
 
 | Action | Description |
@@ -194,6 +204,8 @@ echo '{"action": "search", "payload": {"query": "test"}}' | context-finder comma
 | `search` | Semantic code search |
 | `search_with_context` | Search with surrounding context |
 | `context_pack` | Build a single bounded context pack (best default for agents) |
+| `task_pack` | Task-oriented pack: context pack + `why` + `next_actions` |
+| `text_search` | Bounded literal search (corpus-first; filesystem fallback optional) |
 | `compare_search` | Compare multiple search strategies |
 | `get_context` | Extract a window around a file + line (symbol-aware) |
 | `list_symbols` | List symbols in a file |

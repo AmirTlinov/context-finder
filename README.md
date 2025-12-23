@@ -1,4 +1,4 @@
-# Context Finder
+# Context Finder MCP
 
 Semantic code search **built for AI agents**: index once, then ask for **one bounded context pack** you can feed into a model or pipeline.
 
@@ -7,9 +7,12 @@ If you’re tired of “search → open file → search again → maybe the righ
 ## What you get
 
 - **Agent-first output:** `context-pack` returns a single JSON payload bounded by `max_chars`.
+- **Freshness by default:** every response can carry `meta.index_state`; `options.stale_policy=auto|warn|fail` controls (re)index behavior.
 - **Stable integration surfaces:** CLI JSON, HTTP, gRPC, MCP — all treated as contracts.
 - **Hybrid retrieval:** semantic + fuzzy + fusion + profile-driven boosts.
 - **Graph-aware context:** attach related chunks (calls/imports/tests) when you need it.
+- **Task packs:** `task_pack` adds `why` + `next_actions` on top of `context_pack`.
+- **Bounded text search:** `text_search` uses corpus when present and can fall back to filesystem scanning safely.
 - **Measured quality:** golden datasets + MRR/recall/latency/bytes + A/B comparisons.
 - **Offline-first models:** download once from a manifest, verify sha256, never commit assets.
 - **No silent CPU fallback:** CUDA by default; CPU only if explicitly allowed.
@@ -69,6 +72,16 @@ One request shape; one response envelope:
 
 ```bash
 context-finder command --json '{"action":"search","payload":{"query":"embedding templates","limit":5,"project":"."}}'
+```
+
+Task-oriented pack with freshness guard and path filters:
+
+```bash
+context-finder command --json '{
+  "action":"task_pack",
+  "options":{"stale_policy":"auto","max_reindex_ms":1500,"include_paths":["src"]},
+  "payload":{"intent":"refresh watermark policy","project":".","max_chars":20000}
+}'
 ```
 
 ### HTTP

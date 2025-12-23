@@ -20,6 +20,7 @@ This RFC is human-oriented. The **canonical contracts** are machine-readable:
 {
   "action": "search",          // snake_case action identifier
   "payload": { ... },          // action-specific object
+  "options": { ... } | null,   // cross-cutting options: freshness policy, filters, budgets
   "config": { ... } | null     // optional per-request overrides (merged into project config)
 }
 ```
@@ -37,6 +38,8 @@ Notes:
 | `search`             | `SearchPayload`               | `SearchOutput`             |
 | `search_with_context`| `SearchWithContextPayload`    | `SearchOutput`             |
 | `context_pack`       | `ContextPackPayload`          | `ContextPackOutput`        |
+| `task_pack`          | `TaskPackPayload`             | `TaskPackOutput`           |
+| `text_search`        | `TextSearchPayload`           | `TextSearchOutput`         |
 | `compare_search`     | `CompareSearchPayload`        | `ComparisonOutput`         |
 | `index`              | `IndexPayload`                | `IndexResponse`            |
 | `get_context`        | `GetContextPayload`           | `ContextOutput`            |
@@ -45,6 +48,22 @@ Notes:
 | `map`                | `MapPayload`                  | `MapOutput`                |
 | `eval`               | `EvalPayload`                 | `EvalOutput`               |
 | `eval_compare`       | `EvalComparePayload`          | `EvalCompareOutput`        |
+
+### Request options (cross-cutting)
+
+`options` is shared across actions. Canonical schema:
+
+- [contracts/command/v1/request_options.schema.json](../contracts/command/v1/request_options.schema.json)
+
+High-signal knobs:
+
+- `stale_policy`: `auto|warn|fail`
+  - `auto`: best-effort incremental reindex within `max_reindex_ms` (no silent work: `meta.index_state.reindex` is filled).
+  - `warn`: do not reindex; proceed with stale index and emit `warn` hints.
+  - `fail`: do not reindex; return `error` if index is stale/missing.
+- `max_reindex_ms`: time budget for `stale_policy=auto`.
+- `include_paths` / `exclude_paths` / `file_pattern`: path filters for pack-like actions (`context_pack`, `task_pack`, `text_search`).
+- `allow_filesystem_fallback`: controls whether `text_search` is allowed to scan files when no corpus exists.
 
 ## 3. Response shape
 
@@ -66,6 +85,7 @@ Canonical response contract:
 
 Interpretation highlights:
 
+- `index_state`: watermarks + staleness assessment + reindex attempt metadata (contract-first, stable).
 - `graph_cache` + `graph_nodes`/`graph_edges`: whether the graph cache was used and how large the assembled graph is.
 - `index_mtime_ms`: last index timestamp (unix-ms). Useful to detect stale results.
 - `health_*`: watcher/index health signals and recent failures.
