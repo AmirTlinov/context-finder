@@ -958,6 +958,86 @@ pub struct DoctorProjectResult {
     pub drift: Vec<DoctorIndexDrift>,
 }
 
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchToolName {
+    Map,
+    TextSearch,
+    Doctor,
+    Search,
+    Context,
+    ContextPack,
+    Index,
+    Impact,
+    Trace,
+    Explain,
+    Overview,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct BatchRequest {
+    /// Project directory path (defaults to current directory)
+    #[schemars(description = "Project directory path (defaults to current directory)")]
+    pub path: Option<String>,
+
+    /// Maximum number of UTF-8 characters for the serialized batch result (best effort).
+    #[schemars(description = "Maximum number of UTF-8 characters for the serialized batch result (best effort).")]
+    pub max_chars: Option<usize>,
+
+    /// If true, stop processing after the first item error.
+    #[schemars(description = "If true, stop processing after the first item error.")]
+    #[serde(default)]
+    pub stop_on_error: bool,
+
+    /// Batch items to execute.
+    #[schemars(description = "Batch items to execute.")]
+    pub items: Vec<BatchItem>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct BatchItem {
+    /// Caller-provided identifier used to correlate results.
+    pub id: String,
+
+    /// Tool name to execute.
+    pub tool: BatchToolName,
+
+    /// Tool input object (tool-specific). Defaults to `{}`.
+    #[serde(default)]
+    pub input: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchItemStatus {
+    Ok,
+    Error,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema, Clone)]
+pub struct BatchBudget {
+    pub max_chars: usize,
+    pub used_chars: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema, Clone)]
+pub struct BatchItemResult {
+    pub id: String,
+    pub tool: BatchToolName,
+    pub status: BatchItemStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema, Clone)]
+pub struct BatchResult {
+    pub version: u32,
+    pub items: Vec<BatchItemResult>,
+    pub budget: BatchBudget,
+}
+
 #[derive(Debug, Deserialize)]
 struct ModelManifestFile {
     models: Vec<ModelManifestModel>,
@@ -1690,6 +1770,206 @@ impl ContextFinderService {
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Execute multiple Context Finder tools in a single call (agent-friendly batch).
+    #[tool(
+        description = "Execute multiple Context Finder tools in one call. Returns a single bounded JSON result with per-item status (partial success) and a global max_chars budget."
+    )]
+    pub async fn batch(
+        &self,
+        Parameters(request): Parameters<BatchRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        const VERSION: u32 = 1;
+        const DEFAULT_MAX_CHARS: usize = 20_000;
+        const MAX_MAX_CHARS: usize = 500_000;
+
+        if request.items.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Batch items must not be empty",
+            )]));
+        }
+
+        let max_chars = request
+            .max_chars
+            .unwrap_or(DEFAULT_MAX_CHARS)
+            .clamp(1, MAX_MAX_CHARS);
+
+        let mut output = BatchResult {
+            version: VERSION,
+            items: Vec::new(),
+            budget: BatchBudget {
+                max_chars,
+                used_chars: 0,
+                truncated: false,
+            },
+        };
+
+        let mut inferred_path: Option<String> = request.path.as_ref().map(|p| p.trim().to_string());
+
+        for item in request.items {
+            let id = item.id.trim().to_string();
+            if id.is_empty() {
+                let rejected = BatchItemResult {
+                    id: item.id,
+                    tool: item.tool,
+                    status: BatchItemStatus::Error,
+                    message: Some("Batch item id must not be empty".to_string()),
+                    data: serde_json::Value::Null,
+                };
+                if !push_item_or_truncate(&mut output, rejected) {
+                    break;
+                }
+                if request.stop_on_error {
+                    break;
+                }
+                continue;
+            }
+
+            let item_path = extract_path_from_input(&item.input);
+            if inferred_path.is_none() {
+                inferred_path = item_path.clone();
+            } else if let (Some(batch_path), Some(item_path)) = (&inferred_path, item_path) {
+                if batch_path != &item_path {
+                    let rejected = BatchItemResult {
+                        id,
+                        tool: item.tool,
+                        status: BatchItemStatus::Error,
+                        message: Some(format!(
+                            "Batch path mismatch: batch uses '{batch_path}', item uses '{item_path}'"
+                        )),
+                        data: serde_json::Value::Null,
+                    };
+                    if !push_item_or_truncate(&mut output, rejected) {
+                        break;
+                    }
+                    if request.stop_on_error {
+                        break;
+                    }
+                    continue;
+                }
+            }
+
+            let remaining_chars = output
+                .budget
+                .max_chars
+                .saturating_sub(output.budget.used_chars);
+            let input = prepare_item_input(item.input, inferred_path.as_deref(), item.tool, remaining_chars);
+
+            let tool_result: Result<CallToolResult, McpError> = match item.tool {
+                BatchToolName::Map => match serde_json::from_value::<MapRequest>(input) {
+                    Ok(req) => self.map(Parameters(req)).await,
+                    Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid input for map: {err}"
+                    ))])),
+                },
+                BatchToolName::TextSearch => match serde_json::from_value::<TextSearchRequest>(input)
+                {
+                    Ok(req) => self.text_search(Parameters(req)).await,
+                    Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid input for text_search: {err}"
+                    ))])),
+                },
+                BatchToolName::Doctor => match serde_json::from_value::<DoctorRequest>(input) {
+                    Ok(req) => self.doctor(Parameters(req)).await,
+                    Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid input for doctor: {err}"
+                    ))])),
+                },
+                BatchToolName::Search => match serde_json::from_value::<SearchRequest>(input) {
+                    Ok(req) => self.search(Parameters(req)).await,
+                    Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid input for search: {err}"
+                    ))])),
+                },
+                BatchToolName::Context => match serde_json::from_value::<ContextRequest>(input) {
+                    Ok(req) => self.context(Parameters(req)).await,
+                    Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid input for context: {err}"
+                    ))])),
+                },
+                BatchToolName::ContextPack => match serde_json::from_value::<ContextPackRequest>(input)
+                {
+                    Ok(req) => self.context_pack(Parameters(req)).await,
+                    Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid input for context_pack: {err}"
+                    ))])),
+                },
+                BatchToolName::Index => match serde_json::from_value::<IndexRequest>(input) {
+                    Ok(req) => self.index(Parameters(req)).await,
+                    Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid input for index: {err}"
+                    ))])),
+                },
+                BatchToolName::Impact => match serde_json::from_value::<ImpactRequest>(input) {
+                    Ok(req) => self.impact(Parameters(req)).await,
+                    Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid input for impact: {err}"
+                    ))])),
+                },
+                BatchToolName::Trace => match serde_json::from_value::<TraceRequest>(input) {
+                    Ok(req) => self.trace(Parameters(req)).await,
+                    Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid input for trace: {err}"
+                    ))])),
+                },
+                BatchToolName::Explain => match serde_json::from_value::<ExplainRequest>(input) {
+                    Ok(req) => self.explain(Parameters(req)).await,
+                    Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid input for explain: {err}"
+                    ))])),
+                },
+                BatchToolName::Overview => match serde_json::from_value::<OverviewRequest>(input) {
+                    Ok(req) => self.overview(Parameters(req)).await,
+                    Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid input for overview: {err}"
+                    ))])),
+                },
+            };
+
+            let item_outcome = match tool_result {
+                Ok(result) => match parse_tool_result_as_json(&result, item.tool) {
+                    Ok(data) => BatchItemResult {
+                        id,
+                        tool: item.tool,
+                        status: BatchItemStatus::Ok,
+                        message: None,
+                        data,
+                    },
+                    Err(message) => BatchItemResult {
+                        id,
+                        tool: item.tool,
+                        status: BatchItemStatus::Error,
+                        message: Some(message),
+                        data: serde_json::Value::Null,
+                    },
+                },
+                Err(err) => BatchItemResult {
+                    id,
+                    tool: item.tool,
+                    status: BatchItemStatus::Error,
+                    message: Some(err.to_string()),
+                    data: serde_json::Value::Null,
+                },
+            };
+
+            if !push_item_or_truncate(&mut output, item_outcome) {
+                break;
+            }
+
+            if request.stop_on_error
+                && output
+                    .items
+                    .last()
+                    .is_some_and(|v| v.status == BatchItemStatus::Error)
+            {
+                break;
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
 
@@ -3325,6 +3605,163 @@ impl ContextFinderService {
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
+}
+
+fn extract_path_from_input(input: &serde_json::Value) -> Option<String> {
+    let serde_json::Value::Object(map) = input else {
+        return None;
+    };
+    map.get("path").and_then(|v| v.as_str()).map(str::to_string)
+}
+
+fn prepare_item_input(
+    input: serde_json::Value,
+    path: Option<&str>,
+    tool: BatchToolName,
+    remaining_chars: usize,
+) -> serde_json::Value {
+    let mut input = match input {
+        serde_json::Value::Object(map) => serde_json::Value::Object(map),
+        _ => serde_json::Value::Object(serde_json::Map::new()),
+    };
+
+    if let Some(path) = path {
+        if let serde_json::Value::Object(ref mut map) = input {
+            map.entry("path".to_string())
+                .or_insert_with(|| serde_json::Value::String(path.to_string()));
+        }
+    }
+
+    if matches!(tool, BatchToolName::ContextPack) {
+        if let serde_json::Value::Object(ref mut map) = input {
+            if !map.contains_key("max_chars") {
+                let cap = remaining_chars.saturating_sub(300).clamp(1, 20_000);
+                map.insert("max_chars".to_string(), serde_json::Value::Number(cap.into()));
+            }
+        }
+    }
+
+    input
+}
+
+fn parse_tool_result_as_json(
+    result: &CallToolResult,
+    tool: BatchToolName,
+) -> Result<serde_json::Value, String> {
+    if result.is_error.unwrap_or(false) {
+        return Err(extract_tool_text(result).unwrap_or_else(|| "Tool returned error".to_string()));
+    }
+
+    if let Some(value) = result.structured_content.clone() {
+        return Ok(value);
+    }
+
+    let blocks = extract_tool_text_blocks(result);
+    if blocks.is_empty() {
+        return Err("Tool returned no text content".to_string());
+    }
+
+    let mut parsed = Vec::new();
+    for block in blocks {
+        match serde_json::from_str::<serde_json::Value>(&block) {
+            Ok(v) => parsed.push(v),
+            Err(err) => {
+                return Err(format!("Tool returned non-JSON text content: {err}"));
+            }
+        }
+    }
+
+    match parsed.len() {
+        1 => Ok(parsed.remove(0)),
+        2 if matches!(tool, BatchToolName::ContextPack) => Ok(serde_json::json!({
+            "result": parsed[0],
+            "trace": parsed[1],
+        })),
+        _ => Ok(serde_json::Value::Array(parsed)),
+    }
+}
+
+fn extract_tool_text(result: &CallToolResult) -> Option<String> {
+    let blocks = extract_tool_text_blocks(result);
+    if blocks.is_empty() {
+        return None;
+    }
+    Some(blocks.join("\n"))
+}
+
+fn extract_tool_text_blocks(result: &CallToolResult) -> Vec<String> {
+    result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect()
+}
+
+fn push_item_or_truncate(output: &mut BatchResult, item: BatchItemResult) -> bool {
+    output.items.push(item);
+    let used = match compute_used_chars(output) {
+        Ok(used) => used,
+        Err(err) => {
+            let rejected = output.items.pop().expect("just pushed");
+            output.budget.truncated = true;
+            output.items.push(BatchItemResult {
+                id: rejected.id,
+                tool: rejected.tool,
+                status: BatchItemStatus::Error,
+                message: Some(format!("Failed to compute batch budget: {err:#}")),
+                data: serde_json::Value::Null,
+            });
+            return false;
+        }
+    };
+
+    if used > output.budget.max_chars {
+        let rejected = output.items.pop().expect("just pushed");
+        output.budget.truncated = true;
+
+        if output.items.is_empty() {
+            output.items.push(BatchItemResult {
+                id: rejected.id,
+                tool: rejected.tool,
+                status: BatchItemStatus::Error,
+                message: Some(format!(
+                    "Batch budget exceeded (max_chars={}). Reduce payload sizes or raise max_chars.",
+                    output.budget.max_chars
+                )),
+                data: serde_json::Value::Null,
+            });
+        }
+
+        output.budget.used_chars = compute_used_chars(output).unwrap_or(output.budget.max_chars);
+        return false;
+    }
+
+    output.budget.used_chars = used;
+    true
+}
+
+fn compute_used_chars(output: &BatchResult) -> anyhow::Result<usize> {
+    let mut tmp = BatchResult {
+        version: output.version,
+        items: output.items.clone(),
+        budget: BatchBudget {
+            max_chars: output.budget.max_chars,
+            used_chars: 0,
+            truncated: output.budget.truncated,
+        },
+    };
+    let raw = serde_json::to_string(&tmp)?;
+    let mut used = raw.chars().count();
+    tmp.budget.used_chars = used;
+    let raw = serde_json::to_string(&tmp)?;
+    let next = raw.chars().count();
+    if next == used {
+        return Ok(used);
+    }
+    used = next;
+    tmp.budget.used_chars = used;
+    let raw = serde_json::to_string(&tmp)?;
+    Ok(raw.chars().count())
 }
 
 // ============================================================================

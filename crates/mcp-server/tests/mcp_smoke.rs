@@ -65,6 +65,7 @@ async fn mcp_exposes_core_tools_and_map_has_no_side_effects() -> Result<()> {
     let tool_names: HashSet<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
     for expected in [
         "map",
+        "batch",
         "doctor",
         "search",
         "context",
@@ -250,6 +251,137 @@ async fn mcp_exposes_core_tools_and_map_has_no_side_effects() -> Result<()> {
             .and_then(|v| v.get("missing_chunks"))
             .and_then(Value::as_u64),
         Some(1)
+    );
+
+    // Batch: one call → multiple tools, with a single bounded JSON output.
+    let batch_args = serde_json::json!({
+        "path": root.to_string_lossy(),
+        "max_chars": 20000,
+        "items": [
+            { "id": "map", "tool": "map", "input": { "depth": 2, "limit": 20 } },
+            { "id": "doctor", "tool": "doctor", "input": {} }
+        ]
+    });
+
+    let batch_result = tokio::time::timeout(
+        Duration::from_secs(10),
+        service.call_tool(CallToolRequestParam {
+            name: "batch".into(),
+            arguments: batch_args.as_object().cloned(),
+        }),
+    )
+    .await
+    .context("timeout calling batch")??;
+
+    assert_ne!(batch_result.is_error, Some(true), "batch returned error");
+    let batch_text = batch_result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .context("batch did not return text content")?;
+    let batch_json: Value =
+        serde_json::from_str(batch_text).context("batch output is not valid JSON")?;
+
+    assert_eq!(
+        batch_json.get("version").and_then(Value::as_u64),
+        Some(1),
+        "batch schema version mismatch"
+    );
+    let items = batch_json
+        .get("items")
+        .and_then(Value::as_array)
+        .context("batch items is not an array")?;
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].get("id").and_then(Value::as_str), Some("map"));
+    assert_eq!(items[0].get("status").and_then(Value::as_str), Some("ok"));
+    assert_eq!(
+        items[1].get("id").and_then(Value::as_str),
+        Some("doctor")
+    );
+    assert_eq!(
+        items[1].get("status").and_then(Value::as_str),
+        Some("ok")
+    );
+    assert_eq!(
+        batch_json
+            .get("budget")
+            .and_then(|v| v.get("truncated"))
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+
+    service.cancel().await.context("shutdown mcp service")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_batch_truncates_when_budget_is_too_small() -> Result<()> {
+    let bin = locate_context_finder_mcp_bin()?;
+
+    let mut cmd = Command::new(bin);
+    cmd.env_remove("CONTEXT_FINDER_MODEL_DIR");
+    cmd.env("CONTEXT_FINDER_PROFILE", "quality");
+    cmd.env("RUST_LOG", "warn");
+
+    let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
+    let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))
+        .await
+        .context("timeout starting MCP server")??;
+
+    let tmp = tempfile::tempdir().context("tempdir")?;
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).context("mkdir src")?;
+    std::fs::write(
+        root.join("src").join("main.rs"),
+        "fn main() { println!(\"hi\"); }\n",
+    )
+    .context("write main.rs")?;
+
+    let batch_args = serde_json::json!({
+        "path": root.to_string_lossy(),
+        "max_chars": 200,
+        "items": [
+            { "id": "doctor", "tool": "doctor", "input": {} }
+        ]
+    });
+
+    let batch_result = tokio::time::timeout(
+        Duration::from_secs(10),
+        service.call_tool(CallToolRequestParam {
+            name: "batch".into(),
+            arguments: batch_args.as_object().cloned(),
+        }),
+    )
+    .await
+    .context("timeout calling batch (truncation)")??;
+
+    assert_ne!(batch_result.is_error, Some(true), "batch returned error");
+    let batch_text = batch_result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .context("batch did not return text content")?;
+    let batch_json: Value =
+        serde_json::from_str(batch_text).context("batch output is not valid JSON")?;
+
+    assert_eq!(
+        batch_json
+            .get("budget")
+            .and_then(|v| v.get("truncated"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+
+    let items = batch_json
+        .get("items")
+        .and_then(Value::as_array)
+        .context("batch items is not an array")?;
+    assert!(!items.is_empty(), "batch returned no items after truncation");
+    assert_eq!(
+        items[0].get("status").and_then(Value::as_str),
+        Some("error")
     );
 
     service.cancel().await.context("shutdown mcp service")?;
