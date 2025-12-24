@@ -375,3 +375,312 @@ async fn grep_context_supports_cursor_pagination() -> Result<()> {
     service.cancel().await.context("shutdown mcp service")?;
     Ok(())
 }
+
+#[tokio::test]
+async fn file_slice_supports_cursor_pagination() -> Result<()> {
+    let (tmp, service) = start_service().await?;
+    let root = tmp.path();
+
+    std::fs::create_dir_all(root.join("src")).context("mkdir src")?;
+    std::fs::write(
+        root.join("src").join("main.txt"),
+        "line1\nline2\nline3\nline4\nline5\n",
+    )
+    .context("write main.txt")?;
+
+    assert!(
+        !root.join(".context-finder").exists(),
+        "temp project unexpectedly has .context-finder before file_slice"
+    );
+
+    let first = call_tool_json(
+        &service,
+        "file_slice",
+        serde_json::json!({
+            "path": root.to_string_lossy(),
+            "file": "src/main.txt",
+            "start_line": 1,
+            "max_lines": 2,
+            "max_chars": 20_000,
+        }),
+    )
+    .await?;
+    assert_eq!(first.get("start_line").and_then(Value::as_u64), Some(1));
+    assert_eq!(first.get("end_line").and_then(Value::as_u64), Some(2));
+    assert_eq!(first.get("truncated").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        first.get("content").and_then(Value::as_str),
+        Some("line1\nline2")
+    );
+    let cursor = first
+        .get("next_cursor")
+        .and_then(Value::as_str)
+        .context("missing next_cursor")?
+        .to_string();
+
+    let second = call_tool_json(
+        &service,
+        "file_slice",
+        serde_json::json!({
+            "path": root.to_string_lossy(),
+            "file": "src/main.txt",
+            "start_line": 999,
+            "max_lines": 2,
+            "max_chars": 20_000,
+            "cursor": cursor,
+        }),
+    )
+    .await?;
+    assert_eq!(second.get("start_line").and_then(Value::as_u64), Some(3));
+    assert_eq!(second.get("end_line").and_then(Value::as_u64), Some(4));
+    assert_eq!(second.get("truncated").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        second.get("content").and_then(Value::as_str),
+        Some("line3\nline4")
+    );
+    let cursor2 = second
+        .get("next_cursor")
+        .and_then(Value::as_str)
+        .context("missing next_cursor on second page")?
+        .to_string();
+
+    let third = call_tool_json(
+        &service,
+        "file_slice",
+        serde_json::json!({
+            "path": root.to_string_lossy(),
+            "file": "src/main.txt",
+            "max_lines": 2,
+            "max_chars": 20_000,
+            "cursor": cursor2,
+        }),
+    )
+    .await?;
+    assert_eq!(third.get("start_line").and_then(Value::as_u64), Some(5));
+    assert_eq!(third.get("end_line").and_then(Value::as_u64), Some(5));
+    assert_eq!(third.get("truncated").and_then(Value::as_bool), Some(false));
+    assert!(third.get("next_cursor").is_none());
+    assert_eq!(third.get("content").and_then(Value::as_str), Some("line5"));
+
+    assert!(
+        !root.join(".context-finder").exists(),
+        "file_slice created .context-finder side effects"
+    );
+
+    service.cancel().await.context("shutdown mcp service")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_pack_file_supports_cursor_only_continuation() -> Result<()> {
+    let (tmp, service) = start_service().await?;
+    let root = tmp.path();
+
+    std::fs::create_dir_all(root.join("src")).context("mkdir src")?;
+    std::fs::write(
+        root.join("src").join("main.txt"),
+        "line1\nline2\nline3\nline4\nline5\n",
+    )
+    .context("write main.txt")?;
+
+    assert!(
+        !root.join(".context-finder").exists(),
+        "temp project unexpectedly has .context-finder before read_pack"
+    );
+
+    let first = call_tool_json(
+        &service,
+        "read_pack",
+        serde_json::json!({
+            "path": root.to_string_lossy(),
+            "intent": "file",
+            "file": "src/main.txt",
+            "max_lines": 2,
+            "max_chars": 20_000,
+        }),
+    )
+    .await?;
+    assert_eq!(first.get("intent").and_then(Value::as_str), Some("file"));
+
+    let sections = first
+        .get("sections")
+        .and_then(Value::as_array)
+        .context("missing sections array")?;
+    anyhow::ensure!(!sections.is_empty(), "expected non-empty sections");
+
+    let first_section = sections.first().context("missing first section")?;
+    assert_eq!(
+        first_section.get("type").and_then(Value::as_str),
+        Some("file_slice")
+    );
+    let first_slice = first_section
+        .get("result")
+        .context("missing file_slice result")?;
+    assert_eq!(
+        first_slice.get("start_line").and_then(Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(first_slice.get("end_line").and_then(Value::as_u64), Some(2));
+    let cursor = first_slice
+        .get("next_cursor")
+        .and_then(Value::as_str)
+        .context("missing file_slice next_cursor")?
+        .to_string();
+
+    let second = call_tool_json(
+        &service,
+        "read_pack",
+        serde_json::json!({
+            "path": root.to_string_lossy(),
+            "cursor": cursor,
+        }),
+    )
+    .await?;
+    assert_eq!(second.get("intent").and_then(Value::as_str), Some("file"));
+
+    let sections = second
+        .get("sections")
+        .and_then(Value::as_array)
+        .context("missing sections array")?;
+    let second_section = sections.first().context("missing first section")?;
+    assert_eq!(
+        second_section.get("type").and_then(Value::as_str),
+        Some("file_slice")
+    );
+    let second_slice = second_section
+        .get("result")
+        .context("missing file_slice result")?;
+    assert_eq!(
+        second_slice.get("start_line").and_then(Value::as_u64),
+        Some(3)
+    );
+
+    assert!(
+        !root.join(".context-finder").exists(),
+        "read_pack created .context-finder side effects"
+    );
+
+    service.cancel().await.context("shutdown mcp service")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_pack_grep_supports_cursor_only_continuation() -> Result<()> {
+    let (tmp, service) = start_service().await?;
+    let root = tmp.path();
+
+    std::fs::create_dir_all(root.join("src")).context("mkdir src")?;
+
+    let mut content = String::new();
+    for idx in 1..=2000usize {
+        content.push_str(&format!("MATCH {idx}\n"));
+    }
+    std::fs::write(root.join("src").join("main.txt"), content).context("write main.txt")?;
+
+    assert!(
+        !root.join(".context-finder").exists(),
+        "temp project unexpectedly has .context-finder before read_pack"
+    );
+
+    let first = call_tool_json(
+        &service,
+        "read_pack",
+        serde_json::json!({
+            "path": root.to_string_lossy(),
+            "intent": "grep",
+            "pattern": "MATCH",
+            "file": "src/main.txt",
+            "before": 0,
+            "after": 0,
+            "max_chars": 8000,
+        }),
+    )
+    .await?;
+    assert_eq!(first.get("intent").and_then(Value::as_str), Some("grep"));
+
+    let first_section = first
+        .get("sections")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .with_context(|| format!("missing first section; got: {first:?}"))?;
+    assert_eq!(
+        first_section.get("type").and_then(Value::as_str),
+        Some("grep_context")
+    );
+    let first_grep = first_section.get("result").context("missing grep result")?;
+    assert_eq!(
+        first_grep.get("truncated").and_then(Value::as_bool),
+        Some(true)
+    );
+    let cursor = first_grep
+        .get("next_cursor")
+        .and_then(Value::as_str)
+        .context("missing grep next_cursor")?
+        .to_string();
+
+    let max_line_first = first_grep
+        .get("hunks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|h| {
+            h.get("match_lines")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(Value::as_u64)
+        .max()
+        .unwrap_or(0);
+    anyhow::ensure!(max_line_first > 0, "expected match_lines in first page");
+
+    let second = call_tool_json(
+        &service,
+        "read_pack",
+        serde_json::json!({
+            "path": root.to_string_lossy(),
+            "cursor": cursor,
+        }),
+    )
+    .await?;
+    assert_eq!(second.get("intent").and_then(Value::as_str), Some("grep"));
+
+    let second_section = second
+        .get("sections")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .context("missing second section")?;
+    assert_eq!(
+        second_section.get("type").and_then(Value::as_str),
+        Some("grep_context")
+    );
+    let second_grep = second_section
+        .get("result")
+        .context("missing grep result")?;
+    let max_line_second = second_grep
+        .get("hunks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|h| {
+            h.get("match_lines")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(Value::as_u64)
+        .max()
+        .unwrap_or(0);
+    anyhow::ensure!(
+        max_line_second > max_line_first,
+        "expected cursor to advance match lines"
+    );
+
+    assert!(
+        !root.join(".context-finder").exists(),
+        "read_pack created .context-finder side effects"
+    );
+
+    service.cancel().await.context("shutdown mcp service")?;
+    Ok(())
+}

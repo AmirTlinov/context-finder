@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1545,6 +1545,24 @@ pub struct FileSliceRequest {
     /// Maximum number of UTF-8 characters for the returned slice (default: 20000)
     #[schemars(description = "Maximum number of UTF-8 characters for the returned slice")]
     pub max_chars: Option<usize>,
+
+    /// Opaque cursor token to continue a previous response. When provided, `start_line` is ignored.
+    #[schemars(description = "Opaque cursor token to continue a previous file_slice response")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FileSliceCursorV1 {
+    v: u32,
+    tool: String,
+    root: String,
+    file: String,
+    max_lines: usize,
+    max_chars: usize,
+    next_start_line: usize,
+    next_byte_offset: u64,
+    file_size_bytes: u64,
+    file_mtime_ms: u64,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
@@ -1566,10 +1584,126 @@ pub struct FileSliceResult {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation: Option<FileSliceTruncation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     pub file_size_bytes: u64,
     pub file_mtime_ms: u64,
     pub content_sha256: String,
     pub content: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadPackIntent {
+    Auto,
+    File,
+    Grep,
+    Query,
+    Onboarding,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadPackRequest {
+    /// Project directory path
+    #[schemars(description = "Project directory path")]
+    pub path: Option<String>,
+
+    /// What kind of pack to build (default: auto)
+    #[schemars(description = "What kind of pack to build (auto/file/grep/query/onboarding)")]
+    pub intent: Option<ReadPackIntent>,
+
+    /// File path (relative to project root) when intent=file
+    #[schemars(description = "File path (relative to project root)")]
+    pub file: Option<String>,
+
+    /// Regex pattern when intent=grep
+    #[schemars(description = "Regex pattern to search for")]
+    pub pattern: Option<String>,
+
+    /// Natural language query when intent=query
+    #[schemars(description = "Natural language query")]
+    pub query: Option<String>,
+
+    /// Optional file path filter for grep (glob or substring)
+    #[schemars(description = "Optional file path filter (glob or substring)")]
+    pub file_pattern: Option<String>,
+
+    /// Regex context lines before a match (default: 2)
+    #[schemars(description = "Number of context lines before each match")]
+    pub before: Option<usize>,
+
+    /// Regex context lines after a match (default: 2)
+    #[schemars(description = "Number of context lines after each match")]
+    pub after: Option<usize>,
+
+    /// Case-sensitive regex matching (default: true)
+    #[schemars(description = "Whether regex matching is case-sensitive")]
+    pub case_sensitive: Option<bool>,
+
+    /// First line to include (1-based, default: 1) when intent=file and cursor is not provided
+    #[schemars(description = "First line to include (1-based) for file intent")]
+    pub start_line: Option<usize>,
+
+    /// Maximum number of lines to return for file intent (default: 200)
+    #[schemars(description = "Maximum number of lines to return for file intent")]
+    pub max_lines: Option<usize>,
+
+    /// Maximum number of UTF-8 characters for the underlying result (default: 20000)
+    #[schemars(description = "Maximum number of UTF-8 characters for the underlying result")]
+    pub max_chars: Option<usize>,
+
+    /// Opaque cursor token to continue a previous response
+    #[schemars(description = "Opaque cursor token to continue a previous read_pack response")]
+    pub cursor: Option<String>,
+
+    /// Prefer code over docs when intent=query (default: true)
+    #[schemars(description = "Prefer code over docs when building a context_pack")]
+    pub prefer_code: Option<bool>,
+
+    /// Include markdown docs when intent=query (default: true)
+    #[schemars(description = "Whether to include docs in primary/related results")]
+    pub include_docs: Option<bool>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ReadPackNextAction {
+    pub tool: String,
+    pub args: serde_json::Value,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadPackTruncation {
+    MaxChars,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ReadPackBudget {
+    pub max_chars: usize,
+    pub used_chars: usize,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<ReadPackTruncation>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReadPackSection {
+    FileSlice { result: FileSliceResult },
+    GrepContext { result: GrepContextResult },
+    ContextPack { result: serde_json::Value },
+    RepoOnboardingPack { result: RepoOnboardingPackResult },
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ReadPackResult {
+    pub version: u32,
+    pub intent: ReadPackIntent,
+    pub root: String,
+    pub sections: Vec<ReadPackSection>,
+    pub next_actions: Vec<ReadPackNextAction>,
+    pub budget: ReadPackBudget,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2589,18 +2723,6 @@ impl ContextFinderService {
         &self,
         Parameters(request): Parameters<RepoOnboardingPackRequest>,
     ) -> Result<CallToolResult, McpError> {
-        const VERSION: u32 = 1;
-        const DEFAULT_MAX_CHARS: usize = 20_000;
-        const MAX_MAX_CHARS: usize = 500_000;
-        const DEFAULT_MAP_DEPTH: usize = 2;
-        const DEFAULT_MAP_LIMIT: usize = 20;
-        const DEFAULT_DOCS_LIMIT: usize = 8;
-        const MAX_DOCS_LIMIT: usize = 25;
-        const DEFAULT_DOC_MAX_LINES: usize = 200;
-        const MAX_DOC_MAX_LINES: usize = 5_000;
-        const DEFAULT_DOC_MAX_CHARS: usize = 6_000;
-        const MAX_DOC_MAX_CHARS: usize = 100_000;
-
         let root_path = PathBuf::from(request.path.as_deref().unwrap_or("."));
         let root = match root_path.canonicalize() {
             Ok(p) => p,
@@ -2611,29 +2733,9 @@ impl ContextFinderService {
             }
         };
         self.touch_daemon_best_effort(&root);
-
-        let max_chars = request
-            .max_chars
-            .unwrap_or(DEFAULT_MAX_CHARS)
-            .clamp(1, MAX_MAX_CHARS);
-        let map_depth = request.map_depth.unwrap_or(DEFAULT_MAP_DEPTH).clamp(1, 4);
-        let map_limit = request.map_limit.unwrap_or(DEFAULT_MAP_LIMIT).clamp(1, 200);
-        let docs_limit = request
-            .docs_limit
-            .unwrap_or(DEFAULT_DOCS_LIMIT)
-            .clamp(0, MAX_DOCS_LIMIT);
-        let doc_max_lines = request
-            .doc_max_lines
-            .unwrap_or(DEFAULT_DOC_MAX_LINES)
-            .clamp(1, MAX_DOC_MAX_LINES);
-        let doc_max_chars = request
-            .doc_max_chars
-            .unwrap_or(DEFAULT_DOC_MAX_CHARS)
-            .clamp(1, MAX_DOC_MAX_CHARS);
-
         let root_display = root.to_string_lossy().to_string();
-
-        let map = match compute_map_result(&root, &root_display, map_depth, map_limit, 0).await {
+        let result = match compute_repo_onboarding_pack_result(&root, &root_display, &request).await
+        {
             Ok(result) => result,
             Err(err) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -2641,161 +2743,6 @@ impl ContextFinderService {
                 ))]));
             }
         };
-
-        let has_corpus = match Self::load_chunk_corpus(&root).await {
-            Ok(v) => v.is_some(),
-            Err(_) => false,
-        };
-
-        let mut next_actions = Vec::new();
-        if !has_corpus {
-            next_actions.push(RepoOnboardingNextAction {
-                tool: "index".to_string(),
-                args: serde_json::json!({ "path": root_display.clone() }),
-                reason:
-                    "Build the semantic index (enables search/context/context_pack/impact/trace)."
-                        .to_string(),
-            });
-        }
-        next_actions.push(RepoOnboardingNextAction {
-            tool: "grep_context".to_string(),
-            args: serde_json::json!({
-                "path": root_display.clone(),
-                "pattern": "TODO|FIXME",
-                "context": 10,
-                "max_hunks": 50,
-            }),
-            reason: "Scan for TODO/FIXME across the repo with surrounding context hunks."
-                .to_string(),
-        });
-        next_actions.push(RepoOnboardingNextAction {
-            tool: "batch".to_string(),
-            args: serde_json::json!({
-                "version": 2,
-                "path": root_display.clone(),
-                "max_chars": 20000,
-                "items": [
-                    { "id": "docs", "tool": "list_files", "input": { "file_pattern": "*.md", "limit": 200 } },
-                    { "id": "read", "tool": "file_slice", "input": { "file": { "$ref": "#/items/docs/data/files/0" }, "start_line": 1, "max_lines": 200 } }
-                ]
-            }),
-            reason: "Example: chain tools in one call with `$ref` dependencies (batch v2).".to_string(),
-        });
-        if has_corpus {
-            next_actions.push(RepoOnboardingNextAction {
-                tool: "context_pack".to_string(),
-                args: serde_json::json!({
-                    "path": root_display.clone(),
-                    "query": "describe what you want to change",
-                    "strategy": "extended",
-                    "max_chars": 20000,
-                }),
-                reason: "One-shot semantic onboarding pack for a concrete question.".to_string(),
-            });
-        }
-
-        let default_doc_candidates = [
-            "README.md",
-            "docs/README.md",
-            "docs/QUICK_START.md",
-            "USAGE_EXAMPLES.md",
-            "PHILOSOPHY.md",
-            "AGENTS.md",
-            "CONTRIBUTING.md",
-            "docs/COMMAND_RFC.md",
-        ];
-
-        let mut seen = HashSet::new();
-        let mut doc_candidates: Vec<String> = Vec::new();
-        if let Some(custom) = request.doc_paths.as_ref() {
-            for rel in custom {
-                let rel = rel.trim();
-                if rel.is_empty() {
-                    continue;
-                }
-                let rel = rel.replace('\\', "/");
-                if seen.insert(rel.clone()) {
-                    doc_candidates.push(rel);
-                }
-            }
-        } else {
-            for rel in default_doc_candidates {
-                if seen.insert(rel.to_string()) {
-                    doc_candidates.push(rel.to_string());
-                }
-            }
-        }
-
-        let mut result = RepoOnboardingPackResult {
-            version: VERSION,
-            root: root_display.clone(),
-            map,
-            docs: Vec::new(),
-            next_actions,
-            budget: RepoOnboardingPackBudget {
-                max_chars,
-                used_chars: 0,
-                truncated: false,
-                truncation: None,
-            },
-        };
-
-        let mut docs_included = 0usize;
-        for (idx, rel) in doc_candidates.iter().enumerate() {
-            if docs_included >= docs_limit {
-                result.budget.truncated = true;
-                result.budget.truncation = Some(RepoOnboardingPackTruncation::DocsLimit);
-                break;
-            }
-
-            let slice =
-                match compute_onboarding_doc_slice(&root, rel, 1, doc_max_lines, doc_max_chars) {
-                    Ok(slice) => slice,
-                    Err(_) => continue,
-                };
-            result.docs.push(slice);
-            docs_included += 1;
-
-            if let Err(err) = finalize_repo_onboarding_budget(&mut result) {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Error: {err:#}"
-                ))]));
-            }
-            if result.budget.used_chars > max_chars {
-                result.docs.pop();
-                result.budget.truncated = true;
-                result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
-                let _ = finalize_repo_onboarding_budget(&mut result);
-                break;
-            }
-
-            if idx + 1 >= doc_candidates.len() {
-                break;
-            }
-        }
-
-        if let Err(err) = finalize_repo_onboarding_budget(&mut result) {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Error: {err:#}"
-            ))]));
-        }
-        while result.budget.used_chars > max_chars && !result.next_actions.is_empty() {
-            result.next_actions.pop();
-            result.budget.truncated = true;
-            result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
-            let _ = finalize_repo_onboarding_budget(&mut result);
-        }
-        while result.budget.used_chars > max_chars && !result.docs.is_empty() {
-            result.docs.pop();
-            result.budget.truncated = true;
-            result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
-            let _ = finalize_repo_onboarding_budget(&mut result);
-        }
-        if result.budget.used_chars > max_chars {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "max_chars={max_chars} is too small for the onboarding pack payload"
-            ))]));
-        }
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
@@ -3175,12 +3122,7 @@ impl ContextFinderService {
         &self,
         Parameters(request): Parameters<FileSliceRequest>,
     ) -> Result<CallToolResult, McpError> {
-        const DEFAULT_MAX_LINES: usize = 200;
-        const MAX_MAX_LINES: usize = 5_000;
-        const DEFAULT_MAX_CHARS: usize = 20_000;
-        const MAX_MAX_CHARS: usize = 500_000;
-
-        let root_path = PathBuf::from(request.path.unwrap_or_else(|| ".".to_string()));
+        let root_path = PathBuf::from(request.path.as_deref().unwrap_or("."));
         let root = match root_path.canonicalize() {
             Ok(p) => p,
             Err(e) => {
@@ -3190,148 +3132,512 @@ impl ContextFinderService {
             }
         };
         self.touch_daemon_best_effort(&root);
-
-        let file_str = request.file.trim();
-        if file_str.is_empty() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "File must not be empty",
-            )]));
-        }
-
-        let candidate = {
-            let input_path = Path::new(file_str);
-            if input_path.is_absolute() {
-                PathBuf::from(input_path)
-            } else {
-                root.join(input_path)
-            }
-        };
-
-        let canonical_file = match candidate.canonicalize() {
-            Ok(p) => p,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Invalid file '{file_str}': {e}"
-                ))]));
-            }
-        };
-
-        if !canonical_file.starts_with(&root) {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "File '{file_str}' is outside project root"
-            ))]));
-        }
-
-        let display_file = normalize_relative_path(&root, &canonical_file).unwrap_or_else(|| {
-            canonical_file
-                .to_string_lossy()
-                .into_owned()
-                .replace('\\', "/")
-        });
-
-        let meta = match std::fs::metadata(&canonical_file) {
-            Ok(m) => m,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to stat '{display_file}': {e}"
-                ))]));
-            }
-        };
-        let file_size_bytes = meta.len();
-        let file_mtime_ms = meta.modified().map(unix_ms).unwrap_or(0);
-
-        let start_line = request.start_line.unwrap_or(1).max(1);
-        let max_lines = request
-            .max_lines
-            .unwrap_or(DEFAULT_MAX_LINES)
-            .clamp(1, MAX_MAX_LINES);
-        let max_chars = request
-            .max_chars
-            .unwrap_or(DEFAULT_MAX_CHARS)
-            .clamp(1, MAX_MAX_CHARS);
-
-        let file = match std::fs::File::open(&canonical_file) {
-            Ok(f) => f,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to open '{display_file}': {e}"
-                ))]));
-            }
-        };
-        let reader = BufReader::new(file);
-
-        let mut content = String::new();
-        let mut used_chars = 0usize;
-        let mut returned_lines = 0usize;
-        let mut end_line = 0usize;
-        let mut truncated = false;
-        let mut truncation: Option<FileSliceTruncation> = None;
-
-        for (idx, line) in reader.lines().enumerate() {
-            let line_no = idx + 1;
-            let line = match line {
-                Ok(l) => l,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Failed to read '{display_file}': {e}"
-                    ))]));
-                }
-            };
-
-            if line_no < start_line {
-                continue;
-            }
-
-            if returned_lines >= max_lines {
-                truncated = true;
-                truncation = Some(FileSliceTruncation::MaxLines);
-                break;
-            }
-
-            let line_chars = line.chars().count();
-            let extra_chars = if returned_lines == 0 {
-                line_chars
-            } else {
-                1 + line_chars
-            };
-            if used_chars.saturating_add(extra_chars) > max_chars {
-                truncated = true;
-                truncation = Some(FileSliceTruncation::MaxChars);
-                break;
-            }
-
-            if returned_lines > 0 {
-                content.push('\n');
-                used_chars += 1;
-            }
-            content.push_str(&line);
-            used_chars += line_chars;
-            returned_lines += 1;
-            end_line = line_no;
-        }
-
-        let mut hasher = Sha256::new();
-        hasher.update(content.as_bytes());
-        let content_sha256 = hex_encode_lower(&hasher.finalize());
-
-        let result = FileSliceResult {
-            file: display_file,
-            start_line,
-            end_line,
-            returned_lines,
-            used_chars,
-            max_lines,
-            max_chars,
-            truncated,
-            truncation,
-            file_size_bytes,
-            file_mtime_ms,
-            content_sha256,
-            content,
+        let root_display = root.to_string_lossy().to_string();
+        let result = match compute_file_slice_result(&root, &root_display, &request) {
+            Ok(result) => result,
+            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
         };
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    /// Build a one-call semantic reading pack (file slice / grep context / context pack / onboarding).
+    #[tool(
+        description = "One-call semantic reading pack. A cognitive facade over file_slice/grep_context/context_pack/repo_onboarding_pack: returns the most relevant bounded slice(s) plus continuation cursors and next actions."
+    )]
+    pub async fn read_pack(
+        &self,
+        Parameters(request): Parameters<ReadPackRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        const VERSION: u32 = 1;
+        const DEFAULT_MAX_CHARS: usize = 20_000;
+        const MAX_MAX_CHARS: usize = 500_000;
+        const DEFAULT_GREP_CONTEXT: usize = 20;
+
+        #[derive(Debug, Deserialize)]
+        struct CursorHeader {
+            v: u32,
+            tool: String,
+        }
+
+        let root_path = PathBuf::from(request.path.as_deref().unwrap_or("."));
+        let root = match root_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid path: {e}"
+                ))]));
+            }
+        };
+        self.touch_daemon_best_effort(&root);
+        let root_display = root.to_string_lossy().to_string();
+
+        let max_chars = request
+            .max_chars
+            .unwrap_or(DEFAULT_MAX_CHARS)
+            .clamp(1, MAX_MAX_CHARS);
+        // Inner tool budgets must leave headroom for JSON overhead (especially `\\n` escaping).
+        let inner_max_chars = (max_chars / 2).max(1_000);
+
+        let mut intent = request.intent.unwrap_or(ReadPackIntent::Auto);
+        if matches!(intent, ReadPackIntent::Auto) {
+            if let Some(cursor) = request
+                .cursor
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let header: CursorHeader = match decode_cursor(cursor) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Invalid cursor: {err}"
+                        ))]));
+                    }
+                };
+                if header.v != CURSOR_VERSION {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Invalid cursor: wrong version",
+                    )]));
+                }
+                intent = match header.tool.as_str() {
+                    "file_slice" => ReadPackIntent::File,
+                    "grep_context" => ReadPackIntent::Grep,
+                    _ => {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "Invalid cursor: unsupported tool for read_pack",
+                        )]));
+                    }
+                };
+            } else if request
+                .query
+                .as_deref()
+                .is_some_and(|q| !q.trim().is_empty())
+            {
+                intent = ReadPackIntent::Query;
+            } else if request
+                .pattern
+                .as_deref()
+                .is_some_and(|p| !p.trim().is_empty())
+            {
+                intent = ReadPackIntent::Grep;
+            } else if request
+                .file
+                .as_deref()
+                .is_some_and(|f| !f.trim().is_empty())
+            {
+                intent = ReadPackIntent::File;
+            } else {
+                intent = ReadPackIntent::Onboarding;
+            }
+        }
+
+        let mut sections: Vec<ReadPackSection> = Vec::new();
+        let mut next_actions: Vec<ReadPackNextAction> = Vec::new();
+
+        match intent {
+            ReadPackIntent::Auto => unreachable!("auto intent resolved above"),
+            ReadPackIntent::File => {
+                let mut cursor_payload: Option<FileSliceCursorV1> = None;
+
+                let mut file = request
+                    .file
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .to_string();
+                let need_cursor_defaults = file.is_empty() || request.max_lines.is_none();
+                if need_cursor_defaults {
+                    if let Some(cursor) = request
+                        .cursor
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        let decoded: FileSliceCursorV1 = match decode_cursor(cursor) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                return Ok(CallToolResult::error(vec![Content::text(format!(
+                                    "Invalid cursor: {err}"
+                                ))]));
+                            }
+                        };
+                        if decoded.v != CURSOR_VERSION || decoded.tool != "file_slice" {
+                            return Ok(CallToolResult::error(vec![Content::text(
+                                "Invalid cursor: wrong tool",
+                            )]));
+                        }
+                        if decoded.root != root_display {
+                            return Ok(CallToolResult::error(vec![Content::text(
+                                "Invalid cursor: different root",
+                            )]));
+                        }
+                        if file.is_empty() {
+                            file = decoded.file.clone();
+                        }
+                        cursor_payload = Some(decoded);
+                    }
+                }
+                if file.is_empty() {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Error: file is required for intent=file",
+                    )]));
+                }
+                let max_lines = request
+                    .max_lines
+                    .or(cursor_payload.as_ref().map(|c| c.max_lines));
+
+                let slice = match compute_file_slice_result(
+                    &root,
+                    &root_display,
+                    &FileSliceRequest {
+                        path: None,
+                        file: file.clone(),
+                        start_line: request.start_line,
+                        max_lines,
+                        max_chars: Some(inner_max_chars),
+                        cursor: request.cursor.clone(),
+                    },
+                ) {
+                    Ok(result) => result,
+                    Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+                };
+
+                if let Some(next_cursor) = slice.next_cursor.as_deref() {
+                    next_actions.push(ReadPackNextAction {
+                        tool: "read_pack".to_string(),
+                        args: serde_json::json!({
+                            "path": root_display.clone(),
+                            "intent": "file",
+                            "file": file,
+                            "max_lines": slice.max_lines,
+                            "max_chars": max_chars,
+                            "cursor": next_cursor,
+                        }),
+                        reason: "Continue reading the next page of the file slice.".to_string(),
+                    });
+                }
+
+                sections.push(ReadPackSection::FileSlice { result: slice });
+            }
+            ReadPackIntent::Grep => {
+                let cursor_payload: Option<GrepContextCursorV1> = if let Some(cursor) = request
+                    .cursor
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    match decode_cursor(cursor) {
+                        Ok(v) => Some(v),
+                        Err(err) => {
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "Invalid cursor: {err}"
+                            ))]));
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let mut pattern = request
+                    .pattern
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .to_string();
+                if pattern.is_empty() {
+                    if let Some(decoded) = cursor_payload.as_ref() {
+                        if decoded.v != CURSOR_VERSION || decoded.tool != "grep_context" {
+                            return Ok(CallToolResult::error(vec![Content::text(
+                                "Invalid cursor: wrong tool",
+                            )]));
+                        }
+                        if decoded.root != root_display {
+                            return Ok(CallToolResult::error(vec![Content::text(
+                                "Invalid cursor: different root",
+                            )]));
+                        }
+                        pattern = decoded.pattern.clone();
+                    }
+                }
+                if pattern.is_empty() {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Error: pattern is required for intent=grep",
+                    )]));
+                }
+
+                let case_sensitive = request
+                    .case_sensitive
+                    .or(cursor_payload.as_ref().map(|c| c.case_sensitive))
+                    .unwrap_or(true);
+                let regex = match RegexBuilder::new(&pattern)
+                    .case_insensitive(!case_sensitive)
+                    .build()
+                {
+                    Ok(re) => re,
+                    Err(err) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Invalid regex: {err}"
+                        ))]));
+                    }
+                };
+
+                let before = request
+                    .before
+                    .or(cursor_payload.as_ref().map(|c| c.before))
+                    .unwrap_or(DEFAULT_GREP_CONTEXT)
+                    .clamp(0, 5_000);
+                let after = request
+                    .after
+                    .or(cursor_payload.as_ref().map(|c| c.after))
+                    .unwrap_or(DEFAULT_GREP_CONTEXT)
+                    .clamp(0, 5_000);
+
+                let normalized_file = request
+                    .file
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| cursor_payload.as_ref().and_then(|c| c.file.clone()));
+                let normalized_file_pattern = request
+                    .file_pattern
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| cursor_payload.as_ref().and_then(|c| c.file_pattern.clone()));
+
+                let mut resume_file: Option<String> = None;
+                let mut resume_line = 1usize;
+                if let Some(decoded) = cursor_payload.as_ref() {
+                    if decoded.v != CURSOR_VERSION || decoded.tool != "grep_context" {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "Invalid cursor: wrong tool",
+                        )]));
+                    }
+                    if decoded.root != root_display {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "Invalid cursor: different root",
+                        )]));
+                    }
+                    if decoded.pattern != pattern {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "Invalid cursor: different pattern",
+                        )]));
+                    }
+                    if decoded.file != normalized_file {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "Invalid cursor: different file",
+                        )]));
+                    }
+                    if decoded.file_pattern != normalized_file_pattern {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "Invalid cursor: different file_pattern",
+                        )]));
+                    }
+                    if decoded.case_sensitive != case_sensitive
+                        || decoded.before != before
+                        || decoded.after != after
+                    {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "Invalid cursor: different search options",
+                        )]));
+                    }
+                    resume_file = Some(decoded.resume_file.clone());
+                    resume_line = decoded.resume_line.max(1);
+                }
+
+                let grep_request = GrepContextRequest {
+                    path: None,
+                    pattern: pattern.clone(),
+                    file: normalized_file,
+                    file_pattern: normalized_file_pattern,
+                    context: None,
+                    before: Some(before),
+                    after: Some(after),
+                    max_matches: Some(2_000),
+                    max_hunks: Some(200),
+                    max_chars: Some(inner_max_chars),
+                    case_sensitive: Some(case_sensitive),
+                    cursor: None,
+                };
+
+                let result = match compute_grep_context_result(
+                    &root,
+                    &root_display,
+                    &grep_request,
+                    &regex,
+                    GrepContextComputeOptions {
+                        case_sensitive,
+                        before,
+                        after,
+                        max_matches: 2_000,
+                        max_hunks: 200,
+                        max_chars: inner_max_chars,
+                        resume_file: resume_file.as_deref(),
+                        resume_line,
+                    },
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(err) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Error: {err:#}"
+                        ))]));
+                    }
+                };
+
+                if let Some(next_cursor) = result.next_cursor.as_deref() {
+                    next_actions.push(ReadPackNextAction {
+                        tool: "read_pack".to_string(),
+                        args: serde_json::json!({
+                            "path": root_display.clone(),
+                            "intent": "grep",
+                            "pattern": pattern,
+                            "file": grep_request.file,
+                            "file_pattern": grep_request.file_pattern,
+                            "before": before,
+                            "after": after,
+                            "case_sensitive": case_sensitive,
+                            "max_chars": max_chars,
+                            "cursor": next_cursor,
+                        }),
+                        reason: "Continue grep_context pagination (next page of hunks)."
+                            .to_string(),
+                    });
+                }
+
+                sections.push(ReadPackSection::GrepContext { result });
+            }
+            ReadPackIntent::Query => {
+                let query = request.query.as_deref().unwrap_or("").trim().to_string();
+                if query.is_empty() {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Error: query is required for intent=query",
+                    )]));
+                }
+
+                let tool_result = match self
+                    .context_pack(Parameters(ContextPackRequest {
+                        path: Some(root_display.clone()),
+                        query,
+                        language: None,
+                        strategy: None,
+                        limit: None,
+                        max_chars: Some(inner_max_chars),
+                        max_related_per_primary: None,
+                        include_docs: request.include_docs,
+                        prefer_code: request.prefer_code,
+                        related_mode: None,
+                        auto_index: Some(true),
+                        trace: Some(false),
+                    }))
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(err) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Error: {err}"
+                        ))]));
+                    }
+                };
+
+                if tool_result.is_error == Some(true) {
+                    return Ok(tool_result);
+                }
+
+                let text = tool_result
+                    .content
+                    .first()
+                    .and_then(|c| c.as_text())
+                    .map(|t| t.text.as_str())
+                    .unwrap_or("");
+                let value: serde_json::Value = match serde_json::from_str(text) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Error: context_pack returned invalid JSON: {err}"
+                        ))]));
+                    }
+                };
+
+                sections.push(ReadPackSection::ContextPack { result: value });
+            }
+            ReadPackIntent::Onboarding => {
+                let onboarding_request = RepoOnboardingPackRequest {
+                    path: Some(root_display.clone()),
+                    map_depth: None,
+                    map_limit: None,
+                    doc_paths: None,
+                    docs_limit: None,
+                    doc_max_lines: None,
+                    doc_max_chars: None,
+                    max_chars: Some(inner_max_chars),
+                };
+
+                let pack = match compute_repo_onboarding_pack_result(
+                    &root,
+                    &root_display,
+                    &onboarding_request,
+                )
+                .await
+                {
+                    Ok(pack) => pack,
+                    Err(err) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Error: {err:#}"
+                        ))]));
+                    }
+                };
+
+                sections.push(ReadPackSection::RepoOnboardingPack { result: pack });
+            }
+        }
+
+        let mut result = ReadPackResult {
+            version: VERSION,
+            intent,
+            root: root_display.clone(),
+            sections,
+            next_actions,
+            budget: ReadPackBudget {
+                max_chars,
+                used_chars: 0,
+                truncated: false,
+                truncation: None,
+            },
+        };
+
+        if let Err(err) = finalize_read_pack_budget(&mut result) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Error: {err:#}"
+            ))]));
+        }
+
+        while result.budget.used_chars > max_chars && !result.next_actions.is_empty() {
+            result.next_actions.pop();
+            result.budget.truncated = true;
+            result.budget.truncation = Some(ReadPackTruncation::MaxChars);
+            let _ = finalize_read_pack_budget(&mut result);
+        }
+        while result.budget.used_chars > max_chars && !result.sections.is_empty() {
+            result.sections.pop();
+            result.budget.truncated = true;
+            result.budget.truncation = Some(ReadPackTruncation::MaxChars);
+            let _ = finalize_read_pack_budget(&mut result);
+        }
+        if result.budget.used_chars > max_chars {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "max_chars={max_chars} is too small for the read_pack payload"
+            ))]));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string(&result).unwrap_or_default(),
         )]))
     }
 
@@ -5606,6 +5912,416 @@ fn finalize_repo_onboarding_budget(result: &mut RepoOnboardingPackResult) -> any
     Ok(())
 }
 
+fn finalize_read_pack_budget(result: &mut ReadPackResult) -> anyhow::Result<()> {
+    let mut used = 0usize;
+    for _ in 0..8 {
+        result.budget.used_chars = used;
+        let raw = serde_json::to_string(result)?;
+        let next = raw.chars().count();
+        if next == used {
+            result.budget.used_chars = next;
+            return Ok(());
+        }
+        used = next;
+    }
+
+    result.budget.used_chars = used;
+    Ok(())
+}
+
+async fn compute_repo_onboarding_pack_result(
+    root: &Path,
+    root_display: &str,
+    request: &RepoOnboardingPackRequest,
+) -> Result<RepoOnboardingPackResult> {
+    const VERSION: u32 = 1;
+    const DEFAULT_MAX_CHARS: usize = 20_000;
+    const MAX_MAX_CHARS: usize = 500_000;
+    const DEFAULT_MAP_DEPTH: usize = 2;
+    const DEFAULT_MAP_LIMIT: usize = 20;
+    const DEFAULT_DOCS_LIMIT: usize = 8;
+    const MAX_DOCS_LIMIT: usize = 25;
+    const DEFAULT_DOC_MAX_LINES: usize = 200;
+    const MAX_DOC_MAX_LINES: usize = 5_000;
+    const DEFAULT_DOC_MAX_CHARS: usize = 6_000;
+    const MAX_DOC_MAX_CHARS: usize = 100_000;
+
+    let max_chars = request
+        .max_chars
+        .unwrap_or(DEFAULT_MAX_CHARS)
+        .clamp(1, MAX_MAX_CHARS);
+    let map_depth = request.map_depth.unwrap_or(DEFAULT_MAP_DEPTH).clamp(1, 4);
+    let map_limit = request.map_limit.unwrap_or(DEFAULT_MAP_LIMIT).clamp(1, 200);
+    let docs_limit = request
+        .docs_limit
+        .unwrap_or(DEFAULT_DOCS_LIMIT)
+        .clamp(0, MAX_DOCS_LIMIT);
+    let doc_max_lines = request
+        .doc_max_lines
+        .unwrap_or(DEFAULT_DOC_MAX_LINES)
+        .clamp(1, MAX_DOC_MAX_LINES);
+    let doc_max_chars = request
+        .doc_max_chars
+        .unwrap_or(DEFAULT_DOC_MAX_CHARS)
+        .clamp(1, MAX_DOC_MAX_CHARS);
+
+    let map = compute_map_result(root, root_display, map_depth, map_limit, 0).await?;
+
+    let has_corpus = match ContextFinderService::load_chunk_corpus(root).await {
+        Ok(v) => v.is_some(),
+        Err(_) => false,
+    };
+
+    let root_display_owned = root_display.to_string();
+
+    let mut next_actions = Vec::new();
+    if !has_corpus {
+        next_actions.push(RepoOnboardingNextAction {
+            tool: "index".to_string(),
+            args: serde_json::json!({ "path": root_display_owned.clone() }),
+            reason: "Build the semantic index (enables search/context/context_pack/impact/trace)."
+                .to_string(),
+        });
+    }
+    next_actions.push(RepoOnboardingNextAction {
+        tool: "grep_context".to_string(),
+        args: serde_json::json!({
+            "path": root_display_owned.clone(),
+            "pattern": "TODO|FIXME",
+            "context": 10,
+            "max_hunks": 50,
+        }),
+        reason: "Scan for TODO/FIXME across the repo with surrounding context hunks.".to_string(),
+    });
+    next_actions.push(RepoOnboardingNextAction {
+        tool: "batch".to_string(),
+        args: serde_json::json!({
+            "version": 2,
+            "path": root_display_owned.clone(),
+            "max_chars": 20000,
+            "items": [
+                { "id": "docs", "tool": "list_files", "input": { "file_pattern": "*.md", "limit": 200 } },
+                { "id": "read", "tool": "file_slice", "input": { "file": { "$ref": "#/items/docs/data/files/0" }, "start_line": 1, "max_lines": 200 } }
+            ]
+        }),
+        reason: "Example: chain tools in one call with `$ref` dependencies (batch v2).".to_string(),
+    });
+    if has_corpus {
+        next_actions.push(RepoOnboardingNextAction {
+            tool: "context_pack".to_string(),
+            args: serde_json::json!({
+                "path": root_display_owned.clone(),
+                "query": "describe what you want to change",
+                "strategy": "extended",
+                "max_chars": 20000,
+            }),
+            reason: "One-shot semantic onboarding pack for a concrete question.".to_string(),
+        });
+    }
+
+    let default_doc_candidates = [
+        "README.md",
+        "docs/README.md",
+        "docs/QUICK_START.md",
+        "USAGE_EXAMPLES.md",
+        "PHILOSOPHY.md",
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "docs/COMMAND_RFC.md",
+    ];
+
+    let mut seen = HashSet::new();
+    let mut doc_candidates: Vec<String> = Vec::new();
+    if let Some(custom) = request.doc_paths.as_ref() {
+        for rel in custom {
+            let rel = rel.trim();
+            if rel.is_empty() {
+                continue;
+            }
+            let rel = rel.replace('\\', "/");
+            if seen.insert(rel.clone()) {
+                doc_candidates.push(rel);
+            }
+        }
+    } else {
+        for rel in default_doc_candidates {
+            if seen.insert(rel.to_string()) {
+                doc_candidates.push(rel.to_string());
+            }
+        }
+    }
+
+    let mut result = RepoOnboardingPackResult {
+        version: VERSION,
+        root: root_display_owned.clone(),
+        map,
+        docs: Vec::new(),
+        next_actions,
+        budget: RepoOnboardingPackBudget {
+            max_chars,
+            used_chars: 0,
+            truncated: false,
+            truncation: None,
+        },
+    };
+
+    let mut docs_included = 0usize;
+    for (idx, rel) in doc_candidates.iter().enumerate() {
+        if docs_included >= docs_limit {
+            result.budget.truncated = true;
+            result.budget.truncation = Some(RepoOnboardingPackTruncation::DocsLimit);
+            break;
+        }
+
+        let slice = match compute_onboarding_doc_slice(root, rel, 1, doc_max_lines, doc_max_chars) {
+            Ok(slice) => slice,
+            Err(_) => continue,
+        };
+        result.docs.push(slice);
+        docs_included += 1;
+
+        finalize_repo_onboarding_budget(&mut result)?;
+        if result.budget.used_chars > max_chars {
+            result.docs.pop();
+            result.budget.truncated = true;
+            result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
+            let _ = finalize_repo_onboarding_budget(&mut result);
+            break;
+        }
+
+        if idx + 1 >= doc_candidates.len() {
+            break;
+        }
+    }
+
+    finalize_repo_onboarding_budget(&mut result)?;
+    while result.budget.used_chars > max_chars && !result.next_actions.is_empty() {
+        result.next_actions.pop();
+        result.budget.truncated = true;
+        result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
+        let _ = finalize_repo_onboarding_budget(&mut result);
+    }
+    while result.budget.used_chars > max_chars && !result.docs.is_empty() {
+        result.docs.pop();
+        result.budget.truncated = true;
+        result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
+        let _ = finalize_repo_onboarding_budget(&mut result);
+    }
+    if result.budget.used_chars > max_chars {
+        anyhow::bail!("max_chars={max_chars} is too small for the onboarding pack payload");
+    }
+
+    Ok(result)
+}
+
+fn compute_file_slice_result(
+    root: &Path,
+    root_display: &str,
+    request: &FileSliceRequest,
+) -> std::result::Result<FileSliceResult, String> {
+    const DEFAULT_MAX_LINES: usize = 200;
+    const MAX_MAX_LINES: usize = 5_000;
+    const DEFAULT_MAX_CHARS: usize = 20_000;
+    const MAX_MAX_CHARS: usize = 500_000;
+
+    let file_str = request.file.trim();
+    if file_str.is_empty() {
+        return Err("File must not be empty".to_string());
+    }
+
+    let candidate = {
+        let input_path = Path::new(file_str);
+        if input_path.is_absolute() {
+            PathBuf::from(input_path)
+        } else {
+            root.join(input_path)
+        }
+    };
+
+    let canonical_file = match candidate.canonicalize() {
+        Ok(p) => p,
+        Err(e) => return Err(format!("Invalid file '{file_str}': {e}")),
+    };
+
+    if !canonical_file.starts_with(root) {
+        return Err(format!("File '{file_str}' is outside project root"));
+    }
+
+    let display_file = normalize_relative_path(root, &canonical_file).unwrap_or_else(|| {
+        canonical_file
+            .to_string_lossy()
+            .into_owned()
+            .replace('\\', "/")
+    });
+
+    let meta = match std::fs::metadata(&canonical_file) {
+        Ok(m) => m,
+        Err(e) => return Err(format!("Failed to stat '{display_file}': {e}")),
+    };
+    let file_size_bytes = meta.len();
+    let file_mtime_ms = meta.modified().map(unix_ms).unwrap_or(0);
+
+    let max_lines = request
+        .max_lines
+        .unwrap_or(DEFAULT_MAX_LINES)
+        .clamp(1, MAX_MAX_LINES);
+    let max_chars = request
+        .max_chars
+        .unwrap_or(DEFAULT_MAX_CHARS)
+        .clamp(1, MAX_MAX_CHARS);
+
+    let mut using_cursor = false;
+    let mut start_line = request.start_line.unwrap_or(1).max(1);
+    let mut start_byte_offset: u64 = 0;
+    if let Some(cursor) = request
+        .cursor
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        using_cursor = true;
+        let decoded: FileSliceCursorV1 =
+            decode_cursor(cursor).map_err(|err| format!("Invalid cursor: {err}"))?;
+        if decoded.v != CURSOR_VERSION || decoded.tool != "file_slice" {
+            return Err("Invalid cursor: wrong tool".to_string());
+        }
+        if decoded.root != root_display {
+            return Err("Invalid cursor: different root".to_string());
+        }
+        if decoded.file != display_file {
+            return Err("Invalid cursor: different file".to_string());
+        }
+        if decoded.max_lines != max_lines {
+            return Err("Invalid cursor: different max_lines".to_string());
+        }
+        if decoded.max_chars != max_chars {
+            return Err("Invalid cursor: different max_chars".to_string());
+        }
+        if decoded.file_size_bytes != file_size_bytes || decoded.file_mtime_ms != file_mtime_ms {
+            return Err("Invalid cursor: file changed".to_string());
+        }
+        if decoded.next_byte_offset > file_size_bytes {
+            return Err("Invalid cursor: out of range".to_string());
+        }
+        start_line = decoded.next_start_line.max(1);
+        start_byte_offset = decoded.next_byte_offset;
+    }
+
+    let file = std::fs::File::open(&canonical_file)
+        .map_err(|e| format!("Failed to open '{display_file}': {e}"))?;
+    let mut reader = BufReader::new(file);
+    if start_byte_offset > 0 {
+        reader
+            .seek(std::io::SeekFrom::Start(start_byte_offset))
+            .map_err(|e| format!("Failed to seek '{display_file}': {e}"))?;
+    }
+
+    let mut content = String::new();
+    let mut used_chars = 0usize;
+    let mut returned_lines = 0usize;
+    let mut end_line = 0usize;
+    let mut truncated = false;
+    let mut truncation: Option<FileSliceTruncation> = None;
+    let mut next_cursor: Option<String> = None;
+
+    let mut current_offset = start_byte_offset;
+    let mut line_no = if using_cursor { start_line } else { 1 };
+    let mut buf = String::new();
+    loop {
+        let pos_before_read = current_offset;
+        buf.clear();
+        let bytes_read = reader
+            .read_line(&mut buf)
+            .map_err(|e| format!("Failed to read '{display_file}': {e}"))?;
+        if bytes_read == 0 {
+            break;
+        }
+        current_offset = current_offset.saturating_add(bytes_read as u64);
+
+        let line = buf.trim_end_matches('\n').trim_end_matches('\r');
+
+        if line_no < start_line {
+            line_no = line_no.saturating_add(1);
+            continue;
+        }
+
+        if returned_lines >= max_lines {
+            truncated = true;
+            truncation = Some(FileSliceTruncation::MaxLines);
+            let token = FileSliceCursorV1 {
+                v: CURSOR_VERSION,
+                tool: "file_slice".to_string(),
+                root: root_display.to_string(),
+                file: display_file.clone(),
+                max_lines,
+                max_chars,
+                next_start_line: line_no,
+                next_byte_offset: pos_before_read,
+                file_size_bytes,
+                file_mtime_ms,
+            };
+            next_cursor = Some(encode_cursor(&token).map_err(|err| format!("Error: {err:#}"))?);
+            break;
+        }
+
+        let line_chars = line.chars().count();
+        let extra_chars = if returned_lines == 0 {
+            line_chars
+        } else {
+            1 + line_chars
+        };
+        if used_chars.saturating_add(extra_chars) > max_chars {
+            truncated = true;
+            truncation = Some(FileSliceTruncation::MaxChars);
+            let token = FileSliceCursorV1 {
+                v: CURSOR_VERSION,
+                tool: "file_slice".to_string(),
+                root: root_display.to_string(),
+                file: display_file.clone(),
+                max_lines,
+                max_chars,
+                next_start_line: line_no,
+                next_byte_offset: pos_before_read,
+                file_size_bytes,
+                file_mtime_ms,
+            };
+            next_cursor = Some(encode_cursor(&token).map_err(|err| format!("Error: {err:#}"))?);
+            break;
+        }
+
+        if returned_lines > 0 {
+            content.push('\n');
+            used_chars += 1;
+        }
+        content.push_str(line);
+        used_chars += line_chars;
+        returned_lines += 1;
+        end_line = line_no;
+        line_no = line_no.saturating_add(1);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let content_sha256 = hex_encode_lower(&hasher.finalize());
+
+    Ok(FileSliceResult {
+        file: display_file,
+        start_line,
+        end_line,
+        returned_lines,
+        used_chars,
+        max_lines,
+        max_chars,
+        truncated,
+        truncation,
+        next_cursor,
+        file_size_bytes,
+        file_mtime_ms,
+        content_sha256,
+        content,
+    })
+}
+
 fn compute_onboarding_doc_slice(
     root: &Path,
     file: &str,
@@ -5704,6 +6420,7 @@ fn compute_onboarding_doc_slice(
         max_chars,
         truncated,
         truncation,
+        next_cursor: None,
         file_size_bytes,
         file_mtime_ms,
         content_sha256,

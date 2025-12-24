@@ -20,7 +20,7 @@ If you are integrating Context Finder programmatically, treat the **contracts** 
 
 - [docs/COMMAND_RFC.md](COMMAND_RFC.md) — Command API overview (links to canonical schemas)
 - [docs/CONTEXT_PACK.md](CONTEXT_PACK.md) — Context Pack v1 overview (links to canonical schema)
-- MCP: tool contracts live in [crates/mcp-server/src/tools.rs](../crates/mcp-server/src/tools.rs) (includes `repo_onboarding_pack` for one-call onboarding, `grep_context` for regex context reads, `batch` for one-call orchestration with optional `$ref` dependencies, and cursor pagination for large outputs)
+- MCP: tool contracts live in [crates/mcp-server/src/tools.rs](../crates/mcp-server/src/tools.rs) (includes `repo_onboarding_pack` for one-call onboarding, `read_pack` as a semantic reading facade, `grep_context` for regex context reads, `file_slice` for bounded file reads with pagination, `batch` for one-call orchestration with optional `$ref` dependencies, and cursor pagination for large outputs)
 
 ## Contribution / dev workflow
 

@@ -219,7 +219,61 @@ Use this as the default first step when dropped into a new repository:
 }
 ```
 
-### 2) Read all regex matches with context: `grep_context`
+### 2) One-call reading pack (file/grep/query): `read_pack`
+
+Use `read_pack` when you want a single entry point and cursor-only continuation.
+It returns `sections[]` where each section has `{ "type": "...", "result": { ... } }` (the underlying tool output).
+
+Read a file window (internally calls `file_slice`):
+
+```jsonc
+{
+  "path": "/path/to/project",
+  "intent": "file",
+  "file": "src/lib.rs",
+  "start_line": 120,
+  "max_lines": 80,
+  "max_chars": 20000
+}
+```
+
+Continue without repeating inputs:
+
+```jsonc
+{
+  "path": "/path/to/project",
+  "cursor": "<next_cursor>"
+}
+```
+
+Read all regex matches with N lines of context (internally calls `grep_context`):
+
+```jsonc
+{
+  "path": "/path/to/project",
+  "intent": "grep",
+  "pattern": "stale_policy",
+  "file_pattern": "crates/*/src/*",
+  "before": 50,
+  "after": 50,
+  "max_chars": 20000
+}
+```
+
+Build a bounded semantic context pack (internally calls `context_pack`):
+
+```jsonc
+{
+  "path": "/path/to/project",
+  "intent": "query",
+  "query": "stale policy gate",
+  "prefer_code": true,
+  "include_docs": false,
+  "max_chars": 20000
+}
+```
+
+### 3) Read all regex matches with context: `grep_context`
 
 This is the “grep -B/-A/-C, but bounded and merge-aware” tool for agents:
 
@@ -235,13 +289,22 @@ This is the “grep -B/-A/-C, but bounded and merge-aware” tool for agents:
 }
 ```
 
-### 3) Pagination (cursor)
+### 4) Pagination (cursor)
 
 When a tool response includes `truncated: true` and `next_cursor`, continue by repeating the call with the same options + `cursor: "<next_cursor>"`.
 
-This works for: `map`, `list_files`, `text_search`, `grep_context`.
+This works for: `map`, `list_files`, `text_search`, `grep_context`, `file_slice`.
 
-### 4) Batch v2 ($ref dependencies): chain tools in one call
+For `read_pack`, take the cursor from `sections[0].result.next_cursor` and continue with a cursor-only call:
+
+```jsonc
+{
+  "path": "/path/to/project",
+  "cursor": "<next_cursor>"
+}
+```
+
+### 5) Batch v2 ($ref dependencies): chain tools in one call
 
 Batch `version: 2` lets item inputs reference previous item outputs via JSON Pointer `$ref` (with optional `$default` fallback):
 

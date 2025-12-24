@@ -205,6 +205,26 @@ Repo onboarding pack tool (best default for agents; one call → `map` + key doc
 }
 ```
 
+One-call reading pack tool (`read_pack`; a single entry point for file/grep/query/onboarding, with cursor-only continuation):
+
+```jsonc
+// Read a file window (internally calls file_slice)
+{
+  "path": "/path/to/project",
+  "intent": "file",
+  "file": "src/lib.rs",
+  "start_line": 120,
+  "max_lines": 80,
+  "max_chars": 20000
+}
+
+// Continue without repeating inputs
+{
+  "path": "/path/to/project",
+  "cursor": "<next_cursor>"
+}
+```
+
 Regex context reads tool (`grep_context`; grep `-B/-A/-C` style, merged hunks, bounded output):
 
 ```jsonc
@@ -258,6 +278,18 @@ File slice tool (bounded, root-locked file read; designed to replace ad-hoc `cat
   "path": "/path/to/project",
   "file": "src/lib.rs",
   "start_line": 120,
+  "max_lines": 80,
+  "max_chars": 8000
+}
+```
+
+If the response is truncated, continue with `cursor` (keep the same limits):
+
+```jsonc
+{
+  "path": "/path/to/project",
+  "file": "src/lib.rs",
+  "cursor": "<next_cursor>",
   "max_lines": 80,
   "max_chars": 8000
 }
