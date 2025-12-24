@@ -45,6 +45,7 @@ async fn grep_context_works_without_index_and_merges_ranges() -> Result<()> {
     cmd.env_remove("CONTEXT_FINDER_MODEL_DIR");
     cmd.env("CONTEXT_FINDER_PROFILE", "quality");
     cmd.env("RUST_LOG", "warn");
+    cmd.env("CONTEXT_FINDER_DISABLE_DAEMON", "1");
 
     let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
     let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))
@@ -161,6 +162,7 @@ async fn grep_context_can_be_case_insensitive_and_reports_max_chars_truncation()
     cmd.env_remove("CONTEXT_FINDER_MODEL_DIR");
     cmd.env("CONTEXT_FINDER_PROFILE", "quality");
     cmd.env("RUST_LOG", "warn");
+    cmd.env("CONTEXT_FINDER_DISABLE_DAEMON", "1");
 
     let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
     let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))

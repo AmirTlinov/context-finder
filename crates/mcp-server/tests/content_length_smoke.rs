@@ -78,6 +78,7 @@ async fn mcp_supports_content_length_framing() -> Result<()> {
     cmd.env("CONTEXT_FINDER_PROFILE", "quality");
     cmd.env("CONTEXT_FINDER_EMBEDDING_MODE", "stub");
     cmd.env_remove("CONTEXT_FINDER_DAEMON_EXE");
+    cmd.env("CONTEXT_FINDER_DISABLE_DAEMON", "1");
     cmd.env("RUST_LOG", "warn");
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());

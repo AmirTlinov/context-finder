@@ -126,6 +126,13 @@ impl ContextFinderService {
     }
 
     fn touch_daemon_best_effort(&self, root: &Path) {
+        let disable = std::env::var("CONTEXT_FINDER_DISABLE_DAEMON")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if disable {
+            return;
+        }
+
         let root = root.to_path_buf();
         tokio::spawn(async move {
             if let Err(err) = crate::daemon::touch(&root).await {
@@ -1486,6 +1493,77 @@ pub struct GrepContextResult {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RepoOnboardingPackRequest {
+    /// Project directory path
+    #[schemars(description = "Project directory path")]
+    pub path: Option<String>,
+
+    /// Directory depth for aggregation (default: 2)
+    #[schemars(description = "Directory depth for grouping (1-4)")]
+    pub map_depth: Option<usize>,
+
+    /// Maximum number of directories to return (default: 20)
+    #[schemars(description = "Limit number of map nodes returned")]
+    pub map_limit: Option<usize>,
+
+    /// Optional explicit doc file paths to include (relative to project root). If omitted, uses a
+    /// built-in prioritized list (README/AGENTS/docs/...).
+    #[schemars(
+        description = "Optional explicit doc file paths to include (relative to project root)"
+    )]
+    pub doc_paths: Option<Vec<String>>,
+
+    /// Maximum number of docs to include (default: 8)
+    #[schemars(description = "Maximum number of docs to include (bounded)")]
+    pub docs_limit: Option<usize>,
+
+    /// Max lines per doc slice (default: 200)
+    #[schemars(description = "Max lines per doc slice")]
+    pub doc_max_lines: Option<usize>,
+
+    /// Max chars per doc slice (default: 6000)
+    #[schemars(description = "Max UTF-8 chars per doc slice")]
+    pub doc_max_chars: Option<usize>,
+
+    /// Maximum number of UTF-8 characters for the entire onboarding pack (default: 20000)
+    #[schemars(description = "Maximum number of UTF-8 characters for the onboarding pack")]
+    pub max_chars: Option<usize>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoOnboardingPackTruncation {
+    MaxChars,
+    DocsLimit,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct RepoOnboardingPackBudget {
+    pub max_chars: usize,
+    pub used_chars: usize,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<RepoOnboardingPackTruncation>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct RepoOnboardingNextAction {
+    pub tool: String,
+    pub args: serde_json::Value,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct RepoOnboardingPackResult {
+    pub version: u32,
+    pub root: String,
+    pub map: MapResult,
+    pub docs: Vec<FileSliceResult>,
+    pub next_actions: Vec<RepoOnboardingNextAction>,
+    pub budget: RepoOnboardingPackBudget,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DoctorRequest {
     /// Project directory path (optional)
     #[schemars(description = "Project directory path (optional)")]
@@ -1560,6 +1638,10 @@ pub enum BatchToolName {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct BatchRequest {
+    /// Batch schema version (default: 1)
+    #[schemars(description = "Batch schema version (default: 1)")]
+    pub version: Option<u32>,
+
     /// Project directory path (defaults to current directory)
     #[schemars(description = "Project directory path (defaults to current directory)")]
     pub path: Option<String>,
@@ -2199,6 +2281,227 @@ impl ContextFinderService {
         )]))
     }
 
+    /// Repo onboarding pack (map + key docs slices + next actions).
+    #[tool(
+        description = "Build a repo onboarding pack: map + key docs (via file slices) + next actions. Returns a single bounded JSON response for fast project adoption."
+    )]
+    pub async fn repo_onboarding_pack(
+        &self,
+        Parameters(request): Parameters<RepoOnboardingPackRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        const VERSION: u32 = 1;
+        const DEFAULT_MAX_CHARS: usize = 20_000;
+        const MAX_MAX_CHARS: usize = 500_000;
+        const DEFAULT_MAP_DEPTH: usize = 2;
+        const DEFAULT_MAP_LIMIT: usize = 20;
+        const DEFAULT_DOCS_LIMIT: usize = 8;
+        const MAX_DOCS_LIMIT: usize = 25;
+        const DEFAULT_DOC_MAX_LINES: usize = 200;
+        const MAX_DOC_MAX_LINES: usize = 5_000;
+        const DEFAULT_DOC_MAX_CHARS: usize = 6_000;
+        const MAX_DOC_MAX_CHARS: usize = 100_000;
+
+        let root_path = PathBuf::from(request.path.as_deref().unwrap_or("."));
+        let root = match root_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid path: {e}"
+                ))]));
+            }
+        };
+        self.touch_daemon_best_effort(&root);
+
+        let max_chars = request
+            .max_chars
+            .unwrap_or(DEFAULT_MAX_CHARS)
+            .clamp(1, MAX_MAX_CHARS);
+        let map_depth = request.map_depth.unwrap_or(DEFAULT_MAP_DEPTH).clamp(1, 4);
+        let map_limit = request.map_limit.unwrap_or(DEFAULT_MAP_LIMIT).clamp(1, 200);
+        let docs_limit = request
+            .docs_limit
+            .unwrap_or(DEFAULT_DOCS_LIMIT)
+            .clamp(0, MAX_DOCS_LIMIT);
+        let doc_max_lines = request
+            .doc_max_lines
+            .unwrap_or(DEFAULT_DOC_MAX_LINES)
+            .clamp(1, MAX_DOC_MAX_LINES);
+        let doc_max_chars = request
+            .doc_max_chars
+            .unwrap_or(DEFAULT_DOC_MAX_CHARS)
+            .clamp(1, MAX_DOC_MAX_CHARS);
+
+        let map = match compute_map_result(&root, map_depth, map_limit).await {
+            Ok(result) => result,
+            Err(err) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Error: {err:#}"
+                ))]));
+            }
+        };
+
+        let root_display = root.to_string_lossy().to_string();
+
+        let has_corpus = match Self::load_chunk_corpus(&root).await {
+            Ok(v) => v.is_some(),
+            Err(_) => false,
+        };
+
+        let mut next_actions = Vec::new();
+        if !has_corpus {
+            next_actions.push(RepoOnboardingNextAction {
+                tool: "index".to_string(),
+                args: serde_json::json!({ "path": root_display.clone() }),
+                reason:
+                    "Build the semantic index (enables search/context/context_pack/impact/trace)."
+                        .to_string(),
+            });
+        }
+        next_actions.push(RepoOnboardingNextAction {
+            tool: "grep_context".to_string(),
+            args: serde_json::json!({
+                "path": root_display.clone(),
+                "pattern": "TODO|FIXME",
+                "context": 10,
+                "max_hunks": 50,
+            }),
+            reason: "Scan for TODO/FIXME across the repo with surrounding context hunks."
+                .to_string(),
+        });
+        next_actions.push(RepoOnboardingNextAction {
+            tool: "batch".to_string(),
+            args: serde_json::json!({
+                "version": 2,
+                "path": root_display.clone(),
+                "max_chars": 20000,
+                "items": [
+                    { "id": "docs", "tool": "list_files", "input": { "file_pattern": "*.md", "limit": 200 } },
+                    { "id": "read", "tool": "file_slice", "input": { "file": { "$ref": "#/items/docs/data/files/0" }, "start_line": 1, "max_lines": 200 } }
+                ]
+            }),
+            reason: "Example: chain tools in one call with `$ref` dependencies (batch v2).".to_string(),
+        });
+        if has_corpus {
+            next_actions.push(RepoOnboardingNextAction {
+                tool: "context_pack".to_string(),
+                args: serde_json::json!({
+                    "path": root_display.clone(),
+                    "query": "describe what you want to change",
+                    "strategy": "extended",
+                    "max_chars": 20000,
+                }),
+                reason: "One-shot semantic onboarding pack for a concrete question.".to_string(),
+            });
+        }
+
+        let default_doc_candidates = [
+            "README.md",
+            "docs/README.md",
+            "docs/QUICK_START.md",
+            "USAGE_EXAMPLES.md",
+            "PHILOSOPHY.md",
+            "AGENTS.md",
+            "CONTRIBUTING.md",
+            "docs/COMMAND_RFC.md",
+        ];
+
+        let mut seen = HashSet::new();
+        let mut doc_candidates: Vec<String> = Vec::new();
+        if let Some(custom) = request.doc_paths.as_ref() {
+            for rel in custom {
+                let rel = rel.trim();
+                if rel.is_empty() {
+                    continue;
+                }
+                let rel = rel.replace('\\', "/");
+                if seen.insert(rel.clone()) {
+                    doc_candidates.push(rel);
+                }
+            }
+        } else {
+            for rel in default_doc_candidates {
+                if seen.insert(rel.to_string()) {
+                    doc_candidates.push(rel.to_string());
+                }
+            }
+        }
+
+        let mut result = RepoOnboardingPackResult {
+            version: VERSION,
+            root: root_display.clone(),
+            map,
+            docs: Vec::new(),
+            next_actions,
+            budget: RepoOnboardingPackBudget {
+                max_chars,
+                used_chars: 0,
+                truncated: false,
+                truncation: None,
+            },
+        };
+
+        let mut docs_included = 0usize;
+        for (idx, rel) in doc_candidates.iter().enumerate() {
+            if docs_included >= docs_limit {
+                result.budget.truncated = true;
+                result.budget.truncation = Some(RepoOnboardingPackTruncation::DocsLimit);
+                break;
+            }
+
+            let slice =
+                match compute_onboarding_doc_slice(&root, rel, 1, doc_max_lines, doc_max_chars) {
+                    Ok(slice) => slice,
+                    Err(_) => continue,
+                };
+            result.docs.push(slice);
+            docs_included += 1;
+
+            if let Err(err) = finalize_repo_onboarding_budget(&mut result) {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Error: {err:#}"
+                ))]));
+            }
+            if result.budget.used_chars > max_chars {
+                result.docs.pop();
+                result.budget.truncated = true;
+                result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
+                let _ = finalize_repo_onboarding_budget(&mut result);
+                break;
+            }
+
+            if idx + 1 >= doc_candidates.len() {
+                break;
+            }
+        }
+
+        if let Err(err) = finalize_repo_onboarding_budget(&mut result) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Error: {err:#}"
+            ))]));
+        }
+        while result.budget.used_chars > max_chars && !result.next_actions.is_empty() {
+            result.next_actions.pop();
+            result.budget.truncated = true;
+            result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
+            let _ = finalize_repo_onboarding_budget(&mut result);
+        }
+        while result.budget.used_chars > max_chars && !result.docs.is_empty() {
+            result.docs.pop();
+            result.budget.truncated = true;
+            result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
+            let _ = finalize_repo_onboarding_budget(&mut result);
+        }
+        if result.budget.used_chars > max_chars {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "max_chars={max_chars} is too small for the onboarding pack payload"
+            ))]));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
     /// Bounded exact text search (literal substring), as a safe `rg` replacement.
     #[tool(
         description = "Search for an exact text pattern in project files with bounded output (rg-like, but safe for agent context). Uses corpus if available, otherwise scans files without side effects."
@@ -2684,9 +2987,10 @@ impl ContextFinderService {
         &self,
         Parameters(request): Parameters<BatchRequest>,
     ) -> Result<CallToolResult, McpError> {
-        const VERSION: u32 = 1;
         const DEFAULT_MAX_CHARS: usize = 20_000;
         const MAX_MAX_CHARS: usize = 500_000;
+        const DEFAULT_VERSION: u32 = 1;
+        const LATEST_VERSION: u32 = 2;
 
         if request.items.is_empty() {
             return Ok(CallToolResult::error(vec![Content::text(
@@ -2699,8 +3003,15 @@ impl ContextFinderService {
             .unwrap_or(DEFAULT_MAX_CHARS)
             .clamp(1, MAX_MAX_CHARS);
 
+        let version = request.version.unwrap_or(DEFAULT_VERSION);
+        if !(DEFAULT_VERSION..=LATEST_VERSION).contains(&version) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Unsupported batch version {version} (supported: {DEFAULT_VERSION}..={LATEST_VERSION})"
+            ))]));
+        }
+
         let mut output = BatchResult {
-            version: VERSION,
+            version,
             items: Vec::new(),
             budget: BatchBudget {
                 max_chars,
@@ -2710,6 +3021,29 @@ impl ContextFinderService {
         };
 
         let mut inferred_path: Option<String> = request.path.as_ref().map(|p| p.trim().to_string());
+        let mut ref_context = if version >= 2 {
+            Some(serde_json::json!({
+                "path": inferred_path.clone(),
+                "items": serde_json::Value::Object(serde_json::Map::new()),
+            }))
+        } else {
+            None
+        };
+
+        if version >= 2 {
+            let mut seen = HashSet::new();
+            for item in &request.items {
+                let id = item.id.trim();
+                if id.is_empty() {
+                    continue;
+                }
+                if !seen.insert(id.to_string()) {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Batch v2 requires unique item ids (duplicate: '{id}')"
+                    ))]));
+                }
+            }
+        }
 
         for item in request.items {
             let id = item.id.trim().to_string();
@@ -2730,7 +3064,31 @@ impl ContextFinderService {
                 continue;
             }
 
-            let item_path = extract_path_from_input(&item.input);
+            let resolved_input = if let Some(ctx) = ref_context.as_ref() {
+                match resolve_batch_refs(item.input, ctx) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        let rejected = BatchItemResult {
+                            id,
+                            tool: item.tool,
+                            status: BatchItemStatus::Error,
+                            message: Some(format!("Ref resolution error: {err}")),
+                            data: serde_json::Value::Null,
+                        };
+                        if !push_item_or_truncate(&mut output, rejected) {
+                            break;
+                        }
+                        if request.stop_on_error {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                item.input
+            };
+
+            let item_path = extract_path_from_input(&resolved_input);
             if inferred_path.is_none() {
                 inferred_path = item_path.clone();
             } else if let (Some(batch_path), Some(item_path)) = (&inferred_path, item_path) {
@@ -2754,12 +3112,19 @@ impl ContextFinderService {
                 }
             }
 
+            if let Some(ctx) = ref_context.as_mut() {
+                ctx["path"] = inferred_path
+                    .as_ref()
+                    .map(|v| serde_json::Value::String(v.clone()))
+                    .unwrap_or(serde_json::Value::Null);
+            }
+
             let remaining_chars = output
                 .budget
                 .max_chars
                 .saturating_sub(output.budget.used_chars);
             let input = prepare_item_input(
-                item.input,
+                resolved_input,
                 inferred_path.as_deref(),
                 item.tool,
                 remaining_chars,
@@ -2888,6 +3253,26 @@ impl ContextFinderService {
 
             if !push_item_or_truncate(&mut output, item_outcome) {
                 break;
+            }
+
+            if let Some(ctx) = ref_context.as_mut() {
+                let Some(items) = ctx
+                    .get_mut("items")
+                    .and_then(serde_json::Value::as_object_mut)
+                else {
+                    break;
+                };
+                if let Some(stored) = output.items.last() {
+                    items.insert(
+                        stored.id.clone(),
+                        serde_json::json!({
+                            "tool": stored.tool,
+                            "status": stored.status,
+                            "message": stored.message,
+                            "data": stored.data,
+                        }),
+                    );
+                }
             }
 
             if request.stop_on_error
@@ -4537,6 +4922,262 @@ impl ContextFinderService {
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
+}
+
+fn finalize_repo_onboarding_budget(result: &mut RepoOnboardingPackResult) -> anyhow::Result<()> {
+    let mut used = 0usize;
+    for _ in 0..8 {
+        result.budget.used_chars = used;
+        let raw = serde_json::to_string(result)?;
+        let next = raw.chars().count();
+        if next == used {
+            result.budget.used_chars = next;
+            return Ok(());
+        }
+        used = next;
+    }
+
+    result.budget.used_chars = used;
+    Ok(())
+}
+
+fn compute_onboarding_doc_slice(
+    root: &Path,
+    file: &str,
+    start_line: usize,
+    max_lines: usize,
+    max_chars: usize,
+) -> Result<FileSliceResult> {
+    let file = file.trim();
+    if file.is_empty() {
+        anyhow::bail!("Doc file path must not be empty");
+    }
+
+    let input_path = Path::new(file);
+    let candidate = if input_path.is_absolute() {
+        PathBuf::from(input_path)
+    } else {
+        root.join(input_path)
+    };
+    let canonical_file = candidate
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve doc path '{file}'"))?;
+    if !canonical_file.starts_with(root) {
+        anyhow::bail!("Doc file '{file}' is outside project root");
+    }
+
+    let display_file = normalize_relative_path(root, &canonical_file).unwrap_or_else(|| {
+        canonical_file
+            .to_string_lossy()
+            .into_owned()
+            .replace('\\', "/")
+    });
+
+    let meta = std::fs::metadata(&canonical_file)
+        .with_context(|| format!("Failed to stat '{display_file}'"))?;
+    let file_size_bytes = meta.len();
+    let file_mtime_ms = meta.modified().map(unix_ms).unwrap_or(0);
+
+    let file = std::fs::File::open(&canonical_file)
+        .with_context(|| format!("Failed to open '{display_file}'"))?;
+    let reader = BufReader::new(file);
+
+    let mut content = String::new();
+    let mut used_chars = 0usize;
+    let mut returned_lines = 0usize;
+    let mut end_line = 0usize;
+    let mut truncated = false;
+    let mut truncation: Option<FileSliceTruncation> = None;
+
+    for (idx, line) in reader.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = line.with_context(|| format!("Failed to read '{display_file}'"))?;
+
+        if line_no < start_line {
+            continue;
+        }
+
+        if returned_lines >= max_lines {
+            truncated = true;
+            truncation = Some(FileSliceTruncation::MaxLines);
+            break;
+        }
+
+        let line_chars = line.chars().count();
+        let extra_chars = if returned_lines == 0 {
+            line_chars
+        } else {
+            1 + line_chars
+        };
+        if used_chars.saturating_add(extra_chars) > max_chars {
+            truncated = true;
+            truncation = Some(FileSliceTruncation::MaxChars);
+            break;
+        }
+
+        if returned_lines > 0 {
+            content.push('\n');
+            used_chars += 1;
+        }
+        content.push_str(&line);
+        used_chars += line_chars;
+        returned_lines += 1;
+        end_line = line_no;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let content_sha256 = hex_encode_lower(&hasher.finalize());
+
+    Ok(FileSliceResult {
+        file: display_file,
+        start_line,
+        end_line,
+        returned_lines,
+        used_chars,
+        max_lines,
+        max_chars,
+        truncated,
+        truncation,
+        file_size_bytes,
+        file_mtime_ms,
+        content_sha256,
+        content,
+    })
+}
+
+fn resolve_batch_refs(
+    input: serde_json::Value,
+    ctx: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    const MAX_DEPTH: usize = 64;
+
+    fn decode_pointer_token(token: &str) -> Result<String, String> {
+        let mut out = String::with_capacity(token.len());
+        let mut chars = token.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '~' {
+                out.push(ch);
+                continue;
+            }
+            match chars.next() {
+                Some('0') => out.push('~'),
+                Some('1') => out.push('/'),
+                Some(other) => return Err(format!("Invalid JSON pointer escape '~{other}'")),
+                None => return Err("Invalid JSON pointer escape '~'".to_string()),
+            }
+        }
+        Ok(out)
+    }
+
+    fn resolve_json_pointer<'a>(
+        root: &'a serde_json::Value,
+        pointer: &str,
+    ) -> Result<&'a serde_json::Value, String> {
+        let pointer = pointer.strip_prefix('#').unwrap_or(pointer);
+        if pointer.is_empty() {
+            return Ok(root);
+        }
+        if !pointer.starts_with('/') {
+            return Err(format!(
+                "$ref must be a JSON pointer starting with '#/' or '/': got {pointer:?}"
+            ));
+        }
+
+        let mut tokens = Vec::new();
+        for raw in pointer.split('/').skip(1) {
+            tokens.push(decode_pointer_token(raw)?);
+        }
+
+        if tokens.len() >= 3 && tokens[0] == "items" && tokens[2] == "data" {
+            if let Some(item) = root.get("items").and_then(|v| v.get(&tokens[1])) {
+                if item.get("status").and_then(|v| v.as_str()) == Some("error") {
+                    let msg = item
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown error");
+                    return Err(format!("$ref points to failed item '{}': {msg}", tokens[1]));
+                }
+            }
+        }
+
+        let mut current = root;
+        for token in tokens {
+            match current {
+                serde_json::Value::Object(map) => {
+                    current = map.get(&token).ok_or_else(|| {
+                        format!("$ref path {pointer:?} not found at key {token:?}")
+                    })?;
+                }
+                serde_json::Value::Array(arr) => {
+                    let idx: usize = token.parse().map_err(|_| {
+                        format!("$ref path {pointer:?} expected array index, got {token:?}")
+                    })?;
+                    current = arr.get(idx).ok_or_else(|| {
+                        format!("$ref path {pointer:?} array index out of bounds: {idx}")
+                    })?;
+                }
+                _ => {
+                    return Err(format!(
+                        "$ref path {pointer:?} reached non-container before token {token:?}"
+                    ));
+                }
+            }
+        }
+
+        Ok(current)
+    }
+
+    fn resolve_inner(
+        value: serde_json::Value,
+        ctx: &serde_json::Value,
+        depth: usize,
+    ) -> Result<serde_json::Value, String> {
+        if depth > MAX_DEPTH {
+            return Err("Ref resolution exceeded max depth".to_string());
+        }
+
+        match value {
+            serde_json::Value::Array(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(resolve_inner(item, ctx, depth + 1)?);
+                }
+                Ok(serde_json::Value::Array(out))
+            }
+            serde_json::Value::Object(map) => {
+                let default_value = map.get("$default").cloned();
+                let is_ref_wrapper = map.contains_key("$ref")
+                    && (map.len() == 1 || (map.len() == 2 && default_value.is_some()));
+
+                if is_ref_wrapper {
+                    let pointer = map
+                        .get("$ref")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "$ref must be a string".to_string())?;
+
+                    match resolve_json_pointer(ctx, pointer) {
+                        Ok(found) => resolve_inner(found.clone(), ctx, depth + 1),
+                        Err(err) => {
+                            if let Some(default) = default_value {
+                                return resolve_inner(default, ctx, depth + 1);
+                            }
+                            Err(err)
+                        }
+                    }
+                } else {
+                    let mut out = serde_json::Map::new();
+                    for (key, value) in map {
+                        out.insert(key, resolve_inner(value, ctx, depth + 1)?);
+                    }
+                    Ok(serde_json::Value::Object(out))
+                }
+            }
+            other => Ok(other),
+        }
+    }
+
+    resolve_inner(input, ctx, 0)
 }
 
 fn extract_path_from_input(input: &serde_json::Value) -> Option<String> {

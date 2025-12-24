@@ -47,6 +47,7 @@ async fn impact_falls_back_to_text_matches_when_graph_has_no_edges() -> Result<(
     cmd.env_remove("CONTEXT_FINDER_MODEL_DIR");
     cmd.env("CONTEXT_FINDER_PROFILE", "quality");
     cmd.env("RUST_LOG", "warn");
+    cmd.env("CONTEXT_FINDER_DISABLE_DAEMON", "1");
 
     let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
     let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))
@@ -169,6 +170,7 @@ async fn impact_returns_text_matches_when_symbol_is_missing_from_graph() -> Resu
     cmd.env_remove("CONTEXT_FINDER_MODEL_DIR");
     cmd.env("CONTEXT_FINDER_PROFILE", "quality");
     cmd.env("RUST_LOG", "warn");
+    cmd.env("CONTEXT_FINDER_DISABLE_DAEMON", "1");
 
     let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
     let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))

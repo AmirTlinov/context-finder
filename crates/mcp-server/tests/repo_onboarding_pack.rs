@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use rmcp::{model::CallToolRequestParam, service::ServiceExt, transport::TokioChildProcess};
 use serde_json::Value;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
@@ -39,7 +38,7 @@ fn locate_context_finder_mcp_bin() -> Result<PathBuf> {
 }
 
 #[tokio::test]
-async fn text_search_works_without_index_and_is_bounded() -> Result<()> {
+async fn repo_onboarding_pack_returns_map_docs_and_next_actions() -> Result<()> {
     let bin = locate_context_finder_mcp_bin()?;
 
     let mut cmd = Command::new(bin);
@@ -55,66 +54,91 @@ async fn text_search_works_without_index_and_is_bounded() -> Result<()> {
 
     let tmp = tempfile::tempdir().context("tempdir")?;
     let root = tmp.path();
+
     std::fs::create_dir_all(root.join("src")).context("mkdir src")?;
-    std::fs::write(
-        root.join("src").join("main.rs"),
-        "fn main() {\n    println!(\"Hello\");\n}\n",
-    )
-    .context("write main.rs")?;
+    std::fs::write(root.join("src").join("main.rs"), "fn main() {}\n").context("write main.rs")?;
+
+    std::fs::create_dir_all(root.join("docs")).context("mkdir docs")?;
+    std::fs::write(root.join("README.md"), "# Hello\n").context("write README.md")?;
+    std::fs::write(root.join("docs").join("README.md"), "# Docs\n")
+        .context("write docs/README.md")?;
 
     assert!(
         !root.join(".context-finder").exists(),
-        "temp project unexpectedly has .context-finder before text_search"
+        "temp project unexpectedly has .context-finder before repo_onboarding_pack"
     );
 
     let args = serde_json::json!({
         "path": root.to_string_lossy(),
-        "pattern": "println!",
-        "max_results": 5,
-        "case_sensitive": true,
-        "whole_word": false,
+        "map_depth": 2,
+        "map_limit": 10,
+        "docs_limit": 5,
+        "doc_max_lines": 50,
+        "doc_max_chars": 2000,
+        "max_chars": 20000,
     });
     let result = tokio::time::timeout(
         Duration::from_secs(10),
         service.call_tool(CallToolRequestParam {
-            name: "text_search".into(),
+            name: "repo_onboarding_pack".into(),
             arguments: args.as_object().cloned(),
         }),
     )
     .await
-    .context("timeout calling text_search")??;
+    .context("timeout calling repo_onboarding_pack")??;
 
-    assert_ne!(result.is_error, Some(true), "text_search returned error");
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "repo_onboarding_pack returned error"
+    );
     let text = result
         .content
         .first()
         .and_then(|c| c.as_text())
         .map(|t| t.text.as_str())
-        .context("text_search did not return text content")?;
-    let json: Value = serde_json::from_str(text).context("text_search output is not valid JSON")?;
+        .context("repo_onboarding_pack did not return text content")?;
+    let json: Value =
+        serde_json::from_str(text).context("repo_onboarding_pack output is not valid JSON")?;
 
-    assert_eq!(
-        json.get("pattern").and_then(Value::as_str),
-        Some("println!")
+    assert_eq!(json.get("version").and_then(Value::as_u64), Some(1));
+
+    let map = json.get("map").context("missing map")?;
+    assert!(
+        map.get("directories").and_then(Value::as_array).is_some(),
+        "map.directories missing"
     );
-    assert_eq!(json.get("truncated").and_then(Value::as_bool), Some(false));
 
-    let matches = json
-        .get("matches")
+    let docs = json
+        .get("docs")
         .and_then(Value::as_array)
-        .context("missing matches array")?;
-    assert!(!matches.is_empty(), "expected at least one match");
+        .context("missing docs array")?;
+    assert!(
+        docs.iter()
+            .any(|d| d.get("file").and_then(Value::as_str) == Some("README.md")),
+        "expected README.md in docs slices"
+    );
 
-    let files: HashSet<&str> = matches
-        .iter()
-        .filter_map(|m| m.get("file").and_then(Value::as_str))
-        .collect();
-    assert!(files.contains("src/main.rs"));
+    let next_actions = json
+        .get("next_actions")
+        .and_then(Value::as_array)
+        .context("missing next_actions array")?;
+    assert!(!next_actions.is_empty(), "expected non-empty next_actions");
 
-    // Must not create indexes/corpus as a side effect.
+    let budget = json.get("budget").context("missing budget")?;
+    let max_chars = budget
+        .get("max_chars")
+        .and_then(Value::as_u64)
+        .context("budget.max_chars missing")?;
+    let used_chars = budget
+        .get("used_chars")
+        .and_then(Value::as_u64)
+        .context("budget.used_chars missing")?;
+    assert!(used_chars <= max_chars);
+
     assert!(
         !root.join(".context-finder").exists(),
-        "text_search created .context-finder side effects"
+        "repo_onboarding_pack created .context-finder side effects"
     );
 
     service.cancel().await.context("shutdown mcp service")?;

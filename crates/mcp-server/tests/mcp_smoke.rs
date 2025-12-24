@@ -50,6 +50,7 @@ async fn mcp_exposes_core_tools_and_map_has_no_side_effects() -> Result<()> {
     cmd.env_remove("CONTEXT_FINDER_MODEL_DIR");
     cmd.env("CONTEXT_FINDER_PROFILE", "quality");
     cmd.env("RUST_LOG", "warn");
+    cmd.env("CONTEXT_FINDER_DISABLE_DAEMON", "1");
 
     let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
     let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))
@@ -65,6 +66,7 @@ async fn mcp_exposes_core_tools_and_map_has_no_side_effects() -> Result<()> {
     let tool_names: HashSet<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
     for expected in [
         "map",
+        "repo_onboarding_pack",
         "file_slice",
         "list_files",
         "grep_context",
@@ -348,6 +350,7 @@ async fn mcp_batch_truncates_when_budget_is_too_small() -> Result<()> {
     cmd.env_remove("CONTEXT_FINDER_MODEL_DIR");
     cmd.env("CONTEXT_FINDER_PROFILE", "quality");
     cmd.env("RUST_LOG", "warn");
+    cmd.env("CONTEXT_FINDER_DISABLE_DAEMON", "1");
 
     let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
     let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))
@@ -424,6 +427,7 @@ async fn mcp_file_slice_reads_bounded_lines_and_rejects_escape() -> Result<()> {
     cmd.env_remove("CONTEXT_FINDER_MODEL_DIR");
     cmd.env("CONTEXT_FINDER_PROFILE", "quality");
     cmd.env("RUST_LOG", "warn");
+    cmd.env("CONTEXT_FINDER_DISABLE_DAEMON", "1");
 
     let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
     let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))
@@ -569,6 +573,7 @@ async fn mcp_list_files_lists_paths_and_is_bounded() -> Result<()> {
     cmd.env_remove("CONTEXT_FINDER_MODEL_DIR");
     cmd.env("CONTEXT_FINDER_PROFILE", "quality");
     cmd.env("RUST_LOG", "warn");
+    cmd.env("CONTEXT_FINDER_DISABLE_DAEMON", "1");
 
     let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
     let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))
