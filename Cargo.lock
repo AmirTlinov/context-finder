@@ -547,6 +547,7 @@ dependencies = [
  "dirs",
  "env_logger",
  "log",
+ "regex",
  "rmcp",
  "schemars",
  "serde",

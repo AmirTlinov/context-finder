@@ -18,6 +18,7 @@ use context_vector_store::{
     corpus_path_for_project_root, current_model_id, ChunkCorpus, GraphNodeDoc, GraphNodeStore,
     GraphNodeStoreMeta, QueryKind, VectorIndex,
 };
+use regex::{Regex, RegexBuilder};
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
@@ -521,6 +522,301 @@ async fn compute_list_files_result(
         truncation,
         files,
     })
+}
+
+#[derive(Debug, Clone)]
+struct GrepRange {
+    start_line: usize,
+    end_line: usize,
+    match_lines: Vec<usize>,
+}
+
+fn merge_grep_ranges(mut ranges: Vec<GrepRange>) -> Vec<GrepRange> {
+    ranges.sort_by(|a, b| {
+        a.start_line
+            .cmp(&b.start_line)
+            .then_with(|| a.end_line.cmp(&b.end_line))
+    });
+
+    let mut merged: Vec<GrepRange> = Vec::new();
+    for range in ranges {
+        let Some(last) = merged.last_mut() else {
+            merged.push(range);
+            continue;
+        };
+
+        if range.start_line <= last.end_line.saturating_add(1) {
+            last.end_line = last.end_line.max(range.end_line);
+            last.match_lines.extend(range.match_lines);
+            continue;
+        }
+
+        merged.push(range);
+    }
+
+    for range in &mut merged {
+        range.match_lines.sort_unstable();
+        range.match_lines.dedup();
+    }
+
+    merged
+}
+
+async fn compute_grep_context_result(
+    root: &Path,
+    request: &GrepContextRequest,
+    regex: &Regex,
+    case_sensitive: bool,
+    before: usize,
+    after: usize,
+    max_matches: usize,
+    max_hunks: usize,
+    max_chars: usize,
+) -> Result<GrepContextResult> {
+    const MAX_FILE_BYTES: u64 = 2_000_000;
+
+    let file_pattern = request
+        .file_pattern
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
+    let mut source = "filesystem".to_string();
+
+    if let Some(file) = request
+        .file
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let input_path = Path::new(file);
+        let candidate = if input_path.is_absolute() {
+            PathBuf::from(input_path)
+        } else {
+            root.join(input_path)
+        };
+        let canonical = candidate
+            .canonicalize()
+            .with_context(|| format!("Invalid file '{file}'"))?;
+        if !canonical.starts_with(root) {
+            anyhow::bail!("File '{file}' is outside project root");
+        }
+        let display = normalize_relative_path(root, &canonical)
+            .unwrap_or_else(|| canonical.to_string_lossy().into_owned().replace('\\', "/"));
+        candidates.push((display, canonical));
+    } else {
+        match ContextFinderService::load_chunk_corpus(root).await? {
+            Some(corpus) => {
+                source = "corpus".to_string();
+                let mut files: Vec<&String> = corpus.files().keys().collect();
+                files.sort_by(|a, b| a.cmp(b));
+                for file in files {
+                    if !ContextFinderService::matches_file_pattern(file, file_pattern) {
+                        continue;
+                    }
+                    candidates.push((file.clone(), root.join(file)));
+                }
+            }
+            None => {
+                let scanner = FileScanner::new(root);
+                let files = scanner.scan();
+                let mut rels: Vec<String> = files
+                    .into_iter()
+                    .filter_map(|p| normalize_relative_path(root, &p))
+                    .collect();
+                rels.sort();
+                for rel in rels {
+                    if !ContextFinderService::matches_file_pattern(&rel, file_pattern) {
+                        continue;
+                    }
+                    candidates.push((rel.clone(), root.join(&rel)));
+                }
+            }
+        }
+    }
+
+    let mut hunks: Vec<GrepContextHunk> = Vec::new();
+    let mut used_chars = 0usize;
+    let mut truncated = false;
+    let mut truncation: Option<GrepContextTruncation> = None;
+    let mut scanned_files = 0usize;
+    let mut matched_files = 0usize;
+    let mut returned_matches = 0usize;
+    let mut total_matches = 0usize;
+
+    'outer_files: for (display_file, file_path) in candidates {
+        scanned_files += 1;
+
+        let meta = match std::fs::metadata(&file_path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.len() > MAX_FILE_BYTES {
+            continue;
+        }
+
+        let file = match std::fs::File::open(&file_path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let mut reader = BufReader::new(file);
+
+        let mut line = String::new();
+        let mut line_no = 0usize;
+        let mut match_lines: Vec<usize> = Vec::new();
+        let mut stop_after_this_file = false;
+
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+
+            line_no += 1;
+            let text = line.trim_end_matches(&['\r', '\n'][..]);
+            if !regex.is_match(text) {
+                continue;
+            }
+            match_lines.push(line_no);
+            total_matches += 1;
+            if total_matches >= max_matches {
+                truncated = true;
+                truncation = Some(GrepContextTruncation::MaxMatches);
+                stop_after_this_file = true;
+                break;
+            }
+        }
+
+        if match_lines.is_empty() {
+            continue;
+        }
+        matched_files += 1;
+
+        let ranges: Vec<GrepRange> = match_lines
+            .iter()
+            .map(|&ln| {
+                let start_line = ln.saturating_sub(before).max(1);
+                let end_line = ln.saturating_add(after);
+                GrepRange {
+                    start_line,
+                    end_line,
+                    match_lines: vec![ln],
+                }
+            })
+            .collect();
+        let ranges = merge_grep_ranges(ranges);
+
+        let file = match std::fs::File::open(&file_path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        let mut line_no = 0usize;
+        let mut range_idx = 0usize;
+
+        while range_idx < ranges.len() {
+            if hunks.len() >= max_hunks {
+                truncated = true;
+                truncation = Some(GrepContextTruncation::MaxHunks);
+                break 'outer_files;
+            }
+
+            let range = &ranges[range_idx];
+            let mut content = String::new();
+            let mut end_line = range.start_line.saturating_sub(1);
+            let mut stop_due_to_budget = false;
+
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+                line_no += 1;
+
+                if line_no < range.start_line {
+                    continue;
+                }
+                if line_no > range.end_line {
+                    break;
+                }
+
+                let text = line.trim_end_matches(&['\r', '\n'][..]);
+                let line_chars = text.chars().count();
+                let extra_chars = if content.is_empty() {
+                    line_chars
+                } else {
+                    1 + line_chars
+                };
+
+                if used_chars.saturating_add(extra_chars) > max_chars {
+                    truncated = true;
+                    truncation = Some(GrepContextTruncation::MaxChars);
+                    stop_due_to_budget = true;
+                    break;
+                }
+
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(text);
+                used_chars += extra_chars;
+                end_line = line_no;
+            }
+
+            if stop_due_to_budget && content.is_empty() {
+                break 'outer_files;
+            }
+
+            let mut match_lines = ranges[range_idx].match_lines.clone();
+            match_lines.retain(|&ln| ln >= range.start_line && ln <= end_line);
+            returned_matches += match_lines.len();
+
+            hunks.push(GrepContextHunk {
+                file: display_file.clone(),
+                start_line: range.start_line,
+                end_line,
+                match_lines,
+                content,
+            });
+
+            if stop_due_to_budget {
+                break 'outer_files;
+            }
+
+            range_idx += 1;
+        }
+
+        if stop_after_this_file {
+            break 'outer_files;
+        }
+    }
+
+    let result = GrepContextResult {
+        pattern: request.pattern.clone(),
+        source,
+        file: request.file.clone(),
+        file_pattern: request.file_pattern.clone(),
+        case_sensitive,
+        before,
+        after,
+        scanned_files,
+        matched_files,
+        returned_matches,
+        returned_hunks: hunks.len(),
+        used_chars,
+        max_chars,
+        truncated,
+        truncation,
+        hunks,
+    };
+
+    Ok(result)
 }
 
 // ============================================================================
@@ -1102,6 +1398,94 @@ pub struct ListFilesResult {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GrepContextRequest {
+    /// Project directory path
+    #[schemars(description = "Project directory path")]
+    pub path: Option<String>,
+
+    /// Regex pattern (Rust regex syntax)
+    #[schemars(description = "Regex pattern to search for (Rust regex syntax)")]
+    pub pattern: String,
+
+    /// Optional single file path (relative to project root)
+    #[schemars(description = "Optional single file path (relative to project root)")]
+    pub file: Option<String>,
+
+    /// Optional file path filter (simple glob: '*' and '?' supported). If no glob metachars are
+    /// present, treated as substring match against the relative file path.
+    #[schemars(description = "Optional file path filter (glob or substring)")]
+    pub file_pattern: Option<String>,
+
+    /// Symmetric context lines before and after each match (grep -C)
+    #[schemars(description = "Symmetric context lines before and after each match")]
+    pub context: Option<usize>,
+
+    /// Number of lines before each match (grep -B)
+    #[schemars(description = "Number of lines before each match")]
+    pub before: Option<usize>,
+
+    /// Number of lines after each match (grep -A)
+    #[schemars(description = "Number of lines after each match")]
+    pub after: Option<usize>,
+
+    /// Maximum number of matching lines to process (bounded)
+    #[schemars(description = "Maximum number of matching lines to process (bounded)")]
+    pub max_matches: Option<usize>,
+
+    /// Maximum number of hunks to return (bounded)
+    #[schemars(description = "Maximum number of hunks to return (bounded)")]
+    pub max_hunks: Option<usize>,
+
+    /// Maximum number of UTF-8 characters across returned hunks (default: 20000)
+    #[schemars(description = "Maximum number of UTF-8 characters across returned hunks")]
+    pub max_chars: Option<usize>,
+
+    /// Case-sensitive regex matching (default: true)
+    #[schemars(description = "Whether regex matching is case-sensitive")]
+    pub case_sensitive: Option<bool>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GrepContextTruncation {
+    MaxChars,
+    MaxMatches,
+    MaxHunks,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct GrepContextHunk {
+    pub file: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub match_lines: Vec<usize>,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct GrepContextResult {
+    pub pattern: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_pattern: Option<String>,
+    pub case_sensitive: bool,
+    pub before: usize,
+    pub after: usize,
+    pub scanned_files: usize,
+    pub matched_files: usize,
+    pub returned_matches: usize,
+    pub returned_hunks: usize,
+    pub used_chars: usize,
+    pub max_chars: usize,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<GrepContextTruncation>,
+    pub hunks: Vec<GrepContextHunk>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DoctorRequest {
     /// Project directory path (optional)
     #[schemars(description = "Project directory path (optional)")]
@@ -1162,6 +1546,7 @@ pub enum BatchToolName {
     FileSlice,
     ListFiles,
     TextSearch,
+    GrepContext,
     Doctor,
     Search,
     Context,
@@ -2192,6 +2577,105 @@ impl ContextFinderService {
         )]))
     }
 
+    /// Regex search with merged context hunks (grep-like).
+    #[tool(
+        description = "Search project files with a regex and return merged context hunks (N lines before/after). Designed to replace `rg -C/-A/-B` plus multiple file_slice calls with a single bounded response."
+    )]
+    pub async fn grep_context(
+        &self,
+        Parameters(mut request): Parameters<GrepContextRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        const DEFAULT_MAX_CHARS: usize = 20_000;
+        const MAX_MAX_CHARS: usize = 500_000;
+        const DEFAULT_MAX_MATCHES: usize = 2_000;
+        const MAX_MAX_MATCHES: usize = 50_000;
+        const DEFAULT_MAX_HUNKS: usize = 200;
+        const MAX_MAX_HUNKS: usize = 50_000;
+        const DEFAULT_CONTEXT: usize = 20;
+        const MAX_CONTEXT: usize = 5_000;
+
+        let root_path = PathBuf::from(request.path.as_deref().unwrap_or("."));
+        let root = match root_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid path: {e}"
+                ))]));
+            }
+        };
+        self.touch_daemon_best_effort(&root);
+
+        let pattern = request.pattern.trim().to_string();
+        if pattern.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Pattern must not be empty",
+            )]));
+        }
+        request.pattern = pattern.clone();
+
+        let case_sensitive = request.case_sensitive.unwrap_or(true);
+        let regex = match RegexBuilder::new(&pattern)
+            .case_insensitive(!case_sensitive)
+            .build()
+        {
+            Ok(re) => re,
+            Err(err) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid regex: {err}"
+                ))]));
+            }
+        };
+
+        let before = request
+            .before
+            .or(request.context)
+            .unwrap_or(DEFAULT_CONTEXT)
+            .clamp(0, MAX_CONTEXT);
+        let after = request
+            .after
+            .or(request.context)
+            .unwrap_or(DEFAULT_CONTEXT)
+            .clamp(0, MAX_CONTEXT);
+
+        let max_matches = request
+            .max_matches
+            .unwrap_or(DEFAULT_MAX_MATCHES)
+            .clamp(1, MAX_MAX_MATCHES);
+        let max_hunks = request
+            .max_hunks
+            .unwrap_or(DEFAULT_MAX_HUNKS)
+            .clamp(1, MAX_MAX_HUNKS);
+        let max_chars = request
+            .max_chars
+            .unwrap_or(DEFAULT_MAX_CHARS)
+            .clamp(1, MAX_MAX_CHARS);
+
+        let result = match compute_grep_context_result(
+            &root,
+            &request,
+            &regex,
+            case_sensitive,
+            before,
+            after,
+            max_matches,
+            max_hunks,
+            max_chars,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Error: {err:#}"
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
     /// Execute multiple Context Finder tools in a single call (agent-friendly batch).
     #[tool(
         description = "Execute multiple Context Finder tools in one call. Returns a single bounded JSON result with per-item status (partial success) and a global max_chars budget."
@@ -2307,6 +2791,14 @@ impl ContextFinderService {
                         Ok(req) => self.text_search(Parameters(req)).await,
                         Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
                             "Invalid input for text_search: {err}"
+                        ))])),
+                    }
+                }
+                BatchToolName::GrepContext => {
+                    match serde_json::from_value::<GrepContextRequest>(input) {
+                        Ok(req) => self.grep_context(Parameters(req)).await,
+                        Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Invalid input for grep_context: {err}"
                         ))])),
                     }
                 }
@@ -4074,7 +4566,10 @@ fn prepare_item_input(
 
     if matches!(
         tool,
-        BatchToolName::ContextPack | BatchToolName::FileSlice | BatchToolName::ListFiles
+        BatchToolName::ContextPack
+            | BatchToolName::FileSlice
+            | BatchToolName::ListFiles
+            | BatchToolName::GrepContext
     ) {
         if let serde_json::Value::Object(ref mut map) = input {
             if !map.contains_key("max_chars") {
@@ -4627,6 +5122,19 @@ mod tests {
         assert!(
             obj.get("max_chars").is_some(),
             "expected max_chars to be injected for list_files"
+        );
+    }
+
+    #[test]
+    fn batch_prepare_item_input_injects_max_chars_for_grep_context() {
+        let input = serde_json::json!({});
+        let prepared = prepare_item_input(input, Some("/root"), BatchToolName::GrepContext, 5_000);
+
+        let obj = prepared.as_object().expect("prepared input must be object");
+        assert_eq!(obj.get("path").and_then(|v| v.as_str()), Some("/root"));
+        assert!(
+            obj.get("max_chars").is_some(),
+            "expected max_chars to be injected for grep_context"
         );
     }
 

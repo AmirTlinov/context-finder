@@ -67,6 +67,7 @@ async fn mcp_exposes_core_tools_and_map_has_no_side_effects() -> Result<()> {
         "map",
         "file_slice",
         "list_files",
+        "grep_context",
         "batch",
         "doctor",
         "search",
