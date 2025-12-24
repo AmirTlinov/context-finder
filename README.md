@@ -9,7 +9,10 @@ If you’re tired of “search → open file → search again → maybe the righ
 - **Agent-first output:** `context-pack` returns a single JSON payload bounded by `max_chars`.
 - **One-call orchestration:** `action=batch` runs multiple actions under one `max_chars` budget (partial success per item).
 - **Safe file reads:** MCP `file_slice` returns a bounded file window (root-locked, line-based, hashed).
+- **Regex context reads:** MCP `grep_context` returns all regex matches with `before/after` context (grep `-B/-A/-C`), merged into compact hunks under hard budgets.
 - **Safe file listing:** MCP `list_files` returns bounded file paths (glob/substring filter).
+- **Repo onboarding pack:** MCP `repo_onboarding_pack` returns `map` + key docs (`file_slice`) + `next_actions` in one bounded response.
+- **Cursor pagination:** `map`, `list_files`, `text_search`, `grep_context` return `next_cursor` when truncated so agents can continue without guessing.
 - **Freshness by default:** every response can carry `meta.index_state`; `options.stale_policy=auto|warn|fail` controls (re)index behavior.
 - **Stable integration surfaces:** CLI JSON, HTTP, gRPC, MCP — all treated as contracts.
 - **Hybrid retrieval:** semantic + fuzzy + fusion + profile-driven boosts.
@@ -136,15 +139,52 @@ args = []
 CONTEXT_FINDER_PROFILE = "quality"
 ```
 
-Agent-friendly tip: the MCP tool `batch` lets you execute multiple tools in one call (one bounded JSON result):
+Fastest way to orient on a new repo (one MCP call → map + key docs + next actions): use `repo_onboarding_pack`:
 
 ```jsonc
 {
   "path": "/path/to/project",
+  "map_depth": 2,
+  "docs_limit": 6,
+  "max_chars": 20000
+}
+```
+
+Need grep-like reads with N lines of context across a repo (without `rg` + `sed` loops)? Use `grep_context`:
+
+```jsonc
+{
+  "path": "/path/to/project",
+  "pattern": "stale_policy",
+  "file_pattern": "crates/*/src/*",
+  "before": 50,
+  "after": 50,
+  "max_hunks": 40,
+  "max_chars": 20000
+}
+```
+
+If the output is truncated, the response includes `next_cursor`. Call again with the same options + `cursor: "<next_cursor>"`.
+
+Agent-friendly tip: the MCP tool `batch` lets you execute multiple tools in one call (one bounded JSON result). In batch `version: 2`, item inputs can depend on earlier outputs via `$ref` (JSON Pointer):
+
+```jsonc
+{
+  "version": 2,
+  "path": "/path/to/project",
   "max_chars": 20000,
   "items": [
-    { "id": "map", "tool": "map", "input": { "depth": 2, "limit": 40 } },
-    { "id": "pack", "tool": "context_pack", "input": { "query": "stale policy gate", "limit": 6 } }
+    { "id": "hits", "tool": "text_search", "input": { "pattern": "stale_policy", "max_results": 1 } },
+    {
+      "id": "ctx",
+      "tool": "grep_context",
+      "input": {
+        "pattern": "stale_policy",
+        "file": { "$ref": "#/items/hits/data/matches/0/file" },
+        "before": 40,
+        "after": 40
+      }
+    }
   ]
 }
 ```

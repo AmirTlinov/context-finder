@@ -177,18 +177,62 @@ cargo install --path crates/mcp-server
 context-finder-mcp
 ```
 
-Batch tool (one MCP call → many tools, bounded output):
+Repo onboarding pack tool (best default for agents; one call → `map` + key docs + `next_actions`):
 
 ```jsonc
 {
   "path": "/path/to/project",
+  "map_depth": 2,
+  "docs_limit": 6,
+  "max_chars": 20000
+}
+```
+
+Regex context reads tool (`grep_context`; grep `-B/-A/-C` style, merged hunks, bounded output):
+
+```jsonc
+{
+  "path": "/path/to/project",
+  "pattern": "stale_policy",
+  "file_pattern": "crates/*/src/*",
+  "before": 50,
+  "after": 50,
+  "max_hunks": 40,
+  "max_chars": 20000
+}
+```
+
+Pagination (cursor): when a tool returns `truncated: true` and `next_cursor`, call it again with the same inputs + `cursor: "<next_cursor>"`.
+
+Cursor tokens are opaque and bound to the original query/options (changing them will be rejected).
+
+Batch tool (one MCP call → many tools, bounded output). In `version: 2`, item inputs can depend on earlier outputs via `$ref` (JSON Pointer):
+
+```jsonc
+{
+  "version": 2,
+  "path": "/path/to/project",
   "max_chars": 20000,
   "items": [
-    { "id": "map", "tool": "map", "input": { "depth": 2, "limit": 40 } },
-    { "id": "pack", "tool": "context_pack", "input": { "query": "rate limiter", "limit": 6 } }
+    { "id": "hits", "tool": "text_search", "input": { "pattern": "stale_policy", "max_results": 1 } },
+    {
+      "id": "ctx",
+      "tool": "grep_context",
+      "input": {
+        "pattern": "stale_policy",
+        "file": { "$ref": "#/items/hits/data/matches/0/file" },
+        "before": 40,
+        "after": 40
+      }
+    }
   ]
 }
 ```
+
+Notes:
+
+- Batch v2 requires unique `id` values per item.
+- `$ref` to a failed item is rejected; use `{ "$ref": "...", "$default": <value> }` for optional pointers.
 
 File slice tool (bounded, root-locked file read; designed to replace ad-hoc `cat`/`sed` in agent loops):
 

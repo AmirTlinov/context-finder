@@ -187,3 +187,72 @@ console.log(res.data.results.length);
 - `profiles/general.json` — "deep/multi" profile (higher latency for quality)
 - `models/manifest.json` — model roster + assets (sha256), downloaded into `./models/`
 - `datasets/*.json` — golden datasets for objective tuning
+
+## MCP workflows (bounded agent I/O)
+
+The MCP server is designed to replace ad-hoc repo probing (`ls`, `rg`, `sed`) with a few bounded calls.
+
+### 1) Repo onboarding in one call: `repo_onboarding_pack`
+
+Use this as the default first step when dropped into a new repository:
+
+```jsonc
+{
+  "path": "/path/to/project",
+  "map_depth": 2,
+  "docs_limit": 6,
+  "max_chars": 20000
+}
+```
+
+### 2) Read all regex matches with context: `grep_context`
+
+This is the “grep -B/-A/-C, but bounded and merge-aware” tool for agents:
+
+```jsonc
+{
+  "path": "/path/to/project",
+  "pattern": "stale_policy",
+  "file_pattern": "crates/*/src/*",
+  "before": 50,
+  "after": 50,
+  "max_hunks": 40,
+  "max_chars": 20000
+}
+```
+
+### 3) Pagination (cursor)
+
+When a tool response includes `truncated: true` and `next_cursor`, continue by repeating the call with the same options + `cursor: "<next_cursor>"`.
+
+This works for: `map`, `list_files`, `text_search`, `grep_context`.
+
+### 4) Batch v2 ($ref dependencies): chain tools in one call
+
+Batch `version: 2` lets item inputs reference previous item outputs via JSON Pointer `$ref` (with optional `$default` fallback):
+
+```jsonc
+{
+  "version": 2,
+  "path": "/path/to/project",
+  "max_chars": 20000,
+  "items": [
+    { "id": "hits", "tool": "text_search", "input": { "pattern": "stale_policy", "max_results": 1 } },
+    {
+      "id": "ctx",
+      "tool": "grep_context",
+      "input": {
+        "pattern": "stale_policy",
+        "file": { "$ref": "#/items/hits/data/matches/0/file" },
+        "before": 40,
+        "after": 40
+      }
+    }
+  ]
+}
+```
+
+Notes:
+
+- `$ref` must point to an earlier item’s `data` (JSON Pointer like `#/items/<id>/data/...`).
+- `$ref` to a failed item is rejected; wrap with `$default` when you want a fallback value.

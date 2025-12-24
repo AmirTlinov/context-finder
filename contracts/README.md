@@ -69,6 +69,14 @@ Primary code source:
 
 - `crates/mcp-server/src/tools.rs` (tool schemas + tool names)
 
+Key agent-oriented tools (MCP):
+
+- `repo_onboarding_pack` — one call returns `map` + key docs slices + `next_actions` under one `max_chars` budget.
+- `grep_context` — regex context reads (grep `-B/-A/-C`) with merged hunks, explicit budgets, and `next_cursor` pagination.
+- `batch` — one-call orchestration; batch `version: 2` supports `$ref` (JSON Pointer) + optional `$default` for light templating between items.
+
+Large outputs: `map`, `list_files`, `text_search`, `grep_context` can return `next_cursor` so callers can page without relying on truncation heuristics.
+
 ## Change workflow (human + AI agents)
 
 1. Edit/add the contract under `contracts/…` (and/or `proto/…`).
