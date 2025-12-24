@@ -63,10 +63,13 @@ async fn mcp_exposes_core_tools_and_map_has_no_side_effects() -> Result<()> {
     )
     .await
     .context("timeout listing tools")??;
+    let tools_raw =
+        serde_json::to_vec(&tools).context("serialize tools/list response for diagnostics")?;
     let tool_names: HashSet<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
     for expected in [
         "map",
         "repo_onboarding_pack",
+        "read_pack",
         "file_slice",
         "list_files",
         "grep_context",
@@ -77,12 +80,22 @@ async fn mcp_exposes_core_tools_and_map_has_no_side_effects() -> Result<()> {
         "context_pack",
         "index",
         "text_search",
+        "impact",
+        "trace",
+        "explain",
+        "overview",
     ] {
         assert!(
             tool_names.contains(expected),
             "missing tool '{expected}' (available: {tool_names:?})"
         );
     }
+    // Keep the tools/list payload reasonably sized so MCP clients don't choke on it.
+    assert!(
+        tools_raw.len() < 1_500_000,
+        "tools/list payload is unexpectedly large ({} bytes)",
+        tools_raw.len()
+    );
 
     let tmp = tempfile::tempdir().context("tempdir")?;
     let root = tmp.path();

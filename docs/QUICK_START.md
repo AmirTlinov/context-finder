@@ -528,6 +528,33 @@ ls .context-finder/
 context-finder index . --force
 ```
 
+### MCP: "tool not found" / missing tools
+
+If your MCP client reports `tool not found` or does not show tools like `read_pack` / `grep_context`, you are almost always running the wrong binary or an old install.
+
+Checklist:
+
+1) Ensure the MCP server command is `context-finder-mcp` (not the CLI `context-finder`).
+2) Reinstall the MCP server (updates `~/.cargo/bin/context-finder-mcp`):
+
+```bash
+cargo install --path crates/mcp-server --locked --force
+```
+
+3) Restart your MCP client (many clients cache the tool inventory on startup).
+4) Self-check the server's tool inventory from source:
+
+```bash
+CONTEXT_FINDER_EMBEDDING_MODE=stub cargo test -p context-finder-mcp --test mcp_smoke
+```
+
+Expected MCP tool names (17):
+
+- `map`, `repo_onboarding_pack`, `read_pack`
+- `file_slice`, `list_files`, `grep_context`, `batch`
+- `doctor`, `index`, `search`, `context`, `context_pack`
+- `text_search`, `explain`, `impact`, `trace`, `overview`
+
 ## Development checks
 
 ```bash
