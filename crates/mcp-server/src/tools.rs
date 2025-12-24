@@ -4,6 +4,7 @@
 
 use crate::runtime_env;
 use anyhow::{Context as AnyhowContext, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use context_code_chunker::{Chunker, ChunkerConfig};
 use context_graph::{
     build_graph_docs, CodeGraph, ContextAssembler, GraphDocConfig, GraphEdge, GraphLanguage,
@@ -24,6 +25,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::schemars;
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -260,6 +262,35 @@ fn normalize_relative_path(root: &Path, path: &Path) -> Option<String> {
     Some(rel.replace('\\', "/"))
 }
 
+const CURSOR_VERSION: u32 = 1;
+const MAX_CURSOR_BASE64_CHARS: usize = 8_192;
+const MAX_CURSOR_JSON_BYTES: usize = 4_096;
+
+fn encode_cursor<T: Serialize>(cursor: &T) -> Result<String> {
+    let bytes = serde_json::to_vec(cursor).context("serialize cursor")?;
+    if bytes.len() > MAX_CURSOR_JSON_BYTES {
+        anyhow::bail!("Cursor payload too large ({} bytes)", bytes.len());
+    }
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn decode_cursor<T: DeserializeOwned>(cursor: &str) -> Result<T> {
+    let cursor = cursor.trim();
+    if cursor.is_empty() {
+        anyhow::bail!("Cursor must not be empty");
+    }
+    if cursor.len() > MAX_CURSOR_BASE64_CHARS {
+        anyhow::bail!("Cursor too long");
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(cursor.as_bytes())
+        .context("decode cursor")?;
+    if bytes.len() > MAX_CURSOR_JSON_BYTES {
+        anyhow::bail!("Cursor payload too large ({} bytes)", bytes.len());
+    }
+    serde_json::from_slice(&bytes).context("parse cursor json")
+}
+
 fn chunker_config_for_map() -> ChunkerConfig {
     ChunkerConfig {
         strategy: context_code_chunker::ChunkingStrategy::Semantic,
@@ -313,7 +344,13 @@ fn absorb_chunk_for_map(
     }
 }
 
-async fn compute_map_result(root: &Path, depth: usize, limit: usize) -> Result<MapResult> {
+async fn compute_map_result(
+    root: &Path,
+    root_display: &str,
+    depth: usize,
+    limit: usize,
+    offset: usize,
+) -> Result<MapResult> {
     // Aggregate by directory
     let mut tree_files: HashMap<String, HashSet<String>> = HashMap::new();
     let mut tree_chunks: HashMap<String, usize> = HashMap::new();
@@ -401,9 +438,22 @@ async fn compute_map_result(root: &Path, depth: usize, limit: usize) -> Result<M
             } else {
                 0.0
             };
-            let top_symbols: Vec<String> = tree_symbols
+            let top_symbols = tree_symbols
                 .get(&path)
-                .map(|v| v.iter().take(5).cloned().collect())
+                .map(|symbols| {
+                    let mut counts: HashMap<String, usize> = HashMap::new();
+                    for symbol in symbols {
+                        *counts.entry(symbol.clone()).or_insert(0) += 1;
+                    }
+
+                    let mut items: Vec<(String, usize)> = counts.into_iter().collect();
+                    items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                    items
+                        .into_iter()
+                        .take(5)
+                        .map(|(symbol, _count)| symbol)
+                        .collect()
+                })
                 .unwrap_or_default();
 
             DirectoryInfo {
@@ -416,31 +466,57 @@ async fn compute_map_result(root: &Path, depth: usize, limit: usize) -> Result<M
         })
         .collect();
 
-    directories.sort_by(|a, b| b.chunks.cmp(&a.chunks));
-    directories.truncate(limit);
+    directories.sort_by(|a, b| b.chunks.cmp(&a.chunks).then_with(|| a.path.cmp(&b.path)));
+
+    if offset > directories.len() {
+        anyhow::bail!("Cursor offset out of range (offset={offset})");
+    }
+
+    let end = offset.saturating_add(limit).min(directories.len());
+    let truncated = end < directories.len();
+    let next_cursor = if truncated {
+        Some(encode_cursor(&MapCursorV1 {
+            v: CURSOR_VERSION,
+            tool: "map".to_string(),
+            root: root_display.to_string(),
+            depth,
+            offset: end,
+        })?)
+    } else {
+        None
+    };
+
+    let directories = directories[offset..end].to_vec();
 
     Ok(MapResult {
         total_files,
         total_chunks,
         total_lines,
         directories,
+        truncated,
+        next_cursor,
     })
 }
 
 async fn compute_list_files_result(
     root: &Path,
+    root_display: &str,
     file_pattern: Option<&str>,
     limit: usize,
     max_chars: usize,
+    cursor_last_file: Option<&str>,
 ) -> Result<ListFilesResult> {
     let file_pattern = file_pattern.map(str::trim).filter(|s| !s.is_empty());
+    let cursor_last_file = cursor_last_file.map(str::trim).filter(|s| !s.is_empty());
 
     let mut used_chars = 0usize;
     let mut truncated = false;
     let mut truncation: Option<ListFilesTruncation> = None;
     let mut files: Vec<String> = Vec::new();
+    let mut next_cursor: Option<String> = None;
     let source: String;
     let scanned_files: usize;
+    let mut matched: Vec<String> = Vec::new();
 
     match ContextFinderService::load_chunk_corpus(root).await? {
         Some(corpus) => {
@@ -454,26 +530,7 @@ async fn compute_list_files_result(
                 if !ContextFinderService::matches_file_pattern(file, file_pattern) {
                     continue;
                 }
-                if files.len() >= limit {
-                    truncated = true;
-                    truncation = Some(ListFilesTruncation::Limit);
-                    break;
-                }
-
-                let file_chars = file.chars().count();
-                let extra_chars = if files.is_empty() {
-                    file_chars
-                } else {
-                    1 + file_chars
-                };
-                if used_chars.saturating_add(extra_chars) > max_chars {
-                    truncated = true;
-                    truncation = Some(ListFilesTruncation::MaxChars);
-                    break;
-                }
-
-                files.push(file.clone());
-                used_chars += extra_chars;
+                matched.push(file.clone());
             }
         }
         None => {
@@ -493,27 +550,56 @@ async fn compute_list_files_result(
                 if !ContextFinderService::matches_file_pattern(&file, file_pattern) {
                     continue;
                 }
-                if files.len() >= limit {
-                    truncated = true;
-                    truncation = Some(ListFilesTruncation::Limit);
-                    break;
-                }
-
-                let file_chars = file.chars().count();
-                let extra_chars = if files.is_empty() {
-                    file_chars
-                } else {
-                    1 + file_chars
-                };
-                if used_chars.saturating_add(extra_chars) > max_chars {
-                    truncated = true;
-                    truncation = Some(ListFilesTruncation::MaxChars);
-                    break;
-                }
-
-                files.push(file);
-                used_chars += extra_chars;
+                matched.push(file);
             }
+        }
+    }
+
+    let start_index = if let Some(last) = cursor_last_file {
+        match matched.binary_search_by(|candidate| candidate.as_str().cmp(last)) {
+            Ok(idx) => idx + 1,
+            Err(idx) => idx,
+        }
+    } else {
+        0
+    };
+
+    if start_index > matched.len() {
+        anyhow::bail!("Cursor is out of range for matched files");
+    }
+
+    for file in matched.iter().skip(start_index) {
+        if files.len() >= limit {
+            truncated = true;
+            truncation = Some(ListFilesTruncation::Limit);
+            break;
+        }
+
+        let file_chars = file.chars().count();
+        let extra_chars = if files.is_empty() {
+            file_chars
+        } else {
+            1 + file_chars
+        };
+        if used_chars.saturating_add(extra_chars) > max_chars {
+            truncated = true;
+            truncation = Some(ListFilesTruncation::MaxChars);
+            break;
+        }
+
+        files.push(file.clone());
+        used_chars += extra_chars;
+    }
+
+    if truncated && !files.is_empty() && start_index.saturating_add(files.len()) < matched.len() {
+        if let Some(last_file) = files.last() {
+            next_cursor = Some(encode_cursor(&ListFilesCursorV1 {
+                v: CURSOR_VERSION,
+                tool: "list_files".to_string(),
+                root: root_display.to_string(),
+                file_pattern: file_pattern.map(str::to_string),
+                last_file: last_file.clone(),
+            })?);
         }
     }
 
@@ -527,6 +613,7 @@ async fn compute_list_files_result(
         max_chars,
         truncated,
         truncation,
+        next_cursor,
         files,
     })
 }
@@ -571,6 +658,7 @@ fn merge_grep_ranges(mut ranges: Vec<GrepRange>) -> Vec<GrepRange> {
 
 async fn compute_grep_context_result(
     root: &Path,
+    root_display: &str,
     request: &GrepContextRequest,
     regex: &Regex,
     case_sensitive: bool,
@@ -579,6 +667,8 @@ async fn compute_grep_context_result(
     max_matches: usize,
     max_hunks: usize,
     max_chars: usize,
+    resume_file: Option<&str>,
+    resume_line: usize,
 ) -> Result<GrepContextResult> {
     const MAX_FILE_BYTES: u64 = 2_000_000;
 
@@ -587,6 +677,8 @@ async fn compute_grep_context_result(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
+    let resume_file = resume_file.map(str::trim).filter(|s| !s.is_empty());
+    let resume_line = resume_line.max(1);
 
     let mut candidates: Vec<(String, PathBuf)> = Vec::new();
     let mut source = "filesystem".to_string();
@@ -643,6 +735,12 @@ async fn compute_grep_context_result(
         }
     }
 
+    if let Some(resume_file) = resume_file {
+        if !candidates.iter().any(|(file, _)| file == resume_file) {
+            anyhow::bail!("Cursor resume_file not found: {resume_file}");
+        }
+    }
+
     let mut hunks: Vec<GrepContextHunk> = Vec::new();
     let mut used_chars = 0usize;
     let mut truncated = false;
@@ -651,8 +749,23 @@ async fn compute_grep_context_result(
     let mut matched_files = 0usize;
     let mut returned_matches = 0usize;
     let mut total_matches = 0usize;
+    let mut next_cursor_state: Option<(String, usize)> = None;
 
+    let mut started = resume_file.is_none();
     'outer_files: for (display_file, file_path) in candidates {
+        if !started {
+            if Some(display_file.as_str()) != resume_file {
+                continue;
+            }
+            started = true;
+        }
+
+        let file_resume_line = if Some(display_file.as_str()) == resume_file {
+            resume_line
+        } else {
+            1
+        };
+
         scanned_files += 1;
 
         let meta = match std::fs::metadata(&file_path) {
@@ -688,12 +801,14 @@ async fn compute_grep_context_result(
                 continue;
             }
             match_lines.push(line_no);
-            total_matches += 1;
-            if total_matches >= max_matches {
-                truncated = true;
-                truncation = Some(GrepContextTruncation::MaxMatches);
-                stop_after_this_file = true;
-                break;
+            if line_no >= file_resume_line {
+                total_matches += 1;
+                if total_matches >= max_matches {
+                    truncated = true;
+                    truncation = Some(GrepContextTruncation::MaxMatches);
+                    stop_after_this_file = true;
+                    break;
+                }
             }
         }
 
@@ -726,15 +841,22 @@ async fn compute_grep_context_result(
         let mut range_idx = 0usize;
 
         while range_idx < ranges.len() {
+            let range = &ranges[range_idx];
+            let range_start_line = range.start_line.max(file_resume_line);
+            if range_start_line > range.end_line {
+                range_idx += 1;
+                continue;
+            }
+
             if hunks.len() >= max_hunks {
                 truncated = true;
                 truncation = Some(GrepContextTruncation::MaxHunks);
+                next_cursor_state = Some((display_file.clone(), range_start_line));
                 break 'outer_files;
             }
 
-            let range = &ranges[range_idx];
             let mut content = String::new();
-            let mut end_line = range.start_line.saturating_sub(1);
+            let mut end_line = range_start_line.saturating_sub(1);
             let mut stop_due_to_budget = false;
 
             loop {
@@ -746,7 +868,7 @@ async fn compute_grep_context_result(
                 }
                 line_no += 1;
 
-                if line_no < range.start_line {
+                if line_no < range_start_line {
                     continue;
                 }
                 if line_no > range.end_line {
@@ -781,18 +903,19 @@ async fn compute_grep_context_result(
             }
 
             let mut match_lines = ranges[range_idx].match_lines.clone();
-            match_lines.retain(|&ln| ln >= range.start_line && ln <= end_line);
+            match_lines.retain(|&ln| ln >= range_start_line && ln <= end_line);
             returned_matches += match_lines.len();
 
             hunks.push(GrepContextHunk {
                 file: display_file.clone(),
-                start_line: range.start_line,
+                start_line: range_start_line,
                 end_line,
                 match_lines,
                 content,
             });
 
             if stop_due_to_budget {
+                next_cursor_state = Some((display_file.clone(), end_line.saturating_add(1)));
                 break 'outer_files;
             }
 
@@ -803,6 +926,28 @@ async fn compute_grep_context_result(
             break 'outer_files;
         }
     }
+
+    let next_cursor = match next_cursor_state {
+        Some((resume_file, resume_line)) => Some(encode_cursor(&GrepContextCursorV1 {
+            v: CURSOR_VERSION,
+            tool: "grep_context".to_string(),
+            root: root_display.to_string(),
+            pattern: request.pattern.clone(),
+            file: request
+                .file
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            file_pattern: file_pattern.map(str::to_string),
+            case_sensitive,
+            before,
+            after,
+            resume_file,
+            resume_line,
+        })?),
+        None => None,
+    };
 
     let result = GrepContextResult {
         pattern: request.pattern.clone(),
@@ -820,6 +965,7 @@ async fn compute_grep_context_result(
         max_chars,
         truncated,
         truncation,
+        next_cursor,
         hunks,
     };
 
@@ -1237,6 +1383,19 @@ pub struct MapRequest {
     /// Maximum number of directories to return
     #[schemars(description = "Limit number of results")]
     pub limit: Option<usize>,
+
+    /// Opaque cursor token to continue a previous response
+    #[schemars(description = "Opaque cursor token to continue a previous map response")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MapCursorV1 {
+    v: u32,
+    tool: String,
+    root: String,
+    depth: usize,
+    offset: usize,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -1249,9 +1408,12 @@ pub struct MapResult {
     pub total_lines: usize,
     /// Directory breakdown
     pub directories: Vec<DirectoryInfo>,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, schemars::JsonSchema, Clone)]
 pub struct DirectoryInfo {
     /// Directory path
     pub path: String,
@@ -1291,6 +1453,38 @@ pub struct TextSearchRequest {
     /// Whole-word match for identifier-like patterns (default: false)
     #[schemars(description = "If true, enforce identifier-like word boundaries")]
     pub whole_word: Option<bool>,
+
+    /// Opaque cursor token to continue a previous response
+    #[schemars(description = "Opaque cursor token to continue a previous text_search response")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum TextSearchCursorModeV1 {
+    Corpus {
+        file_index: usize,
+        chunk_index: usize,
+        line_offset: usize,
+    },
+    Filesystem {
+        file_index: usize,
+        line_offset: usize,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TextSearchCursorV1 {
+    v: u32,
+    tool: String,
+    root: String,
+    pattern: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_pattern: Option<String>,
+    case_sensitive: bool,
+    whole_word: bool,
+    #[serde(flatten)]
+    mode: TextSearchCursorModeV1,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -1302,6 +1496,8 @@ pub struct TextSearchResult {
     pub skipped_large_files: usize,
     pub returned: usize,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     pub matches: Vec<TextSearchMatch>,
 }
 
@@ -1379,6 +1575,20 @@ pub struct ListFilesRequest {
     /// Maximum number of UTF-8 characters across returned file paths (default: 20000)
     #[schemars(description = "Maximum number of UTF-8 characters across returned file paths")]
     pub max_chars: Option<usize>,
+
+    /// Opaque cursor token to continue a previous response
+    #[schemars(description = "Opaque cursor token to continue a previous list_files response")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ListFilesCursorV1 {
+    v: u32,
+    tool: String,
+    root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_pattern: Option<String>,
+    last_file: String,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
@@ -1401,6 +1611,8 @@ pub struct ListFilesResult {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation: Option<ListFilesTruncation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     pub files: Vec<String>,
 }
 
@@ -1450,6 +1662,27 @@ pub struct GrepContextRequest {
     /// Case-sensitive regex matching (default: true)
     #[schemars(description = "Whether regex matching is case-sensitive")]
     pub case_sensitive: Option<bool>,
+
+    /// Opaque cursor token to continue a previous response
+    #[schemars(description = "Opaque cursor token to continue a previous grep_context response")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GrepContextCursorV1 {
+    v: u32,
+    tool: String,
+    root: String,
+    pattern: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_pattern: Option<String>,
+    case_sensitive: bool,
+    before: usize,
+    after: usize,
+    resume_file: String,
+    resume_line: usize,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
@@ -1489,6 +1722,8 @@ pub struct GrepContextResult {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation: Option<GrepContextTruncation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     pub hunks: Vec<GrepContextHunk>,
 }
 
@@ -2267,7 +2502,42 @@ impl ContextFinderService {
             }
         };
         self.touch_daemon_best_effort(&root);
-        let result = match compute_map_result(&root, depth, limit).await {
+        let root_display = root.to_string_lossy().to_string();
+
+        let mut offset = 0usize;
+        if let Some(cursor) = request
+            .cursor
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let decoded: MapCursorV1 = match decode_cursor(cursor) {
+                Ok(v) => v,
+                Err(err) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid cursor: {err}"
+                    ))]));
+                }
+            };
+            if decoded.v != CURSOR_VERSION || decoded.tool != "map" {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: wrong tool",
+                )]));
+            }
+            if decoded.root != root_display {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: different root",
+                )]));
+            }
+            if decoded.depth != depth {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: different depth",
+                )]));
+            }
+            offset = decoded.offset;
+        }
+
+        let result = match compute_map_result(&root, &root_display, depth, limit, offset).await {
             Ok(result) => result,
             Err(err) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -2331,7 +2601,9 @@ impl ContextFinderService {
             .unwrap_or(DEFAULT_DOC_MAX_CHARS)
             .clamp(1, MAX_DOC_MAX_CHARS);
 
-        let map = match compute_map_result(&root, map_depth, map_limit).await {
+        let root_display = root.to_string_lossy().to_string();
+
+        let map = match compute_map_result(&root, &root_display, map_depth, map_limit, 0).await {
             Ok(result) => result,
             Err(err) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -2339,8 +2611,6 @@ impl ContextFinderService {
                 ))]));
             }
         };
-
-        let root_display = root.to_string_lossy().to_string();
 
         let has_corpus = match Self::load_chunk_corpus(&root).await {
             Ok(v) => v.is_some(),
@@ -2536,6 +2806,51 @@ impl ContextFinderService {
         let max_results = request.max_results.unwrap_or(50).clamp(1, 1000);
         let case_sensitive = request.case_sensitive.unwrap_or(true);
         let whole_word = request.whole_word.unwrap_or(false);
+        let root_display = root.to_string_lossy().to_string();
+        let normalized_file_pattern = file_pattern.map(str::to_string);
+
+        let mut cursor_mode: Option<TextSearchCursorModeV1> = None;
+        if let Some(cursor) = request
+            .cursor
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let decoded: TextSearchCursorV1 = match decode_cursor(cursor) {
+                Ok(v) => v,
+                Err(err) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid cursor: {err}"
+                    ))]));
+                }
+            };
+            if decoded.v != CURSOR_VERSION || decoded.tool != "text_search" {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: wrong tool",
+                )]));
+            }
+            if decoded.root != root_display {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: different root",
+                )]));
+            }
+            if decoded.pattern != pattern {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: different pattern",
+                )]));
+            }
+            if decoded.file_pattern != normalized_file_pattern {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: different file_pattern",
+                )]));
+            }
+            if decoded.case_sensitive != case_sensitive || decoded.whole_word != whole_word {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: different search options",
+                )]));
+            }
+            cursor_mode = Some(decoded.mode);
+        }
 
         const MAX_FILE_BYTES: u64 = 2_000_000;
 
@@ -2544,6 +2859,7 @@ impl ContextFinderService {
         let mut scanned_files = 0usize;
         let mut skipped_large_files = 0usize;
         let mut truncated = false;
+        let mut next_cursor: Option<String> = None;
         let source: String;
 
         let corpus = match Self::load_chunk_corpus(&root).await {
@@ -2558,22 +2874,93 @@ impl ContextFinderService {
         if let Some(corpus) = corpus {
             source = "corpus".to_string();
 
+            let (start_file_index, start_chunk_index, start_line_offset) =
+                match cursor_mode.as_ref() {
+                    None => (0usize, 0usize, 0usize),
+                    Some(TextSearchCursorModeV1::Corpus {
+                        file_index,
+                        chunk_index,
+                        line_offset,
+                    }) => (*file_index, *chunk_index, *line_offset),
+                    Some(TextSearchCursorModeV1::Filesystem { .. }) => {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "Invalid cursor: wrong mode",
+                        )]));
+                    }
+                };
+
             let mut files: Vec<(&String, &Vec<context_code_chunker::CodeChunk>)> =
                 corpus.files().iter().collect();
             files.sort_by(|a, b| a.0.cmp(b.0));
+            files.retain(|(file, _)| Self::matches_file_pattern(file, file_pattern));
 
-            'outer_corpus: for (file, chunks) in files {
-                if !Self::matches_file_pattern(file, file_pattern) {
-                    continue;
+            if start_file_index > files.len() {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: out of range",
+                )]));
+            }
+
+            let mut next_state: Option<TextSearchCursorModeV1> = None;
+
+            'outer_corpus: for (file_index, (_file, chunks)) in
+                files.iter().enumerate().skip(start_file_index)
+            {
+                if matches.len() >= max_results {
+                    truncated = true;
+                    next_state = Some(TextSearchCursorModeV1::Corpus {
+                        file_index,
+                        chunk_index: 0,
+                        line_offset: 0,
+                    });
+                    break 'outer_corpus;
                 }
+
                 scanned_files += 1;
 
-                for chunk in chunks {
-                    for (offset, line_text) in chunk.content.lines().enumerate() {
+                let mut chunk_refs: Vec<&context_code_chunker::CodeChunk> = chunks.iter().collect();
+                chunk_refs.sort_by(|a, b| {
+                    a.start_line
+                        .cmp(&b.start_line)
+                        .then_with(|| a.end_line.cmp(&b.end_line))
+                });
+
+                let first_file = file_index == start_file_index;
+                let start_chunk = if first_file { start_chunk_index } else { 0 };
+                if start_chunk > chunk_refs.len() {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Invalid cursor: out of range",
+                    )]));
+                }
+
+                for chunk_index in start_chunk..chunk_refs.len() {
+                    if matches.len() >= max_results {
+                        truncated = true;
+                        next_state = Some(TextSearchCursorModeV1::Corpus {
+                            file_index,
+                            chunk_index,
+                            line_offset: 0,
+                        });
+                        break 'outer_corpus;
+                    }
+
+                    let chunk = chunk_refs[chunk_index];
+                    let line_start = if first_file && chunk_index == start_chunk {
+                        start_line_offset
+                    } else {
+                        0
+                    };
+
+                    for (offset, line_text) in chunk.content.lines().enumerate().skip(line_start) {
                         if matches.len() >= max_results {
                             truncated = true;
+                            next_state = Some(TextSearchCursorModeV1::Corpus {
+                                file_index,
+                                chunk_index,
+                                line_offset: offset,
+                            });
                             break 'outer_corpus;
                         }
+
                         let Some(col_byte) =
                             Self::match_in_line(line_text, pattern, case_sensitive, whole_word)
                         else {
@@ -2592,26 +2979,80 @@ impl ContextFinderService {
                     }
                 }
             }
+
+            if truncated {
+                let Some(mode) = next_state else {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Internal error: missing cursor state",
+                    )]));
+                };
+                let token = TextSearchCursorV1 {
+                    v: CURSOR_VERSION,
+                    tool: "text_search".to_string(),
+                    root: root_display.clone(),
+                    pattern: pattern.to_string(),
+                    file_pattern: normalized_file_pattern.clone(),
+                    case_sensitive,
+                    whole_word,
+                    mode,
+                };
+                next_cursor = match encode_cursor(&token) {
+                    Ok(value) => Some(value),
+                    Err(err) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Error: {err:#}"
+                        ))]));
+                    }
+                };
+            }
         } else {
             source = "filesystem".to_string();
 
             let scanner = FileScanner::new(&root);
-            let files = scanner.scan();
+            let (start_file_index, start_line_offset) = match cursor_mode.as_ref() {
+                None => (0usize, 0usize),
+                Some(TextSearchCursorModeV1::Filesystem {
+                    file_index,
+                    line_offset,
+                }) => (*file_index, *line_offset),
+                Some(TextSearchCursorModeV1::Corpus { .. }) => {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Invalid cursor: wrong mode",
+                    )]));
+                }
+            };
 
-            'outer_fs: for file in files {
+            let mut candidates: Vec<(String, PathBuf)> = scanner
+                .scan()
+                .into_iter()
+                .filter_map(|file| normalize_relative_path(&root, &file).map(|rel| (rel, file)))
+                .filter(|(rel, _)| Self::matches_file_pattern(rel, file_pattern))
+                .collect();
+            candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+            if start_file_index > candidates.len() {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: out of range",
+                )]));
+            }
+
+            let mut next_state: Option<TextSearchCursorModeV1> = None;
+
+            'outer_fs: for (file_index, (rel_path, abs_path)) in
+                candidates.iter().enumerate().skip(start_file_index)
+            {
                 if matches.len() >= max_results {
                     truncated = true;
+                    next_state = Some(TextSearchCursorModeV1::Filesystem {
+                        file_index,
+                        line_offset: 0,
+                    });
                     break 'outer_fs;
                 }
-                let Some(rel_path) = normalize_relative_path(&root, &file) else {
-                    continue;
-                };
-                if !Self::matches_file_pattern(&rel_path, file_pattern) {
-                    continue;
-                }
+
                 scanned_files += 1;
 
-                let meta = match std::fs::metadata(&file) {
+                let meta = match std::fs::metadata(abs_path) {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
@@ -2620,15 +3061,23 @@ impl ContextFinderService {
                     continue;
                 }
 
-                let Ok(content) = std::fs::read_to_string(&file) else {
+                let Ok(content) = std::fs::read_to_string(abs_path) else {
                     continue;
                 };
 
-                for (offset, line_text) in content.lines().enumerate() {
+                let first_file = file_index == start_file_index;
+                let line_start = if first_file { start_line_offset } else { 0 };
+
+                for (offset, line_text) in content.lines().enumerate().skip(line_start) {
                     if matches.len() >= max_results {
                         truncated = true;
+                        next_state = Some(TextSearchCursorModeV1::Filesystem {
+                            file_index,
+                            line_offset: offset,
+                        });
                         break 'outer_fs;
                     }
+
                     let Some(col_byte) =
                         Self::match_in_line(line_text, pattern, case_sensitive, whole_word)
                     else {
@@ -2644,6 +3093,32 @@ impl ContextFinderService {
                     });
                 }
             }
+
+            if truncated {
+                let Some(mode) = next_state else {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Internal error: missing cursor state",
+                    )]));
+                };
+                let token = TextSearchCursorV1 {
+                    v: CURSOR_VERSION,
+                    tool: "text_search".to_string(),
+                    root: root_display.clone(),
+                    pattern: pattern.to_string(),
+                    file_pattern: normalized_file_pattern.clone(),
+                    case_sensitive,
+                    whole_word,
+                    mode,
+                };
+                next_cursor = match encode_cursor(&token) {
+                    Ok(value) => Some(value),
+                    Err(err) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Error: {err:#}"
+                        ))]));
+                    }
+                };
+            }
         }
 
         let result = TextSearchResult {
@@ -2654,6 +3129,7 @@ impl ContextFinderService {
             skipped_large_files,
             returned: matches.len(),
             truncated,
+            next_cursor,
             matches,
         };
 
@@ -2853,17 +3329,60 @@ impl ContextFinderService {
             }
         };
         self.touch_daemon_best_effort(&root);
+        let root_display = root.to_string_lossy().to_string();
 
         let limit = request.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
         let max_chars = request
             .max_chars
             .unwrap_or(DEFAULT_MAX_CHARS)
             .clamp(1, MAX_MAX_CHARS);
+
+        let normalized_file_pattern = request
+            .file_pattern
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        let mut cursor_last_file: Option<String> = None;
+        if let Some(cursor) = request
+            .cursor
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let decoded: ListFilesCursorV1 = match decode_cursor(cursor) {
+                Ok(v) => v,
+                Err(err) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid cursor: {err}"
+                    ))]));
+                }
+            };
+            if decoded.v != CURSOR_VERSION || decoded.tool != "list_files" {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: wrong tool",
+                )]));
+            }
+            if decoded.root != root_display {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: different root",
+                )]));
+            }
+            if decoded.file_pattern != normalized_file_pattern {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: different file_pattern",
+                )]));
+            }
+            cursor_last_file = Some(decoded.last_file);
+        }
         let result = match compute_list_files_result(
             &root,
+            &root_display,
             request.file_pattern.as_deref(),
             limit,
             max_chars,
+            cursor_last_file.as_deref(),
         )
         .await
         {
@@ -2907,6 +3426,7 @@ impl ContextFinderService {
             }
         };
         self.touch_daemon_best_effort(&root);
+        let root_display = root.to_string_lossy().to_string();
 
         let pattern = request.pattern.trim().to_string();
         if pattern.is_empty() {
@@ -2953,8 +3473,75 @@ impl ContextFinderService {
             .unwrap_or(DEFAULT_MAX_CHARS)
             .clamp(1, MAX_MAX_CHARS);
 
+        let normalized_file = request
+            .file
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let normalized_file_pattern = request
+            .file_pattern
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        let mut resume_file: Option<String> = None;
+        let mut resume_line = 1usize;
+        if let Some(cursor) = request
+            .cursor
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let decoded: GrepContextCursorV1 = match decode_cursor(cursor) {
+                Ok(v) => v,
+                Err(err) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid cursor: {err}"
+                    ))]));
+                }
+            };
+            if decoded.v != CURSOR_VERSION || decoded.tool != "grep_context" {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: wrong tool",
+                )]));
+            }
+            if decoded.root != root_display {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: different root",
+                )]));
+            }
+            if decoded.pattern != request.pattern {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: different pattern",
+                )]));
+            }
+            if decoded.file != normalized_file {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: different file",
+                )]));
+            }
+            if decoded.file_pattern != normalized_file_pattern {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: different file_pattern",
+                )]));
+            }
+            if decoded.case_sensitive != case_sensitive
+                || decoded.before != before
+                || decoded.after != after
+            {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid cursor: different search options",
+                )]));
+            }
+            resume_file = Some(decoded.resume_file);
+            resume_line = decoded.resume_line.max(1);
+        }
+
         let result = match compute_grep_context_result(
             &root,
+            &root_display,
             &request,
             &regex,
             case_sensitive,
@@ -2963,6 +3550,8 @@ impl ContextFinderService {
             max_matches,
             max_hunks,
             max_chars,
+            resume_file.as_deref(),
+            resume_line,
         )
         .await
         {
@@ -5682,6 +6271,7 @@ mod tests {
     async fn map_works_without_index_and_has_no_side_effects() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
+        let root_display = root.to_string_lossy().to_string();
 
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(
@@ -5695,11 +6285,15 @@ mod tests {
 
         assert!(!root.join(".context-finder").exists());
 
-        let result = compute_map_result(root, 1, 20).await.unwrap();
+        let result = compute_map_result(root, &root_display, 1, 20, 0)
+            .await
+            .unwrap();
         assert_eq!(result.total_files, 2);
         assert!(result.total_chunks > 0);
         assert!(result.directories.iter().any(|d| d.path == "src"));
         assert!(result.directories.iter().any(|d| d.path == "docs"));
+        assert!(!result.truncated);
+        assert!(result.next_cursor.is_none());
 
         // `map` must not create indexes/corpus.
         assert!(!root.join(".context-finder").exists());
@@ -5709,6 +6303,7 @@ mod tests {
     async fn list_files_works_without_index_and_is_bounded() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
+        let root_display = root.to_string_lossy().to_string();
 
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src").join("main.rs"), "fn main() {}\n").unwrap();
@@ -5720,7 +6315,7 @@ mod tests {
 
         assert!(!root.join(".context-finder").exists());
 
-        let result = compute_list_files_result(root, None, 50, 20_000)
+        let result = compute_list_files_result(root, &root_display, None, 50, 20_000, None)
             .await
             .unwrap();
         assert_eq!(result.source, "filesystem");
@@ -5728,27 +6323,38 @@ mod tests {
         assert!(result.files.contains(&"docs/README.md".to_string()));
         assert!(result.files.contains(&"README.md".to_string()));
         assert!(!result.truncated);
+        assert!(result.next_cursor.is_none());
 
-        let filtered = compute_list_files_result(root, Some("docs"), 50, 20_000)
-            .await
-            .unwrap();
+        let filtered =
+            compute_list_files_result(root, &root_display, Some("docs"), 50, 20_000, None)
+                .await
+                .unwrap();
         assert_eq!(filtered.files, vec!["docs/README.md".to_string()]);
+        assert!(!filtered.truncated);
+        assert!(filtered.next_cursor.is_none());
 
-        let globbed = compute_list_files_result(root, Some("src/*"), 50, 20_000)
-            .await
-            .unwrap();
+        let globbed =
+            compute_list_files_result(root, &root_display, Some("src/*"), 50, 20_000, None)
+                .await
+                .unwrap();
         assert_eq!(globbed.files, vec!["src/main.rs".to_string()]);
+        assert!(!globbed.truncated);
+        assert!(globbed.next_cursor.is_none());
 
-        let limited = compute_list_files_result(root, None, 1, 20_000)
+        let limited = compute_list_files_result(root, &root_display, None, 1, 20_000, None)
             .await
             .unwrap();
         assert!(limited.truncated);
         assert_eq!(limited.truncation, Some(ListFilesTruncation::Limit));
         assert_eq!(limited.files.len(), 1);
+        assert!(limited.next_cursor.is_some());
 
-        let tiny = compute_list_files_result(root, None, 50, 3).await.unwrap();
+        let tiny = compute_list_files_result(root, &root_display, None, 50, 3, None)
+            .await
+            .unwrap();
         assert!(tiny.truncated);
         assert_eq!(tiny.truncation, Some(ListFilesTruncation::MaxChars));
+        assert!(tiny.next_cursor.is_none());
 
         assert!(!root.join(".context-finder").exists());
     }
