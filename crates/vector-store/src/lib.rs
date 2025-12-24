@@ -72,8 +72,8 @@ pub use graph_node_store::{
 pub use store::VectorIndex;
 pub use store::VectorStore;
 pub use templates::{
-    classify_document_kind, DocumentKind, EmbeddingTemplates, GraphNodeTemplates, QueryKind,
-    QueryTemplates, EMBEDDING_TEMPLATES_SCHEMA_VERSION,
+    classify_document_kind, classify_path_kind, DocumentKind, EmbeddingTemplates,
+    GraphNodeTemplates, QueryKind, QueryTemplates, EMBEDDING_TEMPLATES_SCHEMA_VERSION,
 };
 pub use types::{SearchResult, StoredChunk};
 

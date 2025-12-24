@@ -15,14 +15,14 @@ use anyhow::{anyhow, Context as AnyhowContext, Result};
 use context_graph::{
     build_graph_docs, ContextAssembler, GraphDocConfig, GraphLanguage, GRAPH_DOC_VERSION,
 };
-use context_search::EnrichedResult;
+use context_search::{EnrichedResult, RelatedContext};
 use context_search::{
     MultiModelContextSearch, MultiModelHybridSearch, QueryClassifier, QueryType, SearchProfile,
     CONTEXT_PACK_VERSION,
 };
 use context_vector_store::{
-    corpus_path_for_project_root, current_model_id, ChunkCorpus, GraphNodeDoc, GraphNodeStore,
-    GraphNodeStoreMeta, QueryKind, SearchResult, VectorIndex,
+    classify_path_kind, corpus_path_for_project_root, current_model_id, ChunkCorpus, DocumentKind,
+    GraphNodeDoc, GraphNodeStore, GraphNodeStoreMeta, QueryKind, SearchResult, VectorIndex,
 };
 use itertools::Itertools;
 use log::{debug, warn};
@@ -531,6 +531,14 @@ impl SearchService {
             }
         };
 
+        let query_type = QueryClassifier::classify(&payload.query);
+        let docs_intent = QueryClassifier::is_docs_intent(&payload.query);
+        let include_docs = payload.include_docs.unwrap_or(true);
+        let prefer_code = payload.prefer_code.unwrap_or(!docs_intent);
+        let related_mode =
+            parse_related_mode(payload.related_mode.as_deref(), docs_intent, query_type)?;
+        let query_tokens = tokenize_focus_query(&payload.query);
+
         let load_index_start = Instant::now();
         let loaded = load_semantic_indexes(&project_ctx.root, &project_ctx.profile)
             .await
@@ -603,14 +611,18 @@ impl SearchService {
         let timing_graph_ms = graph_start.elapsed().as_millis() as u64;
 
         let assembly_strategy = strategy.to_assembly();
+        let candidate_limit = if prefer_code || !include_docs {
+            limit.saturating_add(50).min(200)
+        } else {
+            limit
+        };
         let search_start = Instant::now();
         let mut enriched_results = context_search
-            .search_with_context(&payload.query, limit, assembly_strategy)
+            .search_with_context(&payload.query, candidate_limit, assembly_strategy)
             .await
             .context("Context search failed")?;
         let timing_search_ms = search_start.elapsed().as_millis() as u64;
 
-        let query_type = QueryClassifier::classify(&payload.query);
         let graph_nodes_cfg = project_ctx.profile.graph_nodes();
         let mut graph_nodes_hint: Option<String> = None;
 
@@ -760,7 +772,7 @@ impl SearchService {
                                         a.primary.chunk.start_line.cmp(&b.primary.chunk.start_line)
                                     })
                             });
-                            enriched_results.truncate(limit);
+                            enriched_results.truncate(candidate_limit);
                         }
                     }
                     Err(err) => warn!("graph_nodes disabled: {err:#}"),
@@ -770,12 +782,17 @@ impl SearchService {
 
         let model_id = current_model_id().unwrap_or_else(|_| "bge-small".to_string());
 
+        let enriched_results =
+            prepare_context_pack_enriched(enriched_results, limit, prefer_code, include_docs);
+
         let (items, budget, filtered_out) = pack_enriched_results(
             enriched_results,
             &project_ctx.profile,
             max_chars,
             max_related_per_primary,
             &request_options,
+            related_mode,
+            &query_tokens,
         );
 
         let debug_hints = if trace {
@@ -811,6 +828,13 @@ impl SearchService {
                     text: format!(
                         "debug: query_kind={query_kind:?} strategy={strategy:?} language={}",
                         language_pref.as_deref().unwrap_or("rust")
+                    ),
+                },
+                Hint {
+                    kind: HintKind::Info,
+                    text: format!(
+                        "debug: prefer_code={prefer_code} include_docs={include_docs} related_mode={}",
+                        related_mode.as_str()
                     ),
                 },
                 Hint {
@@ -906,6 +930,9 @@ impl SearchService {
             strategy: payload.strategy,
             max_chars: payload.max_chars,
             max_related_per_primary: payload.max_related_per_primary,
+            prefer_code: payload.prefer_code,
+            include_docs: payload.include_docs,
+            related_mode: payload.related_mode,
             trace: payload.trace,
             language: payload.language,
             reuse_graph: payload.reuse_graph,
@@ -1010,12 +1037,281 @@ fn explain_pack_item(item: &ContextPackItem) -> Vec<String> {
     why
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelatedMode {
+    Explore,
+    Focus,
+}
+
+impl RelatedMode {
+    #[must_use]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Explore => "explore",
+            Self::Focus => "focus",
+        }
+    }
+}
+
+fn parse_related_mode(
+    raw: Option<&str>,
+    docs_intent: bool,
+    query_type: QueryType,
+) -> Result<RelatedMode> {
+    let normalized = raw.unwrap_or("auto").trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "explore" => Ok(RelatedMode::Explore),
+        "focus" => Ok(RelatedMode::Focus),
+        "auto" => {
+            if !docs_intent && matches!(query_type, QueryType::Identifier | QueryType::Path) {
+                Ok(RelatedMode::Focus)
+            } else {
+                Ok(RelatedMode::Explore)
+            }
+        }
+        other => Err(anyhow!(
+            "related_mode must be 'explore' or 'focus' (got '{other}')"
+        )),
+    }
+}
+
+fn tokenize_focus_query(query: &str) -> Vec<String> {
+    const STOPWORDS: &[&str] = &[
+        // English.
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "how",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "this",
+        "to",
+        "what",
+        "when",
+        "where",
+        "why",
+        "with",
+        // Common repo/path noise.
+        "bin",
+        "crates",
+        "doc",
+        "docs",
+        "lib",
+        "src",
+        "test",
+        "tests",
+        // Common extensions.
+        "c",
+        "cpp",
+        "go",
+        "h",
+        "hpp",
+        "java",
+        "js",
+        "json",
+        "md",
+        "mdx",
+        "py",
+        "rs",
+        "toml",
+        "ts",
+        "yaml",
+        "yml",
+        // Russian.
+        "в",
+        "для",
+        "и",
+        "или",
+        "как",
+        "на",
+        "по",
+        "почему",
+        "что",
+        "где",
+        "зачем",
+    ];
+
+    let q = query.to_ascii_lowercase();
+    let mut tokens = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for raw in q.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-') {
+        let token = raw.trim();
+        if token.is_empty() || token.len() < 2 {
+            continue;
+        }
+        if STOPWORDS.contains(&token) {
+            continue;
+        }
+        if seen.insert(token.to_string()) {
+            tokens.push(token.to_string());
+        }
+        if tokens.len() >= 12 {
+            break;
+        }
+    }
+    tokens
+}
+
+fn related_query_hit(rc: &RelatedContext, query_tokens: &[String]) -> bool {
+    if query_tokens.is_empty() {
+        return false;
+    }
+
+    let file = rc.chunk.file_path.to_ascii_lowercase();
+    if query_tokens.iter().any(|t| file.contains(t)) {
+        return true;
+    }
+
+    if let Some(symbol) = rc.chunk.metadata.symbol_name.as_deref() {
+        let symbol = symbol.to_ascii_lowercase();
+        if query_tokens.iter().any(|t| symbol.contains(t)) {
+            return true;
+        }
+    }
+
+    let content = rc.chunk.content.to_ascii_lowercase();
+    query_tokens.iter().any(|t| content.contains(t))
+}
+
+fn prepare_related_contexts(
+    mut related: Vec<RelatedContext>,
+    related_mode: RelatedMode,
+    query_tokens: &[String],
+) -> Vec<RelatedContext> {
+    let explore_sort = |a: &RelatedContext, b: &RelatedContext| {
+        b.relevance_score
+            .total_cmp(&a.relevance_score)
+            .then_with(|| a.distance.cmp(&b.distance))
+            .then_with(|| a.chunk.file_path.cmp(&b.chunk.file_path))
+            .then_with(|| a.chunk.start_line.cmp(&b.chunk.start_line))
+    };
+
+    match related_mode {
+        RelatedMode::Explore => {
+            related.sort_by(explore_sort);
+            related
+        }
+        RelatedMode::Focus => {
+            const MAX_DISTANCE_FOCUS: usize = 2;
+            const FALLBACK_NON_HITS: usize = 2;
+
+            if query_tokens.is_empty() {
+                related.sort_by(explore_sort);
+                return related;
+            }
+
+            related.retain(|rc| rc.distance <= MAX_DISTANCE_FOCUS);
+
+            let mut hits: Vec<RelatedContext> = Vec::new();
+            let mut misses: Vec<RelatedContext> = Vec::new();
+            for rc in related {
+                if related_query_hit(&rc, query_tokens) {
+                    hits.push(rc);
+                } else {
+                    misses.push(rc);
+                }
+            }
+
+            let fallback = if hits.is_empty() {
+                misses.sort_by(explore_sort);
+                misses.truncate(FALLBACK_NON_HITS);
+                misses
+            } else {
+                misses.retain(|rc| rc.distance <= 1);
+                misses.sort_by(explore_sort);
+                misses.truncate(FALLBACK_NON_HITS);
+                misses
+            };
+
+            let mut combined: Vec<(bool, RelatedContext)> =
+                hits.into_iter().map(|rc| (true, rc)).collect();
+            combined.extend(fallback.into_iter().map(|rc| (false, rc)));
+
+            combined.sort_by(|a, b| {
+                b.0.cmp(&a.0)
+                    .then_with(|| b.1.relevance_score.total_cmp(&a.1.relevance_score))
+                    .then_with(|| a.1.distance.cmp(&b.1.distance))
+                    .then_with(|| a.1.chunk.file_path.cmp(&b.1.chunk.file_path))
+                    .then_with(|| a.1.chunk.start_line.cmp(&b.1.chunk.start_line))
+            });
+
+            combined.into_iter().map(|(_, rc)| rc).collect()
+        }
+    }
+}
+
+fn prepare_context_pack_enriched(
+    mut enriched: Vec<EnrichedResult>,
+    limit: usize,
+    prefer_code: bool,
+    include_docs: bool,
+) -> Vec<EnrichedResult> {
+    if !include_docs {
+        enriched.retain(|er| classify_path_kind(&er.primary.chunk.file_path) != DocumentKind::Docs);
+    }
+
+    fn kind_rank(kind: DocumentKind, prefer_code: bool) -> u8 {
+        if prefer_code {
+            match kind {
+                DocumentKind::Code => 0,
+                DocumentKind::Test => 1,
+                DocumentKind::Config => 2,
+                DocumentKind::Other => 3,
+                DocumentKind::Docs => 4,
+            }
+        } else {
+            match kind {
+                DocumentKind::Docs => 0,
+                DocumentKind::Code => 1,
+                DocumentKind::Test => 2,
+                DocumentKind::Config => 3,
+                DocumentKind::Other => 4,
+            }
+        }
+    }
+
+    enriched.sort_by(|a, b| {
+        let a_kind = classify_path_kind(&a.primary.chunk.file_path);
+        let b_kind = classify_path_kind(&b.primary.chunk.file_path);
+        kind_rank(a_kind, prefer_code)
+            .cmp(&kind_rank(b_kind, prefer_code))
+            .then_with(|| b.primary.score.total_cmp(&a.primary.score))
+            .then_with(|| a.primary.chunk.file_path.cmp(&b.primary.chunk.file_path))
+            .then_with(|| a.primary.chunk.start_line.cmp(&b.primary.chunk.start_line))
+    });
+
+    if !include_docs {
+        for er in &mut enriched {
+            er.related
+                .retain(|rc| classify_path_kind(&rc.chunk.file_path) != DocumentKind::Docs);
+        }
+    }
+
+    enriched.truncate(limit);
+    enriched
+}
+
 fn pack_enriched_results(
     enriched: Vec<EnrichedResult>,
     profile: &SearchProfile,
     max_chars: usize,
     max_related_per_primary: usize,
     request_options: &crate::command::domain::RequestOptions,
+    related_mode: RelatedMode,
+    query_tokens: &[String],
 ) -> (Vec<ContextPackItem>, ContextPackBudget, usize) {
     let mut used_chars = 0usize;
     let mut truncated = false;
@@ -1070,13 +1366,7 @@ fn pack_enriched_results(
             crate::command::path_filters::path_allowed(&rc.chunk.file_path, request_options)
         });
         filtered_out += before_filters.saturating_sub(related.len());
-        related.sort_by(|a, b| {
-            b.relevance_score
-                .total_cmp(&a.relevance_score)
-                .then_with(|| a.distance.cmp(&b.distance))
-                .then_with(|| a.chunk.file_path.cmp(&b.chunk.file_path))
-                .then_with(|| a.chunk.start_line.cmp(&b.chunk.start_line))
-        });
+        let related = prepare_related_contexts(related, related_mode, query_tokens);
 
         let relationship_cap = |kind: &str| -> usize {
             match kind {
@@ -1638,6 +1928,15 @@ fn relation_priority(path: &[String]) -> std::cmp::Reverse<u8> {
 }
 
 fn choose_strategy(query: &str) -> (SearchStrategy, Option<String>) {
+    let query_type = QueryClassifier::classify(query);
+    let docs_intent = QueryClassifier::is_docs_intent(query);
+    if !docs_intent && matches!(query_type, QueryType::Identifier | QueryType::Path) {
+        return (
+            SearchStrategy::Direct,
+            Some("strategy auto: identifier/path -> direct (precise hits)".to_string()),
+        );
+    }
+
     let q = query.to_lowercase();
     let mut reason = None;
     let strategy =
@@ -1738,7 +2037,7 @@ pub(crate) fn key_for(result: &SearchResultOutput) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::pack_enriched_results;
+    use super::{pack_enriched_results, prepare_context_pack_enriched, RelatedMode};
     use context_code_chunker::{ChunkMetadata, CodeChunk};
     use context_graph::AssemblyStrategy;
     use context_search::{EnrichedResult, RelatedContext, SearchProfile};
@@ -1782,8 +2081,16 @@ mod tests {
         }];
 
         let request_options = crate::command::domain::RequestOptions::default();
-        let (items, budget, _filtered_out) =
-            pack_enriched_results(enriched, &profile, 50_000, 100, &request_options);
+        let query_tokens = Vec::new();
+        let (items, budget, _filtered_out) = pack_enriched_results(
+            enriched,
+            &profile,
+            50_000,
+            100,
+            &request_options,
+            RelatedMode::Explore,
+            &query_tokens,
+        );
         assert!(!budget.truncated);
 
         let related_ids: Vec<String> = items
@@ -1832,8 +2139,16 @@ mod tests {
             include_paths: vec!["src".to_string()],
             ..Default::default()
         };
-        let (items, budget, filtered_out) =
-            pack_enriched_results(enriched, &profile, 50_000, 100, &request_options);
+        let query_tokens = Vec::new();
+        let (items, budget, filtered_out) = pack_enriched_results(
+            enriched,
+            &profile,
+            50_000,
+            100,
+            &request_options,
+            RelatedMode::Explore,
+            &query_tokens,
+        );
         assert!(!budget.truncated);
         assert!(filtered_out >= 1);
 
@@ -1843,5 +2158,128 @@ mod tests {
             .map(|i| i.file.as_str())
             .collect();
         assert_eq!(primary_files, vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn packer_focus_prefers_query_hits_over_raw_relevance() {
+        let profile = SearchProfile::general();
+
+        let primary = SearchResult {
+            id: "src/main.rs:1:1".to_string(),
+            chunk: chunk("src/main.rs", 1, "fn main() {}"),
+            score: 1.0,
+        };
+
+        let related_miss = RelatedContext {
+            chunk: chunk("src/miss.rs", 1, "fn unrelated() {}"),
+            relationship_path: vec!["Calls".to_string()],
+            distance: 1,
+            relevance_score: 100.0,
+        };
+        let related_hit = RelatedContext {
+            chunk: chunk("src/hit.rs", 1, "fn target() {}"),
+            relationship_path: vec!["Calls".to_string()],
+            distance: 1,
+            relevance_score: 0.1,
+        };
+
+        let enriched = vec![EnrichedResult {
+            primary,
+            related: vec![related_miss, related_hit],
+            total_lines: 1,
+            strategy: AssemblyStrategy::Extended,
+        }];
+
+        let request_options = crate::command::domain::RequestOptions::default();
+        let query_tokens = vec!["target".to_string()];
+        let (items, budget, _filtered_out) = pack_enriched_results(
+            enriched,
+            &profile,
+            50_000,
+            100,
+            &request_options,
+            RelatedMode::Focus,
+            &query_tokens,
+        );
+        assert!(!budget.truncated);
+
+        let related_files: Vec<&str> = items
+            .iter()
+            .filter(|i| i.role == "related")
+            .map(|i| i.file.as_str())
+            .collect();
+        assert_eq!(related_files, vec!["src/hit.rs", "src/miss.rs"]);
+    }
+
+    #[test]
+    fn prepare_excludes_docs_when_disabled() {
+        let primary_a = SearchResult {
+            id: "src/main.rs:1:1".to_string(),
+            chunk: chunk("src/main.rs", 1, "fn main() {}"),
+            score: 0.9,
+        };
+        let primary_b = SearchResult {
+            id: "docs/readme.md:1:1".to_string(),
+            chunk: chunk("docs/readme.md", 1, "# docs"),
+            score: 1.0,
+        };
+
+        let enriched = vec![
+            EnrichedResult {
+                primary: primary_b,
+                related: Vec::new(),
+                total_lines: 1,
+                strategy: AssemblyStrategy::Extended,
+            },
+            EnrichedResult {
+                primary: primary_a,
+                related: Vec::new(),
+                total_lines: 1,
+                strategy: AssemblyStrategy::Extended,
+            },
+        ];
+
+        let prepared = prepare_context_pack_enriched(enriched, 10, false, false);
+        let files: Vec<&str> = prepared
+            .iter()
+            .map(|er| er.primary.chunk.file_path.as_str())
+            .collect();
+        assert_eq!(files, vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn prepare_prefers_code_over_docs_when_enabled() {
+        let primary_a = SearchResult {
+            id: "src/main.rs:1:1".to_string(),
+            chunk: chunk("src/main.rs", 1, "fn main() {}"),
+            score: 0.9,
+        };
+        let primary_b = SearchResult {
+            id: "docs/readme.md:1:1".to_string(),
+            chunk: chunk("docs/readme.md", 1, "# docs"),
+            score: 1.0,
+        };
+
+        let enriched = vec![
+            EnrichedResult {
+                primary: primary_b,
+                related: Vec::new(),
+                total_lines: 1,
+                strategy: AssemblyStrategy::Extended,
+            },
+            EnrichedResult {
+                primary: primary_a,
+                related: Vec::new(),
+                total_lines: 1,
+                strategy: AssemblyStrategy::Extended,
+            },
+        ];
+
+        let prepared = prepare_context_pack_enriched(enriched, 10, true, true);
+        let files: Vec<&str> = prepared
+            .iter()
+            .map(|er| er.primary.chunk.file_path.as_str())
+            .collect();
+        assert_eq!(files, vec!["src/main.rs", "docs/readme.md"]);
     }
 }

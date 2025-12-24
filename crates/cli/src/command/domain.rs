@@ -588,6 +588,15 @@ pub struct ContextPackPayload {
     pub max_chars: Option<usize>,
     #[serde(default)]
     pub max_related_per_primary: Option<usize>,
+    /// Prefer code results over markdown docs (implementation-first).
+    #[serde(default)]
+    pub prefer_code: Option<bool>,
+    /// Whether markdown docs (e.g. *.md) may be included in the pack (default: true).
+    #[serde(default)]
+    pub include_docs: Option<bool>,
+    /// Related context mode: \"explore\" (default) or \"focus\" (query-gated).
+    #[serde(default)]
+    pub related_mode: Option<String>,
     #[serde(default)]
     pub trace: Option<bool>,
     #[serde(default)]
@@ -609,6 +618,15 @@ pub struct TaskPackPayload {
     pub max_chars: Option<usize>,
     #[serde(default)]
     pub max_related_per_primary: Option<usize>,
+    /// Prefer code results over markdown docs (implementation-first).
+    #[serde(default)]
+    pub prefer_code: Option<bool>,
+    /// Whether markdown docs (e.g. *.md) may be included in the pack (default: true).
+    #[serde(default)]
+    pub include_docs: Option<bool>,
+    /// Related context mode: \"explore\" (default) or \"focus\" (query-gated).
+    #[serde(default)]
+    pub related_mode: Option<String>,
     #[serde(default)]
     pub trace: Option<bool>,
     #[serde(default)]

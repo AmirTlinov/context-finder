@@ -17,6 +17,21 @@ For agent workloads, reduce noise early by filtering paths at the request level:
 
 These filters are applied during pack assembly (so they affect `budget` deterministically).
 
+## Code vs docs preference (agent ergonomics)
+
+`context_pack` can be tuned to be implementation-first or documentation-first:
+
+- `prefer_code` (bool): when `true`, rank code/test/config before markdown docs; when `false`, rank docs before code.
+- `include_docs` (bool): when `false`, exclude `*.md` / `*.mdx` from both primary and related items.
+- `related_mode` (`explore` | `focus`):
+  - `explore` keeps a broader halo (good for research / onboarding).
+  - `focus` gates related items by query-token hits and favors matching chunks (good for “where/how implemented”).
+
+Defaults are chosen heuristically for agent workflows:
+
+- For docs-intent queries (`README`, `docs`, `tutorial`, `*.md`), default is docs-first + `related_mode=explore`.
+- For identifier/path queries, default is code-first + `related_mode=focus`.
+
 ## Schema (data)
 
 ```jsonc

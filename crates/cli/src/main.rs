@@ -320,6 +320,22 @@ struct ContextPackArgs {
     #[arg(long)]
     max_related_per_primary: Option<usize>,
 
+    /// Prefer code results over markdown docs (implementation-first)
+    #[arg(long, conflicts_with = "prefer_docs")]
+    prefer_code: bool,
+
+    /// Prefer documentation results over code (docs-first)
+    #[arg(long, conflicts_with = "prefer_code")]
+    prefer_docs: bool,
+
+    /// Exclude markdown docs (e.g. *.md) from the pack
+    #[arg(long)]
+    exclude_docs: bool,
+
+    /// Related context mode: explore (default) or focus (query-gated)
+    #[arg(long)]
+    related_mode: Option<String>,
+
     /// Graph language: rust (default), python, javascript, typescript
     #[arg(long, short = 'l')]
     language: Option<String>,
@@ -1202,6 +1218,14 @@ async fn run_context(args: ContextArgs, cache_cfg: CacheConfig) -> Result<()> {
 async fn run_context_pack(args: ContextPackArgs, cache_cfg: CacheConfig) -> Result<()> {
     let path = args.path.canonicalize().context("Invalid project path")?;
     let strategy = args.strategy.as_deref().and_then(SearchStrategy::from_name);
+    let prefer_code = if args.prefer_code {
+        Some(true)
+    } else if args.prefer_docs {
+        Some(false)
+    } else {
+        None
+    };
+    let include_docs = if args.exclude_docs { Some(false) } else { None };
     let payload = ContextPackPayload {
         query: args.query.clone(),
         limit: Some(args.limit),
@@ -1209,6 +1233,9 @@ async fn run_context_pack(args: ContextPackArgs, cache_cfg: CacheConfig) -> Resu
         strategy,
         max_chars: args.max_chars,
         max_related_per_primary: args.max_related_per_primary,
+        prefer_code,
+        include_docs,
+        related_mode: args.related_mode.clone(),
         trace: if args.trace { Some(true) } else { None },
         language: args.language.clone(),
         reuse_graph: Some(true),

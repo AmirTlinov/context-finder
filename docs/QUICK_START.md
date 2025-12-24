@@ -70,7 +70,24 @@ context-finder search "authentication" --with-graph
 context-finder search "api endpoint" --json
 ```
 
-### 3. Get Context for Multiple Queries
+### 3. Build a Bounded Context Pack (agent default)
+
+`context-pack` is a single-call, bounded JSON for agent context: primary hits + related halo under a strict character budget.
+
+```bash
+# Implementation-first (prefer code), exclude docs, reduce halo noise
+context-finder context-pack "EmbeddingCache" --path . \
+  --prefer-code --exclude-docs --related-mode focus \
+  --max-chars 20000 --json --quiet
+```
+
+Notes:
+
+- `--prefer-code` / `--prefer-docs` controls whether markdown docs are ranked after/before code.
+- `--exclude-docs` removes `*.md/*.mdx` from both primary and related items.
+- `--related-mode focus` gates related items by query hits; use `--related-mode explore` for broader exploration.
+
+### 4. Get Context for Multiple Queries
 
 ```bash
 # Aggregate context from multiple queries
@@ -82,7 +99,7 @@ context-finder get-context "error handling" "logging" --json -n 5
 
 Note: `get-context` is a CLI helper that composes multiple `search` requests. The Command API action `get_context` is different: it extracts a window around a specific file and line.
 
-### 4. List Symbols
+### 5. List Symbols
 
 ```bash
 # List all symbols in project
@@ -281,7 +298,14 @@ Cross-cutting options are supported under `options` (freshness policy, budgets, 
 context-finder command --json '{
   "action": "context_pack",
   "options": { "stale_policy": "auto", "max_reindex_ms": 1500, "include_paths": ["src"] },
-  "payload": { "query": "rate limiter", "limit": 6, "project": "." }
+  "payload": {
+    "query": "rate limiter",
+    "limit": 6,
+    "project": ".",
+    "prefer_code": true,
+    "include_docs": false,
+    "related_mode": "focus"
+  }
 }'
 ```
 

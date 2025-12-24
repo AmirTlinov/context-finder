@@ -77,6 +77,42 @@ impl QueryClassifier {
         QueryType::Conceptual
     }
 
+    /// Heuristic: does the query look like a request for documentation rather than implementation?
+    ///
+    /// This is used to pick safer defaults for agent workflows (e.g. code-first ranking vs
+    /// docs-first ranking).
+    #[must_use]
+    pub fn is_docs_intent(query: &str) -> bool {
+        let q = query.trim().to_ascii_lowercase();
+        if q.is_empty() {
+            return false;
+        }
+
+        if q.ends_with(".md") || q.ends_with(".mdx") {
+            return true;
+        }
+
+        [
+            "readme",
+            "docs",
+            "documentation",
+            "guide",
+            "tutorial",
+            "quick start",
+            "usage",
+            "install",
+            "architecture",
+            "rfc",
+            "adr",
+            "changelog",
+            "license",
+            "contributing",
+            "philosophy",
+        ]
+        .iter()
+        .any(|needle| q.contains(needle))
+    }
+
     #[must_use]
     pub fn weights(query: &str) -> QueryWeights {
         match Self::classify(query) {
@@ -177,5 +213,13 @@ mod tests {
         assert!(w_concept_short.semantic > w_concept_short.fuzzy);
         let w_concept_long = QueryClassifier::weights("async error handling in parser");
         assert!(w_concept_long.semantic > w_concept_long.fuzzy);
+    }
+
+    #[test]
+    fn docs_intent_detects_common_doc_queries() {
+        assert!(QueryClassifier::is_docs_intent("README.md"));
+        assert!(QueryClassifier::is_docs_intent("docs/ARCHITECTURE.md"));
+        assert!(QueryClassifier::is_docs_intent("how to install"));
+        assert!(!QueryClassifier::is_docs_intent("apexd"));
     }
 }

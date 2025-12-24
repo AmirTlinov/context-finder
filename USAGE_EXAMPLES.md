@@ -57,6 +57,20 @@ context-finder index . --experts --models embeddinggemma-300m --json
 context-finder context-pack "index schema version" --path . --max-chars 20000 --json --quiet
 ```
 
+Tuning knobs for agent workflows:
+
+```bash
+# Implementation-first (code-first), exclude docs, reduce halo noise
+context-finder context-pack "apexd" --path . \
+  --prefer-code --exclude-docs --related-mode focus \
+  --max-chars 20000 --json --quiet
+
+# Docs-first (keep markdown, broader exploration)
+context-finder context-pack "ARCHITECTURE.md" --path . \
+  --prefer-docs --related-mode explore \
+  --max-chars 20000 --json --quiet
+```
+
 Default profile is `quality` (balanced). For maximum speed: `--profile fast`. For maximum quality: `--profile general`.
 
 ### 2) Exploration: `context` (semantic + graph)

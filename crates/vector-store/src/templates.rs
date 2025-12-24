@@ -22,13 +22,27 @@ impl QueryKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DocumentKind {
     Code,
     Docs,
     Config,
     Test,
     Other,
+}
+
+impl DocumentKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Code => "code",
+            Self::Docs => "docs",
+            Self::Config => "config",
+            Self::Test => "test",
+            Self::Other => "other",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -323,6 +337,11 @@ impl EmbeddingTemplates {
 
 #[must_use]
 pub fn classify_document_kind(chunk: &CodeChunk) -> DocumentKind {
+    classify_path_kind(chunk.file_path.as_str())
+}
+
+#[must_use]
+pub fn classify_path_kind(path: &str) -> DocumentKind {
     fn has_extension(ext: Option<&str>, candidates: &[&str]) -> bool {
         ext.is_some_and(|ext| {
             candidates
@@ -331,7 +350,7 @@ pub fn classify_document_kind(chunk: &CodeChunk) -> DocumentKind {
         })
     }
 
-    let path = std::path::Path::new(chunk.file_path.as_str());
+    let path = std::path::Path::new(path);
     let ext = path.extension().and_then(|e| e.to_str());
 
     if has_extension(ext, &["md", "mdx"]) {
