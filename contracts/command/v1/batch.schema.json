@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "contracts/command/v1/batch.schema.json",
   "title": "Context Finder Batch action payload/result (v1)",
+  "description": "Command API batch (v1) executes multiple actions sequentially and returns a single bounded result. `$ref` wrapper semantics are shared with the MCP server `batch` tool (version 2) via `crates/batch-ref`.",
   "type": "object",
   "additionalProperties": false,
   "required": ["payload", "result"],
@@ -63,7 +64,7 @@
       "properties": {
         "id": {
           "type": "string",
-          "description": "Caller-provided identifier used to correlate results."
+          "description": "Caller-provided identifier used to correlate results (trimmed). Must be non-empty and unique within the batch; also used for `$ref` pointers (`#/items/<id>/data/...`)."
         },
         "action": {
           "type": "string",
@@ -88,7 +89,7 @@
           "type": "object",
           "default": {},
           "additionalProperties": true,
-          "description": "Action-specific payload for the item."
+          "description": "Action-specific payload for the item. Batch items support `$ref` wrappers in any value position: `{ \"$ref\": \"#/items/<id>/data/...\", \"$default\": <value?> }`. Important: `#/items/<id>/...` resolves against an evaluation context keyed by `items[].id` (not the output array index). The wrapper is recognized only when the object contains exactly `$ref` (+ optional `$default`)."
         }
       }
     },

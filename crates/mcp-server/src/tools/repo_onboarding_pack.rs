@@ -1,0 +1,247 @@
+use anyhow::Result;
+use std::collections::HashSet;
+use std::path::Path;
+
+use super::file_slice::compute_onboarding_doc_slice;
+use super::map::compute_map_result;
+use super::schemas::repo_onboarding_pack::{
+    RepoOnboardingNextAction, RepoOnboardingPackBudget, RepoOnboardingPackRequest,
+    RepoOnboardingPackResult, RepoOnboardingPackTruncation,
+};
+use super::ContextFinderService;
+
+const VERSION: u32 = 1;
+const DEFAULT_MAX_CHARS: usize = 20_000;
+const MAX_MAX_CHARS: usize = 500_000;
+const DEFAULT_MAP_DEPTH: usize = 2;
+const DEFAULT_MAP_LIMIT: usize = 20;
+const DEFAULT_DOCS_LIMIT: usize = 8;
+const MAX_DOCS_LIMIT: usize = 25;
+const DEFAULT_DOC_MAX_LINES: usize = 200;
+const MAX_DOC_MAX_LINES: usize = 5_000;
+const DEFAULT_DOC_MAX_CHARS: usize = 6_000;
+const MAX_DOC_MAX_CHARS: usize = 100_000;
+
+const DEFAULT_DOC_CANDIDATES: &[&str] = &[
+    "AGENTS.md",
+    "README.md",
+    "docs/QUICK_START.md",
+    "contracts/README.md",
+    "docs/README.md",
+    "USAGE_EXAMPLES.md",
+    "PHILOSOPHY.md",
+    "CONTRIBUTING.md",
+    "docs/COMMAND_RFC.md",
+];
+
+pub(super) fn finalize_repo_onboarding_budget(
+    result: &mut RepoOnboardingPackResult,
+) -> anyhow::Result<()> {
+    let mut used = 0usize;
+    for _ in 0..8 {
+        result.budget.used_chars = used;
+        let raw = serde_json::to_string(result)?;
+        let next = raw.chars().count();
+        if next == used {
+            result.budget.used_chars = next;
+            return Ok(());
+        }
+        used = next;
+    }
+
+    result.budget.used_chars = used;
+    Ok(())
+}
+
+fn build_next_actions(root_display: &str, has_corpus: bool) -> Vec<RepoOnboardingNextAction> {
+    let mut next_actions = Vec::new();
+    if !has_corpus {
+        next_actions.push(RepoOnboardingNextAction {
+            tool: "index".to_string(),
+            args: serde_json::json!({ "path": root_display }),
+            reason: "Build the semantic index (enables search/context/context_pack/impact/trace)."
+                .to_string(),
+        });
+    }
+
+    next_actions.push(RepoOnboardingNextAction {
+        tool: "grep_context".to_string(),
+        args: serde_json::json!({
+            "path": root_display,
+            "pattern": "TODO|FIXME",
+            "context": 10,
+            "max_hunks": 50,
+        }),
+        reason: "Scan for TODO/FIXME across the repo with surrounding context hunks.".to_string(),
+    });
+
+    next_actions.push(RepoOnboardingNextAction {
+        tool: "batch".to_string(),
+        args: serde_json::json!({
+            "version": 2,
+            "path": root_display,
+            "max_chars": 20000,
+            "items": [
+                { "id": "docs", "tool": "list_files", "input": { "file_pattern": "*.md", "limit": 200 } },
+                { "id": "read", "tool": "file_slice", "input": { "file": { "$ref": "#/items/docs/data/files/0" }, "start_line": 1, "max_lines": 200 } }
+            ]
+        }),
+        reason: "Example: chain tools in one call with `$ref` dependencies (batch v2).".to_string(),
+    });
+
+    if has_corpus {
+        next_actions.push(RepoOnboardingNextAction {
+            tool: "context_pack".to_string(),
+            args: serde_json::json!({
+                "path": root_display,
+                "query": "describe what you want to change",
+                "strategy": "extended",
+                "max_chars": 20000,
+            }),
+            reason: "One-shot semantic onboarding pack for a concrete question.".to_string(),
+        });
+    }
+
+    next_actions
+}
+
+fn collect_doc_candidates(request: &RepoOnboardingPackRequest) -> Vec<String> {
+    if let Some(custom) = request.doc_paths.as_ref() {
+        let mut seen = HashSet::new();
+        let mut doc_candidates: Vec<String> = Vec::new();
+        for rel in custom {
+            let rel = rel.trim();
+            if rel.is_empty() {
+                continue;
+            }
+            let rel = rel.replace('\\', "/");
+            if seen.insert(rel.clone()) {
+                doc_candidates.push(rel);
+            }
+        }
+        return doc_candidates;
+    }
+
+    DEFAULT_DOC_CANDIDATES
+        .iter()
+        .map(|&rel| rel.to_owned())
+        .collect()
+}
+
+fn add_docs_best_effort(
+    result: &mut RepoOnboardingPackResult,
+    root: &Path,
+    doc_candidates: &[String],
+    docs_limit: usize,
+    doc_max_lines: usize,
+    doc_max_chars: usize,
+) -> anyhow::Result<()> {
+    for rel in doc_candidates {
+        if result.docs.len() >= docs_limit {
+            result.budget.truncated = true;
+            result.budget.truncation = Some(RepoOnboardingPackTruncation::DocsLimit);
+            break;
+        }
+
+        let Ok(slice) = compute_onboarding_doc_slice(root, rel, 1, doc_max_lines, doc_max_chars)
+        else {
+            continue;
+        };
+        result.docs.push(slice);
+
+        finalize_repo_onboarding_budget(result)?;
+        if result.budget.used_chars > result.budget.max_chars {
+            result.docs.pop();
+            result.budget.truncated = true;
+            result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
+            let _ = finalize_repo_onboarding_budget(result);
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+fn trim_to_budget(result: &mut RepoOnboardingPackResult) -> anyhow::Result<()> {
+    finalize_repo_onboarding_budget(result)?;
+    while result.budget.used_chars > result.budget.max_chars && !result.next_actions.is_empty() {
+        result.next_actions.pop();
+        result.budget.truncated = true;
+        result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
+        let _ = finalize_repo_onboarding_budget(result);
+    }
+    while result.budget.used_chars > result.budget.max_chars && !result.docs.is_empty() {
+        result.docs.pop();
+        result.budget.truncated = true;
+        result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
+        let _ = finalize_repo_onboarding_budget(result);
+    }
+    if result.budget.used_chars > result.budget.max_chars {
+        anyhow::bail!(
+            "max_chars={} is too small for the onboarding pack payload",
+            result.budget.max_chars
+        );
+    }
+    Ok(())
+}
+
+pub(super) async fn compute_repo_onboarding_pack_result(
+    root: &Path,
+    root_display: &str,
+    request: &RepoOnboardingPackRequest,
+) -> Result<RepoOnboardingPackResult> {
+    let max_chars = request
+        .max_chars
+        .unwrap_or(DEFAULT_MAX_CHARS)
+        .clamp(1, MAX_MAX_CHARS);
+    let map_depth = request.map_depth.unwrap_or(DEFAULT_MAP_DEPTH).clamp(1, 4);
+    let map_limit = request.map_limit.unwrap_or(DEFAULT_MAP_LIMIT).clamp(1, 200);
+    let docs_limit = request
+        .docs_limit
+        .unwrap_or(DEFAULT_DOCS_LIMIT)
+        .clamp(0, MAX_DOCS_LIMIT);
+    let doc_max_lines = request
+        .doc_max_lines
+        .unwrap_or(DEFAULT_DOC_MAX_LINES)
+        .clamp(1, MAX_DOC_MAX_LINES);
+    let doc_max_chars = request
+        .doc_max_chars
+        .unwrap_or(DEFAULT_DOC_MAX_CHARS)
+        .clamp(1, MAX_DOC_MAX_CHARS);
+
+    let map = compute_map_result(root, root_display, map_depth, map_limit, 0).await?;
+
+    let has_corpus = ContextFinderService::load_chunk_corpus(root)
+        .await
+        .is_ok_and(|v| v.is_some());
+
+    let next_actions = build_next_actions(root_display, has_corpus);
+    let doc_candidates = collect_doc_candidates(request);
+
+    let mut result = RepoOnboardingPackResult {
+        version: VERSION,
+        root: root_display.to_string(),
+        map,
+        docs: Vec::new(),
+        next_actions,
+        budget: RepoOnboardingPackBudget {
+            max_chars,
+            used_chars: 0,
+            truncated: false,
+            truncation: None,
+        },
+        meta: None,
+    };
+
+    add_docs_best_effort(
+        &mut result,
+        root,
+        &doc_candidates,
+        docs_limit,
+        doc_max_lines,
+        doc_max_chars,
+    )?;
+    trim_to_budget(&mut result)?;
+
+    Ok(result)
+}

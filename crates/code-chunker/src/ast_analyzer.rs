@@ -1,4 +1,5 @@
 use crate::config::ChunkerConfig;
+use crate::contextual_imports;
 use crate::error::{ChunkerError, Result};
 use crate::language::Language;
 use crate::types::{ChunkMetadata, ChunkType, CodeChunk};
@@ -161,14 +162,16 @@ impl AstAnalyzer {
                         let mut chunk =
                             self.node_to_chunk(content, file_path, method_node, ChunkType::Method);
 
-                        // Set parent scope and build qualified name
-                        if let Some(ref target) = impl_target {
-                            chunk.metadata.parent_scope = Some(target.clone());
+                        // Set parent scope and build qualified name.
+                        if self.config.include_parent_context {
+                            if let Some(ref target) = impl_target {
+                                chunk.metadata.parent_scope = Some(target.clone());
 
-                            // Build qualified name: "EmbeddingModel::embed"
-                            if let Some(ref method_name) = chunk.metadata.symbol_name {
-                                chunk.metadata.qualified_name =
-                                    Some(format!("{target}::{method_name}"));
+                                // Build qualified name: "EmbeddingModel::embed"
+                                if let Some(ref method_name) = chunk.metadata.symbol_name {
+                                    chunk.metadata.qualified_name =
+                                        Some(format!("{target}::{method_name}"));
+                                }
                             }
                         }
 
@@ -184,8 +187,10 @@ impl AstAnalyzer {
                         let mut chunk =
                             self.node_to_chunk(content, file_path, method_node, chunk_type);
 
-                        if let Some(ref target) = impl_target {
-                            chunk.metadata.parent_scope = Some(target.clone());
+                        if self.config.include_parent_context {
+                            if let Some(ref target) = impl_target {
+                                chunk.metadata.parent_scope = Some(target.clone());
+                            }
                         }
 
                         chunks.push(chunk);
@@ -300,14 +305,16 @@ impl AstAnalyzer {
                         let mut chunk =
                             self.node_to_chunk(content, file_path, method_node, ChunkType::Method);
 
-                        // Set parent scope and build qualified name
-                        if let Some(ref name) = class_name {
-                            chunk.metadata.parent_scope = Some(name.clone());
+                        // Set parent scope and build qualified name.
+                        if self.config.include_parent_context {
+                            if let Some(ref name) = class_name {
+                                chunk.metadata.parent_scope = Some(name.clone());
 
-                            // Build qualified name: "MyClass.method"
-                            if let Some(ref method_name) = chunk.metadata.symbol_name {
-                                chunk.metadata.qualified_name =
-                                    Some(format!("{name}.{method_name}"));
+                                // Build qualified name: "MyClass.method"
+                                if let Some(ref method_name) = chunk.metadata.symbol_name {
+                                    chunk.metadata.qualified_name =
+                                        Some(format!("{name}.{method_name}"));
+                                }
                             }
                         }
 
@@ -386,9 +393,11 @@ impl AstAnalyzer {
                         let mut chunk =
                             self.node_to_chunk(content, file_path, method_node, chunk_type);
 
-                        // Set parent scope to class name
-                        if let Some(ref name) = class_name {
-                            chunk.metadata.parent_scope = Some(name.clone());
+                        // Set parent scope to class name.
+                        if self.config.include_parent_context {
+                            if let Some(ref name) = class_name {
+                                chunk.metadata.parent_scope = Some(name.clone());
+                            }
                         }
 
                         chunks.push(chunk);
@@ -406,8 +415,12 @@ impl AstAnalyzer {
         node: Node,
         chunk_type: ChunkType,
     ) -> CodeChunk {
-        // Extract docstrings/comments before the node
-        let doc_comments = self.extract_doc_comments(content, node);
+        // Extract docstrings/comments before the node (if enabled).
+        let doc_comments = if self.config.include_documentation {
+            self.extract_doc_comments(content, node)
+        } else {
+            String::new()
+        };
 
         let start_byte = node.start_byte();
         let end_byte = node.end_byte();
@@ -421,28 +434,19 @@ impl AstAnalyzer {
         // Build qualified name (will be updated with parent_scope later if method)
         let qualified_name = symbol_name.clone();
 
-        // Select relevant imports (filter by what's used in this chunk)
-        let relevant_imports = self.filter_relevant_imports(code_content);
+        let relevant_imports = if self.config.include_imports {
+            self.filter_relevant_imports(code_content)
+        } else {
+            Vec::new()
+        };
 
-        // Build enhanced content for embedding: imports + docstrings + code
-        let mut enhanced_content = String::new();
+        let documentation = if doc_comments.is_empty() {
+            None
+        } else {
+            Some(doc_comments)
+        };
 
-        // Add relevant imports for context
-        if !relevant_imports.is_empty() {
-            enhanced_content.push_str(&relevant_imports.join("\n"));
-            enhanced_content.push_str("\n\n");
-        }
-
-        // Add docstrings
-        if !doc_comments.is_empty() {
-            enhanced_content.push_str(&doc_comments);
-            enhanced_content.push('\n');
-        }
-
-        // Add code
-        enhanced_content.push_str(code_content);
-
-        let estimated_tokens = ChunkMetadata::estimate_tokens_from_content(&enhanced_content);
+        let estimated_tokens = ChunkMetadata::estimate_tokens_from_content(code_content);
 
         let metadata = ChunkMetadata {
             language: Some(self.language.as_str().to_string()),
@@ -450,6 +454,7 @@ impl AstAnalyzer {
             symbol_name,
             context_imports: relevant_imports,
             qualified_name,
+            documentation,
             estimated_tokens,
             ..Default::default()
         };
@@ -458,18 +463,24 @@ impl AstAnalyzer {
             file_path.to_string(),
             start_line,
             end_line,
-            enhanced_content,
+            code_content.to_string(),
             metadata,
         )
     }
 
     /// Filter imports to only those relevant to this chunk
     fn filter_relevant_imports(&self, code_content: &str) -> Vec<String> {
+        let limit = self.config.max_imports_per_chunk;
+        if limit == 0 {
+            return Vec::new();
+        }
+
         let mut relevant = Vec::new();
 
         for import in &self.file_imports {
             // Extract identifiers from import
-            let identifiers = self.extract_identifiers_from_import(import);
+            let identifiers =
+                contextual_imports::extract_identifiers_from_import(self.language, import);
 
             // Check if any identifier is used in code
             for ident in identifiers {
@@ -480,62 +491,12 @@ impl AstAnalyzer {
             }
 
             // Limit to avoid bloat
-            if relevant.len() >= 5 {
+            if relevant.len() >= limit {
                 break;
             }
         }
 
         relevant
-    }
-
-    /// Extract identifiers from import statement
-    fn extract_identifiers_from_import(&self, import: &str) -> Vec<String> {
-        let mut identifiers = Vec::new();
-
-        match self.language {
-            Language::Rust => {
-                // use std::collections::HashMap -> HashMap
-                // use crate::error::{Result, Error} -> Result, Error
-                if let Some(last_part) = import.split("::").last() {
-                    // Handle {A, B, C}
-                    if last_part.contains('{') {
-                        let inner = last_part.trim_start_matches('{').trim_end_matches('}');
-                        for ident in inner.split(',') {
-                            identifiers.push(ident.trim().to_string());
-                        }
-                    } else {
-                        identifiers.push(last_part.trim().to_string());
-                    }
-                }
-            }
-            Language::Python => {
-                // from x import A, B -> A, B
-                // import x -> x
-                if import.contains("import") {
-                    if let Some(after_import) = import.split("import").nth(1) {
-                        for ident in after_import.split(',') {
-                            identifiers.push(ident.trim().to_string());
-                        }
-                    }
-                }
-            }
-            Language::JavaScript | Language::TypeScript => {
-                // import { A, B } from 'x' -> A, B
-                if import.contains('{') {
-                    if let Some(inner_start) = import.find('{') {
-                        if let Some(inner_end) = import.find('}') {
-                            let inner = &import[inner_start + 1..inner_end];
-                            for ident in inner.split(',') {
-                                identifiers.push(ident.trim().to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        identifiers
     }
 
     /// Extract documentation comments/docstrings before a node

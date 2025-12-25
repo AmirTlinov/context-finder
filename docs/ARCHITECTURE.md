@@ -7,6 +7,7 @@ Context Finder is implemented as a Rust workspace with a small set of focused cr
 ```
 context-finder/
 ├── crates/
+│   ├── batch-ref/         # Batch $ref resolver (shared CLI/MCP)
 │   ├── code-chunker/      # AST-aware semantic chunking (tree-sitter)
 │   ├── vector-store/      # Embeddings + HNSW vector index (ONNX Runtime)
 │   ├── indexer/           # Project scanning + incremental indexing
@@ -250,4 +251,3 @@ Graph-aware modes expand primary hits with "related" chunks:
 | Cold start | initial index build cost | keep `.context-finder/` cached; use daemon-loop |
 | Language support | depends on tree-sitter grammars | fall back to non-AST modes where needed |
 | Real-time updates | watcher has debounce/latency | acceptable for dev; run `index --force` when needed |
-

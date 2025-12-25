@@ -4,9 +4,8 @@ use std::borrow::Cow;
 use std::future::Future;
 use std::io;
 use std::marker::PhantomData;
-use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Framing {
@@ -18,7 +17,7 @@ enum Framing {
 const MAX_BUFFER_BYTES: usize = if cfg!(test) { 4096 } else { 32 * 1024 * 1024 };
 const MAX_MESSAGE_BYTES: usize = if cfg!(test) { 1024 } else { 16 * 1024 * 1024 };
 
-fn is_ascii_whitespace(b: u8) -> bool {
+const fn is_ascii_whitespace(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\r' | b'\n')
 }
 
@@ -83,19 +82,44 @@ fn parse_content_length(headers: &str) -> Option<usize> {
 /// It auto-detects framing from the first non-whitespace bytes received.
 pub struct HybridStdioTransport<Role: ServiceRole, R: AsyncRead, W: AsyncWrite> {
     read: R,
-    write: Arc<Mutex<Option<W>>>,
+    write_tx: Option<mpsc::Sender<WriteRequest>>,
+    write_task: Option<tokio::task::JoinHandle<()>>,
     buf: Vec<u8>,
     framing: Framing,
-    _marker: PhantomData<fn() -> Role>,
+    _marker: PhantomData<fn() -> (Role, W)>,
+}
+
+struct WriteRequest {
+    bytes: Vec<u8>,
+    reply: oneshot::Sender<io::Result<()>>,
+}
+
+async fn run_write_loop<W: AsyncWrite + Unpin>(mut write: W, mut rx: mpsc::Receiver<WriteRequest>) {
+    while let Some(req) = rx.recv().await {
+        let result = async {
+            write.write_all(&req.bytes).await?;
+            write.flush().await?;
+            Ok(())
+        }
+        .await;
+        let should_stop = result.is_err();
+        let _ = req.reply.send(result);
+        if should_stop {
+            break;
+        }
+    }
 }
 
 impl<Role: ServiceRole, R: AsyncRead + Unpin + Send, W: AsyncWrite + Unpin + Send + 'static>
     HybridStdioTransport<Role, R, W>
 {
     pub fn new(read: R, write: W) -> Self {
+        let (write_tx, write_rx) = mpsc::channel::<WriteRequest>(16);
+        let write_task = tokio::spawn(run_write_loop(write, write_rx));
         Self {
             read,
-            write: Arc::new(Mutex::new(Some(write))),
+            write_tx: Some(write_tx),
+            write_task: Some(write_task),
             buf: Vec::new(),
             framing: Framing::Unknown,
             _marker: PhantomData,
@@ -130,10 +154,10 @@ impl<Role: ServiceRole, R: AsyncRead + Unpin + Send, W: AsyncWrite + Unpin + Sen
                 return Ok(None);
             };
             let mut line = self.buf.drain(..=nl).collect::<Vec<u8>>();
-            if let Some(b'\n') = line.last() {
+            if matches!(line.last(), Some(b'\n')) {
                 line.pop();
             }
-            if let Some(b'\r') = line.last() {
+            if matches!(line.last(), Some(b'\r')) {
                 line.pop();
             }
 
@@ -161,10 +185,9 @@ impl<Role: ServiceRole, R: AsyncRead + Unpin + Send, W: AsyncWrite + Unpin + Sen
                 Ok(msg) => return Ok(Some(msg)),
                 Err(err) => {
                     // Compat: ignore non-JSON garbage lines (but keep strict for JSON-looking lines).
-                    if matches!(trimmed.first(), Some(b'{') | Some(b'[')) {
+                    if matches!(trimmed.first(), Some(b'{' | b'[')) {
                         return Err(io::Error::new(io::ErrorKind::InvalidData, err));
                     }
-                    continue;
                 }
             }
         }
@@ -241,9 +264,15 @@ where
         item: TxJsonRpcMessage<Role>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let framing = self.framing;
-        let write = self.write.clone();
+        let write_tx = self.write_tx.clone();
 
         async move {
+            let Some(write_tx) = write_tx else {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "transport closed",
+                ));
+            };
             let json = serde_json::to_vec(&item).map_err(io::Error::other)?;
 
             let mut out = Vec::new();
@@ -260,15 +289,17 @@ where
                 }
             }
 
-            let mut guard = write.lock().await;
-            let Some(ref mut w) = *guard else {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotConnected,
-                    "transport closed",
-                ));
-            };
-            w.write_all(&out).await?;
-            w.flush().await?;
+            let (reply_tx, reply_rx) = oneshot::channel::<io::Result<()>>();
+            write_tx
+                .send(WriteRequest {
+                    bytes: out,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::NotConnected, "transport closed"))?;
+            reply_rx
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::NotConnected, "transport closed"))??;
             Ok(())
         }
     }
@@ -308,10 +339,13 @@ where
     }
 
     fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        let write = self.write.clone();
+        let write_task = self.write_task.take();
+        self.write_tx.take();
         async move {
-            let mut guard = write.lock().await;
-            *guard = None;
+            if let Some(task) = write_task {
+                task.abort();
+                let _ = task.await;
+            }
             Ok(())
         }
     }

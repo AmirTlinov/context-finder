@@ -1,0 +1,79 @@
+use context_indexer::ToolMeta;
+use rmcp::schemars;
+use serde::{Deserialize, Serialize};
+
+use super::file_slice::FileSliceResult;
+use super::map::MapResult;
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RepoOnboardingPackRequest {
+    /// Project directory path
+    #[schemars(description = "Project directory path")]
+    pub path: Option<String>,
+
+    /// Directory depth for aggregation (default: 2)
+    #[schemars(description = "Directory depth for grouping (1-4)")]
+    pub map_depth: Option<usize>,
+
+    /// Maximum number of directories to return (default: 20)
+    #[schemars(description = "Limit number of map nodes returned")]
+    pub map_limit: Option<usize>,
+
+    /// Optional explicit doc file paths to include (relative to project root). If omitted, uses a
+    /// built-in prioritized list (AGENTS/README/QUICK_START/contracts/...).
+    #[schemars(
+        description = "Optional explicit doc file paths to include (relative to project root)"
+    )]
+    pub doc_paths: Option<Vec<String>>,
+
+    /// Maximum number of docs to include (default: 8)
+    #[schemars(description = "Maximum number of docs to include (bounded)")]
+    pub docs_limit: Option<usize>,
+
+    /// Max lines per doc slice (default: 200)
+    #[schemars(description = "Max lines per doc slice")]
+    pub doc_max_lines: Option<usize>,
+
+    /// Max chars per doc slice (default: 6000)
+    #[schemars(description = "Max UTF-8 chars per doc slice")]
+    pub doc_max_chars: Option<usize>,
+
+    /// Maximum number of UTF-8 characters for the entire onboarding pack (default: 20000)
+    #[schemars(description = "Maximum number of UTF-8 characters for the onboarding pack")]
+    pub max_chars: Option<usize>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoOnboardingPackTruncation {
+    MaxChars,
+    DocsLimit,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct RepoOnboardingPackBudget {
+    pub max_chars: usize,
+    pub used_chars: usize,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<RepoOnboardingPackTruncation>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct RepoOnboardingNextAction {
+    pub tool: String,
+    pub args: serde_json::Value,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct RepoOnboardingPackResult {
+    pub version: u32,
+    pub root: String,
+    pub map: MapResult,
+    pub docs: Vec<FileSliceResult>,
+    pub next_actions: Vec<RepoOnboardingNextAction>,
+    pub budget: RepoOnboardingPackBudget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ToolMeta>,
+}

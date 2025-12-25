@@ -21,7 +21,7 @@ Breaking changes require a new `contracts/<surface>/v(N+1)/` line.
 - **Command envelope (JSON):** `contracts/command/v1/*`
 - **HTTP API:** `contracts/http/v1/openapi.json`
 - **gRPC:** `proto/command.proto`, `proto/contextfinder.proto`
-- **MCP tool schemas:** `crates/mcp-server/src/tools.rs`
+- **MCP tool schemas:** `crates/mcp-server/src/tools/schemas/*` (wired via `crates/mcp-server/src/tools/dispatch/`; assembly: `crates/mcp-server/src/tools/mod.rs`)
 - **Implementation of HTTP routes:** `crates/cli/src/main.rs` (`/command`, `/health`)
 - **Command envelope Rust types:** `crates/cli/src/command/domain.rs`
 

@@ -55,8 +55,18 @@
         "truncated": { "type": "boolean" },
         "dropped_items": { "type": "integer", "minimum": 0 }
       }
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional diagnostic metadata for agent tooling.",
+      "properties": {
+        "index_state": {
+          "$ref": "./index_state.schema.json",
+          "description": "Best-effort snapshot of the semantic index and freshness."
+        }
+      }
     }
   },
   "$comment": "Rust source of truth: crates/search/src/context_pack.rs::ContextPackOutput (CONTEXT_PACK_VERSION=1)"
 }
-

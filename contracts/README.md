@@ -67,7 +67,9 @@ Primary code source:
 
 **Contract source:**
 
-- `crates/mcp-server/src/tools.rs` (tool schemas + tool names)
+- Tool schemas: `crates/mcp-server/src/tools/schemas/`
+- Dispatch/routing: `crates/mcp-server/src/tools/dispatch/`
+- Assembly entrypoint: `crates/mcp-server/src/tools/mod.rs`
 
 Key agent-oriented tools (MCP):
 
@@ -75,7 +77,7 @@ Key agent-oriented tools (MCP):
 - `grep_context` — regex context reads (grep `-B/-A/-C`) with merged hunks, explicit budgets, and `next_cursor` pagination.
 - `file_slice` — bounded file reads (designed to replace `cat`/`sed` loops); supports `next_cursor` pagination for large files.
 - `read_pack` — one-call “semantic reading” facade: returns `file_slice` / `grep_context` / `context_pack` / `repo_onboarding_pack` results as `sections[]` under one budget; supports cursor-only continuation for file/grep.
-- `batch` — one-call orchestration; batch `version: 2` supports `$ref` (JSON Pointer) + optional `$default` for light templating between items.
+- `batch` — one-call orchestration; batch `version: 2` (default) supports `$ref` (JSON Pointer) + optional `$default` for light templating between items.
 
 Large outputs: `map`, `list_files`, `text_search`, `grep_context`, `file_slice` can return `next_cursor` so callers can page without relying on truncation heuristics.
 

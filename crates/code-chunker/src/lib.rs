@@ -25,7 +25,7 @@
 //!     │    └─> Compute optimal chunk boundaries
 //!     │
 //!     └──> Chunk Generation
-//!          ├─> Add contextual headers
+//!          ├─> Enrich contextual metadata (imports/scopes/docs)
 //!          ├─> Apply overlap strategy
 //!          └─> Emit CodeChunk[] with metadata
 //! ```
@@ -55,6 +55,7 @@
 mod ast_analyzer;
 mod chunker;
 mod config;
+mod contextual_imports;
 mod error;
 mod language;
 mod strategy;

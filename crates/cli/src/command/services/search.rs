@@ -611,10 +611,10 @@ impl SearchService {
         let timing_graph_ms = graph_start.elapsed().as_millis() as u64;
 
         let assembly_strategy = strategy.to_assembly();
-        let candidate_limit = if prefer_code || !include_docs {
-            limit.saturating_add(50).min(200)
+        let candidate_limit = if include_docs && !prefer_code {
+            limit.saturating_add(100).min(300)
         } else {
-            limit
+            limit.saturating_add(50).min(200)
         };
         let search_start = Instant::now();
         let mut enriched_results = context_search
@@ -878,6 +878,7 @@ impl SearchService {
             profile: project_ctx.profile_name.clone(),
             items,
             budget,
+            meta: None,
         };
 
         let mut outcome = CommandOutcome::from_value(output)?;

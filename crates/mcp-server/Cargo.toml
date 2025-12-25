@@ -18,6 +18,8 @@ context-vector-store = { path = "../vector-store" }
 context-indexer = { path = "../indexer" }
 context-search = { path = "../search" }
 context-graph = { path = "../graph" }
+context-batch-ref = { path = "../batch-ref" }
+petgraph = "0.6"
 
 # MCP SDK
 rmcp = { version = "0.8", features = ["server", "transport-io", "macros"] }

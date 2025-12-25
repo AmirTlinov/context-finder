@@ -76,8 +76,7 @@ fn stale_policy_auto_reindexes_and_finds_new_code() {
         results.iter().any(|r| {
             r.get("content")
                 .and_then(Value::as_str)
-                .map(|c| c.contains("AUTO_REINDEX_MARKER"))
-                .unwrap_or(false)
+                .is_some_and(|c| c.contains("AUTO_REINDEX_MARKER"))
         }),
         "expected search results to include updated code after auto reindex, got {results:?}"
     );

@@ -272,7 +272,7 @@ impl ProjectIndexer {
                                 .unwrap_or(file_path)
                                 .to_string_lossy()
                                 .to_string(),
-                            duration.as_millis() as u64,
+                            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
                         );
                     }
                 }
@@ -361,7 +361,8 @@ impl ProjectIndexer {
             // Check if file is new or modified
             let metadata = tokio::fs::metadata(file_path).await?;
             let modified = metadata.modified()?;
-            let mtime = modified.duration_since(SystemTime::UNIX_EPOCH)?.as_millis() as u64;
+            let mtime = u64::try_from(modified.duration_since(SystemTime::UNIX_EPOCH)?.as_millis())
+                .unwrap_or(u64::MAX);
 
             let is_changed = existing_mtimes
                 .get(&relative_path)
@@ -553,7 +554,7 @@ fn model_id_dir_name(model_id: &str) -> String {
         .collect()
 }
 
-fn normalize_mtime_ms(value: u64) -> u64 {
+const fn normalize_mtime_ms(value: u64) -> u64 {
     // Backward-compatible upgrade: older `mtimes.json` persisted seconds since UNIX epoch.
     // Milliseconds since epoch are ~1e12 in 2025; seconds are ~1e9.
     if value < 100_000_000_000 {
@@ -652,8 +653,10 @@ impl MultiModelProjectIndexer {
             if let Ok(metadata) = tokio::fs::metadata(&file_path).await {
                 if let Ok(modified) = metadata.modified() {
                     if let Ok(duration) = modified.duration_since(SystemTime::UNIX_EPOCH) {
-                        current_mtimes
-                            .insert(self.normalize_path(file_path), duration.as_millis() as u64);
+                        current_mtimes.insert(
+                            self.normalize_path(file_path),
+                            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+                        );
                     }
                 }
             }

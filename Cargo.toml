@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/batch-ref",
     "crates/code-chunker",
     "crates/vector-store",
     "crates/indexer",

@@ -50,6 +50,9 @@ Notes:
 | `eval`               | `EvalPayload`                 | `EvalOutput`               |
 | `eval_compare`       | `EvalComparePayload`          | `EvalCompareOutput`        |
 
+`ContextPackOutput` optionally carries `meta.index_state` with a best-effort index freshness
+snapshot (schema: [contracts/command/v1/index_state.schema.json](../contracts/command/v1/index_state.schema.json)).
+
 ### `batch` (one request → many actions)
 
 Goal: enable an agent to do *one round-trip* and receive a **single bounded result**.
@@ -81,9 +84,33 @@ Semantics:
 - Batch items are processed sequentially.
 - **Partial success:** the outer `CommandResponse.status` is `ok` if the batch request itself is valid; each item carries its own `status`.
 - **No nested batch:** items cannot use `action=batch`.
+- **Stable item ids:** `items[].id` is trimmed and must be unique within the batch.
 - **Project consistency:** `payload.project` (or the first item project/path) becomes the batch project; items must not disagree.
 - **Freshness guard is lazy:** `options.stale_policy` is enforced only right before the first item that requires an index (so `index → pack` is possible within one batch even with strict policies).
 - `payload.max_chars` is a best-effort budget for the *serialized batch output*. When exceeded, the batch is truncated and the response carries a warning hint.
+
+#### Ref dependencies (`$ref`)
+
+Batch item payloads support lightweight dependencies via `$ref` wrappers (id-based JSON Pointer into *prior* item results):
+
+```jsonc
+{
+  "id": "ctx",
+  "action": "get_context",
+  "payload": {
+    "file": { "$ref": "#/items/search/data/matches/0/file" },
+    "line": { "$ref": "#/items/search/data/matches/0/line" },
+    "window": 20
+  }
+}
+```
+
+Notes:
+
+- `$ref` is recognized only when the object contains exactly `$ref` (+ optional `$default`).
+- `$ref` pointers are resolved against an evaluation context keyed by item `id` (so `#/items/<id>/...`, not `#/items/<index>/...`).
+- `$ref` to a failed item’s `data` is rejected (use `$default` when you want a fallback).
+- The MCP server `batch` tool uses the same `$ref` wrapper resolver in **batch v2** (field names differ: `action/payload` vs `tool/input`).
 
 ### Request options (cross-cutting)
 

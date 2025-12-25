@@ -5,6 +5,7 @@ use rmcp::{
     transport::TokioChildProcess,
 };
 use serde_json::Value;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
@@ -362,8 +363,7 @@ async fn grep_context_supports_cursor_pagination() -> Result<()> {
     let has_second_match = hunks.iter().any(|h| {
         h.get("match_lines")
             .and_then(Value::as_array)
-            .map(|lines| lines.iter().filter_map(Value::as_u64).any(|ln| ln == 5))
-            .unwrap_or(false)
+            .is_some_and(|lines| lines.iter().filter_map(Value::as_u64).any(|ln| ln == 5))
     });
     assert!(has_second_match, "expected match line 5 in second page");
 
@@ -573,7 +573,7 @@ async fn read_pack_grep_supports_cursor_only_continuation() -> Result<()> {
 
     let mut content = String::new();
     for idx in 1..=2000usize {
-        content.push_str(&format!("MATCH {idx}\n"));
+        writeln!(&mut content, "MATCH {idx}").expect("write line");
     }
     std::fs::write(root.join("src").join("main.txt"), content).context("write main.txt")?;
 

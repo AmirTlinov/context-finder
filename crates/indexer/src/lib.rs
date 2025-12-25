@@ -46,7 +46,7 @@ pub use health::append_failure_reason;
 pub use health::{health_file_path, read_health_snapshot, write_health_snapshot, HealthSnapshot};
 pub use index_state::{
     assess_staleness, IndexSnapshot, IndexState, ReindexAttempt, ReindexResult, StaleAssessment,
-    StaleReason, Watermark, INDEX_STATE_SCHEMA_VERSION,
+    StaleReason, ToolMeta, Watermark, INDEX_STATE_SCHEMA_VERSION,
 };
 pub use indexer::{ModelIndexSpec, MultiModelProjectIndexer, ProjectIndexer};
 pub use scanner::FileScanner;

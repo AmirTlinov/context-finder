@@ -1,8 +1,9 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const INDEX_STATE_SCHEMA_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Watermark {
     Git {
@@ -20,7 +21,7 @@ pub enum Watermark {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StaleReason {
     IndexMissing,
@@ -31,7 +32,7 @@ pub enum StaleReason {
     FilesystemChanged,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReindexResult {
     Ok,
@@ -40,7 +41,7 @@ pub enum ReindexResult {
     Skipped,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct ReindexAttempt {
     pub attempted: bool,
     pub performed: bool,
@@ -54,7 +55,7 @@ pub struct ReindexAttempt {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct IndexSnapshot {
     pub exists: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,7 +68,7 @@ pub struct IndexSnapshot {
     pub watermark: Option<Watermark>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct IndexState {
     pub schema_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,12 +84,19 @@ pub struct IndexState {
     pub reindex: Option<ReindexAttempt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema)]
 pub struct StaleAssessment {
     pub stale: bool,
     pub reasons: Vec<StaleReason>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct ToolMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_state: Option<IndexState>,
+}
+
+#[must_use]
 pub fn assess_staleness(
     project_watermark: &Watermark,
     index_exists: bool,

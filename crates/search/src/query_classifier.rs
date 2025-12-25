@@ -83,12 +83,17 @@ impl QueryClassifier {
     /// docs-first ranking).
     #[must_use]
     pub fn is_docs_intent(query: &str) -> bool {
-        let q = query.trim().to_ascii_lowercase();
+        let trimmed = query.trim();
+        let q = trimmed.to_ascii_lowercase();
         if q.is_empty() {
             return false;
         }
 
-        if q.ends_with(".md") || q.ends_with(".mdx") {
+        let ext = std::path::Path::new(trimmed)
+            .extension()
+            .and_then(|ext| ext.to_str());
+        if ext.is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("mdx"))
+        {
             return true;
         }
 

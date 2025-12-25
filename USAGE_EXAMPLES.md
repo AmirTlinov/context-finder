@@ -57,6 +57,8 @@ context-finder index . --experts --models embeddinggemma-300m --json
 context-finder context-pack "index schema version" --path . --max-chars 20000 --json --quiet
 ```
 
+Note: `ContextPackOutput` may include `meta.index_state` (best-effort index freshness snapshot).
+
 Tuning knobs for agent workflows:
 
 ```bash
@@ -135,9 +137,32 @@ context-finder command --json '{
 }'
 ```
 
+`$ref` dependencies between items (id-based JSON Pointer into prior item results):
+
+```bash
+context-finder command --json '{
+  "action":"batch",
+  "payload":{
+    "project":".",
+    "max_chars":20000,
+    "items":[
+      {"id":"idx","action":"index","payload":{}},
+      {"id":"hits","action":"text_search","payload":{"pattern":"stale_policy","max_results":1}},
+      {"id":"ctx","action":"get_context","payload":{
+        "file":{"$ref":"#/items/hits/data/matches/0/file"},
+        "line":{"$ref":"#/items/hits/data/matches/0/line"},
+        "window":20
+      }}
+    ]
+  }
+}'
+```
+
 Notes:
 - The outer `options` apply to all items (freshness policy, budgets, filters).
 - Item results are independent (`status: ok|error`); the batch itself can still be `ok` (partial success).
+- `items[].id` is trimmed and must be unique within the batch.
+- `$ref` is recognized only as `{ "$ref": "...", "$default": ...? }` (exact wrapper), and `$ref` to a failed item’s `data` is rejected (use `$default` for fallback).
 
 ### Python: one call → context pack
 
@@ -331,5 +356,7 @@ Batch `version: 2` lets item inputs reference previous item outputs via JSON Poi
 
 Notes:
 
+- `path` is canonical; `project` is accepted as an alias for consistency with the Command API.
 - `$ref` must point to an earlier item’s `data` (JSON Pointer like `#/items/<id>/data/...`).
+- Batch `version: 2` requires unique `items[].id`.
 - `$ref` to a failed item is rejected; wrap with `$default` when you want a fallback value.

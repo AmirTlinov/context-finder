@@ -215,7 +215,8 @@ One-call reading pack tool (`read_pack`; a single entry point for file/grep/quer
   "file": "src/lib.rs",
   "start_line": 120,
   "max_lines": 80,
-  "max_chars": 20000
+  "max_chars": 20000,
+  "timeout_ms": 55000
 }
 
 // Continue without repeating inputs
@@ -243,6 +244,8 @@ Pagination (cursor): when a tool returns `truncated: true` and `next_cursor`, ca
 
 Cursor tokens are opaque and bound to the original query/options (changing them will be rejected).
 
+Most read-oriented MCP tools include `meta.index_state` when available to expose index freshness.
+
 Batch tool (one MCP call → many tools, bounded output). In `version: 2`, item inputs can depend on earlier outputs via `$ref` (JSON Pointer):
 
 ```jsonc
@@ -268,8 +271,12 @@ Batch tool (one MCP call → many tools, bounded output). In `version: 2`, item 
 
 Notes:
 
+- `path` is canonical; `project` is accepted as an alias.
+- `version` defaults to 2; set `version: 1` to disable `$ref` resolution (legacy).
 - Batch v2 requires unique `id` values per item.
+- `$ref` pointers resolve against an evaluation context keyed by item `id` (`#/items/<id>/...`, not array indices).
 - `$ref` to a failed item is rejected; use `{ "$ref": "...", "$default": <value> }` for optional pointers.
+- Command API `batch` uses the same `$ref` wrapper semantics (see `contracts/command/v1/batch.schema.json`).
 
 File slice tool (bounded, root-locked file read; designed to replace ad-hoc `cat`/`sed` in agent loops):
 
@@ -357,6 +364,11 @@ context-finder command --json '{
   }
 }'
 ```
+
+Notes:
+- `items[].id` is trimmed and must be unique.
+- Item payloads support `$ref` wrappers: `{ "$ref": "#/items/<id>/data/..." , "$default": ...? }` (see `contracts/command/v1/batch.schema.json`).
+- The MCP server `batch` tool supports the same `$ref` wrapper format in `version: 2` (field names differ: `action/payload` vs `tool/input`).
 
 ### Available Actions
 
@@ -558,9 +570,16 @@ Expected MCP tool names (17):
 ## Development checks
 
 ```bash
+scripts/validate_contracts.sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+CONTEXT_FINDER_EMBEDDING_MODE=stub cargo test --workspace
+
+# "Big audit" (includes contract-first gate + the checks above + extra reports)
+./audit.sh
+
+# Optional: strict clippy (core targets: `context-finder-mcp` binary; enabled = gate)
+AUDIT_STRICT_CLIPPY=1 ./audit.sh
 ```
 
 ## Documentation

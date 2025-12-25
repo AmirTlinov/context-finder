@@ -18,6 +18,7 @@ context-vector-store = { path = "../vector-store" }
 context-indexer = { path = "../indexer" }
 context-search = { path = "../search" }
 context-graph = { path = "../graph" }
+context-batch-ref = { path = "../batch-ref" }
 
 # CLI
 clap.workspace = true

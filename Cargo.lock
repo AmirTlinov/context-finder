@@ -481,6 +481,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
+name = "context-batch-ref"
+version = "0.1.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "context-code-chunker"
 version = "0.1.1"
 dependencies = [
@@ -510,6 +517,7 @@ dependencies = [
  "blake3",
  "bytes",
  "clap",
+ "context-batch-ref",
  "context-code-chunker",
  "context-graph",
  "context-indexer",
@@ -540,6 +548,7 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "context-batch-ref",
  "context-code-chunker",
  "context-graph",
  "context-indexer",
@@ -548,6 +557,7 @@ dependencies = [
  "dirs",
  "env_logger",
  "log",
+ "petgraph",
  "regex",
  "rmcp",
  "schemars",
@@ -590,6 +600,7 @@ dependencies = [
  "notify",
  "pretty_assertions",
  "rlimit",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
@@ -605,6 +616,7 @@ dependencies = [
  "anyhow",
  "context-code-chunker",
  "context-graph",
+ "context-indexer",
  "context-vector-store",
  "globset",
  "log",

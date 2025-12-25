@@ -6,7 +6,9 @@ use crate::command::domain::{
 };
 use crate::command::freshness;
 use anyhow::Result;
-use serde_json::{Map, Value};
+use context_batch_ref::resolve_batch_refs;
+use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 const DEFAULT_BATCH_MAX_CHARS: usize = 20_000;
@@ -36,9 +38,16 @@ pub async fn run(
 
     let mut inferred_project: Option<PathBuf> = payload.project;
     let mut gate: Option<freshness::FreshnessGate> = None;
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut ref_context = json!({
+        "project": inferred_project.as_ref().map(|p| p.display().to_string()),
+        "path": inferred_project.as_ref().map(|p| p.display().to_string()),
+        "items": serde_json::Value::Object(serde_json::Map::new()),
+    });
 
     for item in payload.items {
-        if item.id.trim().is_empty() {
+        let id = item.id.trim().to_string();
+        if id.is_empty() {
             let rejected = error_item(
                 item.id,
                 "Batch item id must not be empty".to_string(),
@@ -54,30 +63,92 @@ pub async fn run(
             continue;
         }
 
-        if matches!(item.action, CommandAction::Batch) {
+        if !seen_ids.insert(id.clone()) {
             let rejected = error_item(
-                item.id,
-                "Nested batch actions are not supported".to_string(),
+                id.clone(),
+                format!("Duplicate batch item id is not supported: '{id}'"),
                 Vec::new(),
                 ResponseMeta::default(),
             );
-            if !push_item_or_truncate(&mut output, rejected)? {
+            if !push_item_or_truncate(&mut output, rejected.clone())? {
                 break;
             }
+
+            ref_context["items"][id.clone()] = json!({
+                "status": "error",
+                "message": rejected.message,
+                "data": rejected.data,
+            });
+
             if payload.stop_on_error {
                 break;
             }
             continue;
         }
 
-        let item_project = freshness::extract_project_path(&item.payload);
+        if matches!(item.action, CommandAction::Batch) {
+            let rejected = error_item(
+                id.clone(),
+                "Nested batch actions are not supported".to_string(),
+                Vec::new(),
+                ResponseMeta::default(),
+            );
+            if !push_item_or_truncate(&mut output, rejected.clone())? {
+                break;
+            }
+
+            ref_context["items"][id.clone()] = json!({
+                "status": "error",
+                "message": rejected.message,
+                "data": rejected.data,
+            });
+
+            if payload.stop_on_error {
+                break;
+            }
+            continue;
+        }
+
+        ref_context["project"] = inferred_project
+            .as_ref()
+            .map(|p| Value::String(p.display().to_string()))
+            .unwrap_or(Value::Null);
+        ref_context["path"] = ref_context["project"].clone();
+
+        let resolved_payload = match resolve_batch_refs(item.payload, &ref_context) {
+            Ok(value) => value,
+            Err(err) => {
+                let rejected = error_item(
+                    id.clone(),
+                    format!("Ref resolution error: {err}"),
+                    Vec::new(),
+                    ResponseMeta::default(),
+                );
+                if !push_item_or_truncate(&mut output, rejected.clone())? {
+                    break;
+                }
+
+                ref_context["items"][id.clone()] = json!({
+                    "status": "error",
+                    "message": rejected.message,
+                    "data": rejected.data,
+                });
+
+                if payload.stop_on_error {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        let item_project = freshness::extract_project_path(&resolved_payload);
         if inferred_project.is_none() {
             inferred_project = item_project.clone();
         } else if let (Some(batch_project), Some(item_project)) = (&inferred_project, item_project)
         {
             if batch_project != &item_project {
                 let rejected = error_item(
-                    item.id,
+                    id.clone(),
                     format!(
                         "Batch project mismatch: batch uses '{}', item uses '{}'",
                         batch_project.display(),
@@ -86,15 +157,28 @@ pub async fn run(
                     Vec::new(),
                     ResponseMeta::default(),
                 );
-                if !push_item_or_truncate(&mut output, rejected)? {
+                if !push_item_or_truncate(&mut output, rejected.clone())? {
                     break;
                 }
+
+                ref_context["items"][id.clone()] = json!({
+                    "status": "error",
+                    "message": rejected.message,
+                    "data": rejected.data,
+                });
+
                 if payload.stop_on_error {
                     break;
                 }
                 continue;
             }
         }
+
+        ref_context["project"] = inferred_project
+            .as_ref()
+            .map(|p| Value::String(p.display().to_string()))
+            .unwrap_or(Value::Null);
+        ref_context["path"] = ref_context["project"].clone();
 
         let requires_index = freshness::action_requires_index(&item.action);
         if requires_index && gate.is_none() {
@@ -113,7 +197,7 @@ pub async fn run(
                     hints.extend(project_ctx.hints);
                     hints.extend(classify_error(&block.message));
                     let rejected = error_item(
-                        item.id,
+                        id.clone(),
                         block.message,
                         hints,
                         ResponseMeta {
@@ -125,9 +209,16 @@ pub async fn run(
                             ..Default::default()
                         },
                     );
-                    if !push_item_or_truncate(&mut output, rejected)? {
+                    if !push_item_or_truncate(&mut output, rejected.clone())? {
                         break;
                     }
+
+                    ref_context["items"][id.clone()] = json!({
+                        "status": "error",
+                        "message": rejected.message,
+                        "data": rejected.data,
+                    });
+
                     if payload.stop_on_error {
                         break;
                     }
@@ -141,7 +232,7 @@ pub async fn run(
             .max_chars
             .saturating_sub(output.budget.used_chars);
         let item_payload = prepare_item_payload(
-            item.payload,
+            resolved_payload,
             inferred_project.as_ref(),
             &item.action,
             remaining_chars,
@@ -171,7 +262,7 @@ pub async fn run(
                 }
 
                 BatchItemResult {
-                    id: item.id,
+                    id: id.clone(),
                     status: CommandStatus::Ok,
                     message: None,
                     hints: outcome.hints,
@@ -194,7 +285,7 @@ pub async fn run(
                 }
 
                 BatchItemResult {
-                    id: item.id,
+                    id: id.clone(),
                     status: CommandStatus::Error,
                     message: Some(message),
                     hints,
@@ -204,9 +295,19 @@ pub async fn run(
             }
         };
 
-        if !push_item_or_truncate(&mut output, item_outcome)? {
+        if !push_item_or_truncate(&mut output, item_outcome.clone())? {
             break;
         }
+
+        let status = match item_outcome.status {
+            CommandStatus::Ok => "ok",
+            CommandStatus::Error => "error",
+        };
+        ref_context["items"][id.clone()] = json!({
+            "status": status,
+            "message": item_outcome.message,
+            "data": item_outcome.data,
+        });
 
         if payload.stop_on_error
             && output

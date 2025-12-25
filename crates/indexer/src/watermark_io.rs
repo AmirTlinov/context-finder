@@ -109,7 +109,7 @@ async fn compute_filesystem_watermark(project_root: &Path) -> Result<Watermark> 
             if let Ok(modified) = meta.modified() {
                 let mtime_ms = modified
                     .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
+                    .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
                     .unwrap_or(0);
                 max_mtime_ms = max(max_mtime_ms, mtime_ms);
             }
@@ -129,6 +129,6 @@ async fn compute_filesystem_watermark(project_root: &Path) -> Result<Watermark> 
 fn unix_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
 }

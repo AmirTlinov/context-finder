@@ -331,7 +331,7 @@ async fn mcp_exposes_core_tools_and_map_has_no_side_effects() -> Result<()> {
 
     assert_eq!(
         batch_json.get("version").and_then(Value::as_u64),
-        Some(1),
+        Some(2),
         "batch schema version mismatch"
     );
     let items = batch_json

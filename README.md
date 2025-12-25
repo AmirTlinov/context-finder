@@ -108,6 +108,10 @@ context-finder command --json '{
 }'
 ```
 
+Notes:
+- `items[].id` is trimmed and must be unique.
+- Item payloads support `$ref` wrappers: `{ "$ref": "#/items/<id>/data/..." , "$default": ...? }` (see `contracts/command/v1/batch.schema.json`).
+
 ### HTTP
 
 ```bash
@@ -187,7 +191,7 @@ Need grep-like reads with N lines of context across a repo (without `rg` + `sed`
 
 If the output is truncated, the response includes `next_cursor`. Call again with the same options + `cursor: "<next_cursor>"`.
 
-Agent-friendly tip: the MCP tool `batch` lets you execute multiple tools in one call (one bounded JSON result). In batch `version: 2`, item inputs can depend on earlier outputs via `$ref` (JSON Pointer):
+Agent-friendly tip: the MCP tool `batch` lets you execute multiple tools in one call (one bounded JSON result). `path` is canonical (alias: `project`). In batch `version: 2`, item inputs can depend on earlier outputs via `$ref` (JSON Pointer):
 
 ```jsonc
 {

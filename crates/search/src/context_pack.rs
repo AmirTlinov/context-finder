@@ -1,3 +1,4 @@
+use context_indexer::ToolMeta;
 use serde::{Deserialize, Serialize};
 
 pub const CONTEXT_PACK_VERSION: u32 = 1;
@@ -10,6 +11,8 @@ pub struct ContextPackOutput {
     pub profile: String,
     pub items: Vec<ContextPackItem>,
     pub budget: ContextPackBudget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ToolMeta>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

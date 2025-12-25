@@ -173,3 +173,54 @@ fn batch_respects_max_chars_and_truncates() {
     assert_eq!(items.len(), 1, "expected only the first item to fit");
     assert_eq!(items[0]["id"], "index");
 }
+
+#[test]
+fn batch_resolves_refs_between_items() {
+    let temp = setup_repo();
+    let root = temp.path();
+
+    let request = r##"{
+        "action":"batch",
+        "payload":{
+            "project":".",
+            "items":[
+                {"id":"index","action":"index","payload":{}},
+                {"id":"search","action":"text_search","payload":{"pattern":"greet","max_results":1}},
+                {"id":"ctx","action":"get_context","payload":{
+                    "file": { "$ref": "#/items/search/data/matches/0/file" },
+                    "line": { "$ref": "#/items/search/data/matches/0/line" },
+                    "window": 0
+                }}
+            ]
+        }
+    }"##;
+
+    let response = run_cli(root, request);
+    assert_eq!(response["status"], "ok");
+
+    let items = response["data"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    let search = items
+        .iter()
+        .find(|item| item["id"].as_str() == Some("search"))
+        .expect("search item");
+    assert_eq!(search["status"], "ok");
+
+    let ctx_item = items
+        .iter()
+        .find(|item| item["id"].as_str() == Some("ctx"))
+        .expect("ctx item");
+    assert_eq!(ctx_item["status"], "ok");
+
+    assert_eq!(
+        ctx_item["data"]["file"],
+        search["data"]["matches"][0]["file"]
+    );
+    assert_eq!(
+        ctx_item["data"]["line"],
+        search["data"]["matches"][0]["line"]
+    );
+}

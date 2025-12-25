@@ -42,7 +42,7 @@ fn bootstrap_from_repo_root(repo_root: Option<&Path>) -> BootstrapReport {
     let mut applied_env = Vec::new();
     let mut warnings = Vec::new();
 
-    let repo_root = repo_root.map(|p| p.to_path_buf());
+    let repo_root = repo_root.map(Path::to_path_buf);
 
     // Model dir: optional, but helps avoid surprises when the MCP server is launched
     // from an arbitrary working directory.
@@ -124,12 +124,7 @@ fn collect_env_paths() -> Vec<PathBuf> {
         paths.push(PathBuf::from(path));
     }
     if let Ok(ld) = env::var("LD_LIBRARY_PATH") {
-        paths.extend(
-            ld.split(':')
-                .filter(|p| !p.is_empty())
-                .map(PathBuf::from)
-                .collect::<Vec<_>>(),
-        );
+        paths.extend(ld.split(':').filter(|p| !p.is_empty()).map(PathBuf::from));
     }
     paths
 }
@@ -223,9 +218,8 @@ fn find_best_official_ort_dir(root: &Path) -> Option<PathBuf> {
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let version = match parse_version_triple(&name) {
-            Some(v) => v,
-            None => continue,
+        let Some(version) = parse_version_triple(&name) else {
+            continue;
         };
         let lib_dir = path.join("lib");
         if !has_cuda_provider(&lib_dir) {
@@ -266,12 +260,16 @@ fn apply_gpu_env(
             paths_to_prepend.push(dir.to_path_buf());
         }
     }
-    if let Some(dir) = provider_dir {
-        if dir.exists() {
-            // ORT provider dir can be different from CUDA deps dir.
-            paths_to_prepend.push(dir.to_path_buf());
+    let provider_dir = match provider_dir {
+        Some(dir) if dir.exists() => Some(dir),
+        Some(dir) => {
+            return Err(format!(
+                "CUDA provider directory does not exist: {}",
+                display_path(dir)
+            ));
         }
-    }
+        None => None,
+    };
 
     if let Some(dir) = provider_dir {
         if !env_var_has_provider("ORT_LIB_LOCATION") {
@@ -302,14 +300,17 @@ fn apply_gpu_env(
         applied_env.push("ORT_USE_CUDA".to_string());
     }
 
+    if provider_dir.is_none() {
+        return Err(
+            "CUDA provider directory not found; cannot bootstrap GPU environment".to_string(),
+        );
+    }
+
     Ok(())
 }
 
 fn env_var_has_provider(key: &str) -> bool {
-    match env::var_os(key) {
-        Some(val) => PathBuf::from(val).join(ORT_PROVIDER_SO).exists(),
-        None => false,
-    }
+    env::var_os(key).is_some_and(|val| PathBuf::from(val).join(ORT_PROVIDER_SO).exists())
 }
 
 fn prepend_ld_library_path(paths: &[PathBuf]) {
@@ -350,7 +351,7 @@ mod tests {
     impl EnvGuard {
         fn new(keys: &[&str]) -> Self {
             let mut saved = Vec::new();
-            for key in keys {
+            for &key in keys {
                 saved.push((key.to_string(), env::var_os(key)));
                 env::remove_var(key);
             }

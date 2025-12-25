@@ -2,7 +2,9 @@
 
 `context-pack` is a bounded agent output: one query → one compact JSON with the most relevant code chunks.
 
-The CLI and the MCP server return `ContextPackOutput` under the `data` field of the standard `CommandResponse` envelope (`{status,hints,data,meta}`).
+The Command API (CLI/HTTP/gRPC JSON envelope) returns `ContextPackOutput` under `CommandResponse.data`.
+
+The MCP tool `context_pack` returns the same `ContextPackOutput` as the tool result JSON (and may include an extra trace block when `trace=true`).
 
 Canonical schema (source of truth):
 
@@ -61,9 +63,19 @@ Defaults are chosen heuristically for agent workflows:
     "used_chars": 1234,
     "truncated": false,
     "dropped_items": 0
+  },
+  "meta": {
+    "index_state": { /* optional, see index_state.schema.json */ }
   }
 }
 ```
+
+## Index freshness metadata
+
+`ContextPackOutput.meta.index_state` provides a best-effort snapshot of the current project
+watermark and index freshness. It is optional and may be omitted if unavailable.
+
+- Canonical schema: [contracts/command/v1/index_state.schema.json](../contracts/command/v1/index_state.schema.json)
 
 ## Examples
 
