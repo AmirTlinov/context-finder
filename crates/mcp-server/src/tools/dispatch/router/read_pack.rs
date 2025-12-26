@@ -154,26 +154,104 @@ fn intent_label(intent: ReadPackIntent) -> &'static str {
     }
 }
 
-fn finalize_and_trim(mut result: ReadPackResult, max_chars: usize) -> ToolResult<ReadPackResult> {
+fn clear_section_meta(sections: &mut [ReadPackSection]) {
+    for section in sections {
+        match section {
+            ReadPackSection::FileSlice { result } => {
+                result.meta = None;
+            }
+            ReadPackSection::GrepContext { result } => {
+                result.meta = None;
+            }
+            ReadPackSection::RepoOnboardingPack { result } => {
+                result.meta = None;
+            }
+            ReadPackSection::ContextPack { .. } => {}
+        }
+    }
+}
+
+fn compute_min_envelope_chars(result: &ReadPackResult) -> ToolResult<usize> {
+    let mut tmp = ReadPackResult {
+        version: result.version,
+        intent: result.intent,
+        root: result.root.clone(),
+        sections: Vec::new(),
+        next_actions: Vec::new(),
+        budget: ReadPackBudget {
+            max_chars: result.budget.max_chars,
+            used_chars: 0,
+            truncated: true,
+            truncation: Some(ReadPackTruncation::MaxChars),
+        },
+        meta: None,
+    };
+    finalize_read_pack_budget(&mut tmp)
+        .map_err(|err| call_error("internal", format!("Error: {err:#}")))?;
+    Ok(tmp.budget.used_chars)
+}
+
+fn finalize_and_trim(
+    mut result: ReadPackResult,
+    ctx: &ReadPackContext,
+    request: &ReadPackRequest,
+    intent: ReadPackIntent,
+) -> ToolResult<ReadPackResult> {
     finalize_read_pack_budget(&mut result)
         .map_err(|err| call_error("internal", format!("Error: {err:#}")))?;
 
-    while result.budget.used_chars > max_chars && result.next_actions.len() > 1 {
-        result.next_actions.pop();
-        result.budget.truncated = true;
-        result.budget.truncation = Some(ReadPackTruncation::MaxChars);
-        let _ = finalize_read_pack_budget(&mut result);
+    if result.budget.used_chars <= ctx.max_chars {
+        return Ok(result);
     }
-    while result.budget.used_chars > max_chars && result.sections.len() > 1 {
+
+    result.budget.truncated = true;
+    if result.budget.truncation.is_none() {
+        result.budget.truncation = Some(ReadPackTruncation::MaxChars);
+    }
+
+    if !result.next_actions.is_empty() {
+        result.next_actions.clear();
+        let _ = finalize_read_pack_budget(&mut result);
+        if result.budget.used_chars <= ctx.max_chars {
+            return Ok(result);
+        }
+    }
+
+    if result.meta.is_some() {
+        result.meta = None;
+        clear_section_meta(&mut result.sections);
+        let _ = finalize_read_pack_budget(&mut result);
+        if result.budget.used_chars <= ctx.max_chars {
+            return Ok(result);
+        }
+    }
+
+    while result.budget.used_chars > ctx.max_chars && result.sections.len() > 1 {
         result.sections.pop();
-        result.budget.truncated = true;
-        result.budget.truncation = Some(ReadPackTruncation::MaxChars);
         let _ = finalize_read_pack_budget(&mut result);
     }
-    if result.budget.used_chars > max_chars {
-        result.budget.truncated = true;
-        result.budget.truncation = Some(ReadPackTruncation::MaxChars);
+
+    if result.budget.used_chars > ctx.max_chars {
+        result.sections.clear();
+        result.next_actions.clear();
         let _ = finalize_read_pack_budget(&mut result);
+
+        if result.budget.used_chars > ctx.max_chars {
+            let min_chars = compute_min_envelope_chars(&result)?;
+            return Err(call_error(
+                "invalid_request",
+                format!("max_chars too small for read_pack response (min_chars={min_chars})"),
+            ));
+        }
+    }
+
+    if result.budget.truncated && result.next_actions.is_empty() {
+        ensure_retry_action(&mut result, ctx, request, intent);
+        let _ = finalize_read_pack_budget(&mut result);
+        if result.budget.used_chars > ctx.max_chars {
+            result.next_actions.clear();
+            let _ = finalize_read_pack_budget(&mut result);
+        }
     }
 
     Ok(result)
@@ -807,7 +885,7 @@ pub(in crate::tools::dispatch) async fn read_pack(
                     meta: Some(meta),
                 };
                 apply_meta_to_sections(result.meta.as_ref().unwrap(), &mut result.sections);
-                let mut result = match finalize_and_trim(result, ctx.max_chars) {
+                let mut result = match finalize_and_trim(result, &ctx, &request, intent) {
                     Ok(value) => value,
                     Err(result) => return Ok(result),
                 };
@@ -838,12 +916,10 @@ pub(in crate::tools::dispatch) async fn read_pack(
         meta: Some(meta),
     };
 
-    let mut result = match finalize_and_trim(result, ctx.max_chars) {
+    let result = match finalize_and_trim(result, &ctx, &request, intent) {
         Ok(value) => value,
         Err(result) => return Ok(result),
     };
-    ensure_retry_action(&mut result, &ctx, &request, intent);
-
     Ok(CallToolResult::success(vec![Content::text(
         serde_json::to_string(&result).unwrap_or_default(),
     )]))

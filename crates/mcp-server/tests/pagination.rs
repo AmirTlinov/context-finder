@@ -610,6 +610,60 @@ async fn read_pack_missing_file_returns_structured_error() -> Result<()> {
 }
 
 #[tokio::test]
+async fn read_pack_respects_max_chars_budget() -> Result<()> {
+    let (tmp, service) = start_service().await?;
+    let root = tmp.path();
+
+    std::fs::write(
+        root.join("README.md"),
+        "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n",
+    )
+    .context("write README.md")?;
+
+    let max_chars = 2000usize;
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        service.call_tool(CallToolRequestParam {
+            name: "read_pack".into(),
+            arguments: serde_json::json!({
+                "path": root.to_string_lossy(),
+                "intent": "file",
+                "file": "README.md",
+                "max_lines": 5,
+                "max_chars": max_chars,
+            })
+            .as_object()
+            .cloned(),
+        }),
+    )
+    .await
+    .context("timeout calling read_pack")??;
+
+    assert_ne!(result.is_error, Some(true), "read_pack returned error");
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .context("read_pack did not return text content")?;
+    assert!(
+        text.chars().count() <= max_chars,
+        "read_pack output exceeded max_chars"
+    );
+
+    let json: Value = serde_json::from_str(text).context("read_pack output is not valid JSON")?;
+    let used_chars = json
+        .get("budget")
+        .and_then(|budget| budget.get("used_chars"))
+        .and_then(Value::as_u64)
+        .context("budget.used_chars missing")?;
+    assert!(used_chars <= max_chars as u64);
+
+    service.cancel().await.context("shutdown mcp service")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn read_pack_grep_supports_cursor_only_continuation() -> Result<()> {
     let (tmp, service) = start_service().await?;
     let root = tmp.path();

@@ -12,7 +12,7 @@ If you’re tired of “search → open file → search again → maybe the righ
 - **Regex context reads:** MCP `grep_context` returns all regex matches with `before/after` context (grep `-B/-A/-C`), merged into compact hunks under hard budgets.
 - **Safe file listing:** MCP `list_files` returns bounded file paths (glob/substring filter).
 - **Repo onboarding pack:** MCP `repo_onboarding_pack` returns `map` + key docs (`file_slice`) + `next_actions` in one bounded response, trims map before docs under tight budgets, auto-refreshes the index by default, and reports `docs_reason` when no docs were included.
-- **One-call reading pack:** MCP `read_pack` picks the right tool (`file_slice` / `grep_context` / `context_pack` / `repo_onboarding_pack`) and returns `sections` + `next_actions` under one `max_chars` budget; errors are structured in `structured_content.error`.
+- **One-call reading pack:** MCP `read_pack` picks the right tool (`file_slice` / `grep_context` / `context_pack` / `repo_onboarding_pack`) and returns `sections` + `next_actions` under one `max_chars` budget; under tight budgets it may drop `meta`/`next_actions` to stay within the cap; errors are structured in `structured_content.error`.
 - **Cursor pagination:** `map`, `list_files`, `text_search`, `grep_context`, `file_slice` return `next_cursor` when truncated so agents can continue without guessing.
 - **Freshness by default:** every response can carry `meta.index_state`; `options.stale_policy=auto|warn|fail` controls (re)index behavior.
 - **Stable integration surfaces:** CLI JSON, HTTP, gRPC, MCP — all treated as contracts.
