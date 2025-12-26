@@ -2,11 +2,11 @@ use super::super::{
     compute_grep_context_result, decode_cursor, CallToolResult, Content, ContextFinderService,
     GrepContextComputeOptions, GrepContextCursorV1, GrepContextRequest, McpError, CURSOR_VERSION,
 };
+use crate::tools::schemas::ToolNextAction;
 use regex::RegexBuilder;
+use serde_json::json;
 
-fn tool_error(message: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(message.into())])
-}
+use super::error::{internal_error, invalid_cursor, invalid_request};
 
 fn build_regex(pattern: &str, case_sensitive: bool) -> Result<regex::Regex, String> {
     RegexBuilder::new(pattern)
@@ -79,18 +79,18 @@ pub(in crate::tools::dispatch) async fn grep_context(
 
     let (root, root_display) = match service.resolve_root(request.path.as_deref()).await {
         Ok(value) => value,
-        Err(message) => return Ok(tool_error(message)),
+        Err(message) => return Ok(invalid_request(message)),
     };
 
     request.pattern = request.pattern.trim().to_string();
     if request.pattern.is_empty() {
-        return Ok(tool_error("Pattern must not be empty"));
+        return Ok(invalid_request("Pattern must not be empty"));
     }
 
     let case_sensitive = request.case_sensitive.unwrap_or(true);
     let regex = match build_regex(&request.pattern, case_sensitive) {
         Ok(re) => re,
-        Err(msg) => return Ok(tool_error(msg)),
+        Err(msg) => return Ok(invalid_request(msg)),
     };
 
     let before = request
@@ -143,7 +143,7 @@ pub(in crate::tools::dispatch) async fn grep_context(
         },
     ) {
         Ok(v) => v,
-        Err(msg) => return Ok(tool_error(msg)),
+        Err(msg) => return Ok(invalid_cursor(msg)),
     };
 
     let mut result = match compute_grep_context_result(
@@ -166,12 +166,29 @@ pub(in crate::tools::dispatch) async fn grep_context(
     {
         Ok(result) => result,
         Err(err) => {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Error: {err:#}"
-            ))]));
+            return Ok(internal_error(format!("Error: {err:#}")));
         }
     };
     result.meta = Some(service.tool_meta(&root).await);
+    if let Some(cursor) = result.next_cursor.clone() {
+        result.next_actions = Some(vec![ToolNextAction {
+            tool: "grep_context".to_string(),
+            args: json!({
+                "path": root_display,
+                "pattern": request.pattern,
+                "file": normalized_file,
+                "file_pattern": normalized_file_pattern,
+                "before": before,
+                "after": after,
+                "case_sensitive": case_sensitive,
+                "max_matches": max_matches,
+                "max_hunks": max_hunks,
+                "max_chars": max_chars,
+                "cursor": cursor,
+            }),
+            reason: "Continue grep_context pagination with the next cursor.".to_string(),
+        }]);
+    }
 
     Ok(CallToolResult::success(vec![Content::text(
         serde_json::to_string_pretty(&result).unwrap_or_default(),

@@ -4,6 +4,7 @@ pub(super) mod batch;
 pub(super) mod context;
 pub(super) mod context_pack;
 pub(super) mod doctor;
+pub(super) mod error;
 pub(super) mod explain;
 pub(super) mod file_slice;
 pub(super) mod grep_context;

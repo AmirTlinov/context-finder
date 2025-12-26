@@ -2,6 +2,10 @@ use super::super::{
     compute_list_files_result, decode_list_files_cursor, CallToolResult, Content,
     ContextFinderService, ListFilesRequest, McpError, CURSOR_VERSION,
 };
+use crate::tools::schemas::ToolNextAction;
+use serde_json::json;
+
+use super::error::{internal_error, invalid_cursor, invalid_request};
 
 /// List project files within the project root (safe file enumeration for agents).
 pub(in crate::tools::dispatch) async fn list_files(
@@ -15,7 +19,7 @@ pub(in crate::tools::dispatch) async fn list_files(
 
     let (root, root_display) = match service.resolve_root(request.path.as_deref()).await {
         Ok(value) => value,
-        Err(message) => return Ok(CallToolResult::error(vec![Content::text(message)])),
+        Err(message) => return Ok(invalid_request(message)),
     };
 
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
@@ -40,25 +44,17 @@ pub(in crate::tools::dispatch) async fn list_files(
         let decoded = match decode_list_files_cursor(cursor) {
             Ok(v) => v,
             Err(err) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Invalid cursor: {err}"
-                ))]));
+                return Ok(invalid_cursor(format!("Invalid cursor: {err}")));
             }
         };
         if decoded.v != CURSOR_VERSION || decoded.tool != "list_files" {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "Invalid cursor: wrong tool",
-            )]));
+            return Ok(invalid_cursor("Invalid cursor: wrong tool"));
         }
         if decoded.root != root_display {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "Invalid cursor: different root",
-            )]));
+            return Ok(invalid_cursor("Invalid cursor: different root"));
         }
         if decoded.file_pattern != normalized_file_pattern {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "Invalid cursor: different file_pattern",
-            )]));
+            return Ok(invalid_cursor("Invalid cursor: different file_pattern"));
         }
         Some(decoded.last_file)
     } else {
@@ -76,12 +72,23 @@ pub(in crate::tools::dispatch) async fn list_files(
     {
         Ok(result) => result,
         Err(err) => {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Error: {err:#}"
-            ))]));
+            return Ok(internal_error(format!("Error: {err:#}")));
         }
     };
     result.meta = Some(service.tool_meta(&root).await);
+    if let Some(cursor) = result.next_cursor.clone() {
+        result.next_actions = Some(vec![ToolNextAction {
+            tool: "list_files".to_string(),
+            args: json!({
+                "path": root_display,
+                "file_pattern": normalized_file_pattern,
+                "limit": limit,
+                "max_chars": max_chars,
+                "cursor": cursor,
+            }),
+            reason: "Continue list_files pagination with the next cursor.".to_string(),
+        }]);
+    }
 
     Ok(CallToolResult::success(vec![Content::text(
         serde_json::to_string_pretty(&result).unwrap_or_default(),

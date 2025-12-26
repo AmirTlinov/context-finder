@@ -6,6 +6,7 @@ use super::super::{
 use context_vector_store::corpus_path_for_project_root;
 use std::path::Path;
 
+use super::error::{internal_error, invalid_request};
 async fn diagnose_project(
     root: &Path,
     issues: &mut Vec<String>,
@@ -118,10 +119,10 @@ pub(in crate::tools::dispatch) async fn doctor(
     let (model_manifest_exists, models) = match load_model_statuses(&model_dir).await {
         Ok(result) => result,
         Err(err) => {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
+            return Ok(internal_error(format!(
                 "Failed to load model manifest {}: {err:#}",
                 manifest_path.display()
-            ))]));
+            )));
         }
     };
 
@@ -151,7 +152,7 @@ pub(in crate::tools::dispatch) async fn doctor(
 
     let root = match service.resolve_root(path.as_deref()).await {
         Ok((root, _)) => root,
-        Err(message) => return Ok(CallToolResult::error(vec![Content::text(message)])),
+        Err(message) => return Ok(invalid_request(message)),
     };
     let project = diagnose_project(&root, &mut issues, &mut hints).await;
 

@@ -3,15 +3,15 @@ use super::super::{
     ContextFinderService, FileScanner, McpError, TextSearchCursorModeV1, TextSearchCursorV1,
     TextSearchMatch, TextSearchRequest, TextSearchResult, CURSOR_VERSION,
 };
+use crate::tools::schemas::ToolNextAction;
 use context_vector_store::ChunkCorpus;
+use serde_json::json;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 const MAX_FILE_BYTES: u64 = 2_000_000;
 
-fn call_error(message: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(message.into())])
-}
+use super::error::{internal_error, invalid_cursor, invalid_request};
 
 fn trimmed_non_empty_str(input: Option<&str>) -> Option<&str> {
     input.map(str::trim).filter(|value| !value.is_empty())
@@ -89,25 +89,25 @@ fn decode_cursor_mode(
 
     let decoded: TextSearchCursorV1 = match decode_cursor(cursor) {
         Ok(v) => v,
-        Err(err) => return Err(call_error(format!("Invalid cursor: {err}"))),
+        Err(err) => return Err(invalid_cursor(format!("Invalid cursor: {err}"))),
     };
 
     if decoded.v != CURSOR_VERSION || decoded.tool != "text_search" {
-        return Err(call_error("Invalid cursor: wrong tool"));
+        return Err(invalid_cursor("Invalid cursor: wrong tool"));
     }
     if decoded.root != root_display {
-        return Err(call_error("Invalid cursor: different root"));
+        return Err(invalid_cursor("Invalid cursor: different root"));
     }
     if decoded.pattern != settings.pattern {
-        return Err(call_error("Invalid cursor: different pattern"));
+        return Err(invalid_cursor("Invalid cursor: different pattern"));
     }
     if decoded.file_pattern.as_ref() != normalized_file_pattern {
-        return Err(call_error("Invalid cursor: different file_pattern"));
+        return Err(invalid_cursor("Invalid cursor: different file_pattern"));
     }
     if decoded.case_sensitive != settings.case_sensitive
         || decoded.whole_word != settings.whole_word
     {
-        return Err(call_error("Invalid cursor: different search options"));
+        return Err(invalid_cursor("Invalid cursor: different search options"));
     }
 
     Ok(Some(decoded.mode))
@@ -124,7 +124,7 @@ fn start_indices_for_corpus(
             line_offset,
         }) => Ok((*file_index, *chunk_index, *line_offset)),
         Some(TextSearchCursorModeV1::Filesystem { .. }) => {
-            Err(call_error("Invalid cursor: wrong mode"))
+            Err(invalid_cursor("Invalid cursor: wrong mode"))
         }
     }
 }
@@ -139,7 +139,7 @@ fn start_indices_for_filesystem(
             line_offset,
         }) => Ok((*file_index, *line_offset)),
         Some(TextSearchCursorModeV1::Corpus { .. }) => {
-            Err(call_error("Invalid cursor: wrong mode"))
+            Err(invalid_cursor("Invalid cursor: wrong mode"))
         }
     }
 }
@@ -161,7 +161,7 @@ fn encode_next_cursor(
         mode,
     };
 
-    encode_cursor(&token).map_err(|err| call_error(format!("Error: {err:#}")))
+    encode_cursor(&token).map_err(|err| internal_error(format!("Error: {err:#}")))
 }
 
 fn search_in_corpus(
@@ -181,7 +181,7 @@ fn search_in_corpus(
     });
 
     if start_file_index > files.len() {
-        return Err(call_error("Invalid cursor: out of range"));
+        return Err(invalid_cursor("Invalid cursor: out of range"));
     }
 
     'outer_corpus: for (file_index, (_file, chunks)) in
@@ -209,7 +209,7 @@ fn search_in_corpus(
         let first_file = file_index == start_file_index;
         let start_chunk = if first_file { start_chunk_index } else { 0 };
         if start_chunk > chunk_refs.len() {
-            return Err(call_error("Invalid cursor: out of range"));
+            return Err(invalid_cursor("Invalid cursor: out of range"));
         }
 
         for (chunk_index, chunk) in chunk_refs.iter().enumerate().skip(start_chunk) {
@@ -282,7 +282,7 @@ fn search_in_filesystem(
     candidates.sort_by(|a, b| a.0.cmp(&b.0));
 
     if start_file_index > candidates.len() {
-        return Err(call_error("Invalid cursor: out of range"));
+        return Err(invalid_cursor("Invalid cursor: out of range"));
     }
 
     'outer_fs: for (file_index, (rel_path, abs_path)) in
@@ -352,12 +352,12 @@ pub(in crate::tools::dispatch) async fn text_search(
 ) -> Result<CallToolResult, McpError> {
     let (root, root_display) = match service.resolve_root(request.path.as_deref()).await {
         Ok(value) => value,
-        Err(message) => return Ok(call_error(message)),
+        Err(message) => return Ok(invalid_request(message)),
     };
 
     let pattern = request.pattern.trim();
     if pattern.is_empty() {
-        return Ok(call_error("Pattern must not be empty"));
+        return Ok(invalid_request("Pattern must not be empty"));
     }
 
     let file_pattern = trimmed_non_empty_str(request.file_pattern.as_deref());
@@ -385,7 +385,7 @@ pub(in crate::tools::dispatch) async fn text_search(
 
     let corpus = match ContextFinderService::load_chunk_corpus(&root).await {
         Ok(corpus) => corpus,
-        Err(err) => return Ok(call_error(format!("Error: {err:#}"))),
+        Err(err) => return Ok(internal_error(format!("Error: {err:#}"))),
     };
 
     let (source, mut outcome) = if let Some(corpus) = corpus {
@@ -421,7 +421,7 @@ pub(in crate::tools::dispatch) async fn text_search(
 
     let next_cursor = if outcome.truncated {
         let Some(mode) = outcome.next_state.take() else {
-            return Ok(call_error("Internal error: missing cursor state"));
+            return Ok(internal_error("Internal error: missing cursor state"));
         };
         match encode_next_cursor(
             &root_display,
@@ -445,10 +445,26 @@ pub(in crate::tools::dispatch) async fn text_search(
         returned: outcome.matches.len(),
         truncated: outcome.truncated,
         next_cursor,
+        next_actions: None,
         meta: None,
         matches: outcome.matches,
     };
     result.meta = Some(service.tool_meta(&root).await);
+    if let Some(cursor) = result.next_cursor.clone() {
+        result.next_actions = Some(vec![ToolNextAction {
+            tool: "text_search".to_string(),
+            args: json!({
+                "path": root_display,
+                "pattern": settings.pattern,
+                "file_pattern": normalized_file_pattern,
+                "max_results": max_results,
+                "case_sensitive": settings.case_sensitive,
+                "whole_word": settings.whole_word,
+                "cursor": cursor,
+            }),
+            reason: "Continue text_search pagination with the next cursor.".to_string(),
+        }]);
+    }
 
     Ok(CallToolResult::success(vec![Content::text(
         serde_json::to_string_pretty(&result).unwrap_or_default(),

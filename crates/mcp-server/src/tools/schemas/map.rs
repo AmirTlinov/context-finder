@@ -2,6 +2,7 @@ use context_indexer::ToolMeta;
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
+use super::ToolNextAction;
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MapRequest {
     /// Project directory path (defaults to session root; fallback: env/git/cwd)
@@ -45,6 +46,8 @@ pub struct MapResult {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_actions: Option<Vec<ToolNextAction>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<ToolMeta>,
 }

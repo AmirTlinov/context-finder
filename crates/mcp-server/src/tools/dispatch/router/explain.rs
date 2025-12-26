@@ -8,9 +8,7 @@ use petgraph::graph::NodeIndex;
 
 type ToolResult<T> = std::result::Result<T, CallToolResult>;
 
-fn tool_error(message: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(message.into())])
-}
+use super::error::{internal_error, invalid_request};
 
 fn format_symbol_relations(
     graph: &CodeGraph,
@@ -63,17 +61,17 @@ async fn compute_explain_data(
         .engine_mut()
         .ensure_graph(language)
         .await
-        .map_err(|e| tool_error(format!("Graph build error: {e}")))?;
+        .map_err(|e| internal_error(format!("Graph build error: {e}")))?;
 
     let Some(assembler) = engine.engine_mut().context_search.assembler() else {
-        return Err(tool_error(
+        return Err(internal_error(
             "Graph build error: missing assembler after build",
         ));
     };
     let graph = assembler.graph();
 
     let Some(node) = graph.find_node(symbol) else {
-        return Err(tool_error(format!("Symbol '{symbol}' not found")));
+        return Err(invalid_request(format!("Symbol '{symbol}' not found")));
     };
 
     let (deps, dependents_raw) = graph.get_symbol_relations(node);
@@ -133,12 +131,12 @@ pub(in crate::tools::dispatch) async fn explain(
     let language = request.language;
     let root = match service.resolve_root(path.as_deref()).await {
         Ok((root, _)) => root,
-        Err(message) => return Ok(tool_error(message)),
+        Err(message) => return Ok(invalid_request(message)),
     };
     let policy = AutoIndexPolicy::from_request(request.auto_index, request.auto_index_budget_ms);
     let (mut engine, meta) = match service.prepare_semantic_engine(&root, policy).await {
         Ok(engine) => engine,
-        Err(err) => return Ok(tool_error(format!("Error: {err}"))),
+        Err(err) => return Ok(internal_error(format!("Error: {err}"))),
     };
 
     let data = match compute_explain_data(&mut engine, language.as_deref(), &symbol).await {

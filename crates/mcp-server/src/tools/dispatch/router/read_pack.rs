@@ -6,6 +6,7 @@ use super::super::{
     ReadPackBudget, ReadPackIntent, ReadPackNextAction, ReadPackRequest, ReadPackResult,
     ReadPackSection, ReadPackTruncation, RepoOnboardingPackRequest, CURSOR_VERSION,
 };
+use super::error::tool_error;
 use context_indexer::ToolMeta;
 use regex::RegexBuilder;
 use serde::Deserialize;
@@ -32,15 +33,7 @@ struct CursorHeader {
 }
 
 fn call_error(code: &'static str, message: impl Into<String>) -> CallToolResult {
-    let payload = json!({
-        "error": {
-            "code": code,
-            "message": message.into(),
-        }
-    });
-    let mut result = CallToolResult::error(Vec::new());
-    result.structured_content = Some(payload);
-    result
+    tool_error(code, message)
 }
 
 fn extract_tool_error_message(result: &CallToolResult) -> String {
@@ -499,7 +492,7 @@ For continuation, omit max_chars or set max_chars to {}.",
     if let Some(next_cursor) = slice.next_cursor.as_deref() {
         next_actions.push(ReadPackNextAction {
             tool: "read_pack".to_string(),
-            args: serde_json::json!({
+            args: json!({
                 "path": ctx.root_display.clone(),
                 "intent": "file",
                 "file": file,
@@ -707,7 +700,7 @@ async fn handle_grep_intent(
         } = grep_request;
         next_actions.push(ReadPackNextAction {
             tool: "read_pack".to_string(),
-            args: serde_json::json!({
+            args: json!({
                 "path": ctx.root_display.clone(),
                 "intent": "grep",
                 "pattern": pattern,

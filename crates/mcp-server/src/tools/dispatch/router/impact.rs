@@ -8,6 +8,7 @@ use context_graph::CodeGraph;
 use petgraph::graph::NodeIndex;
 use std::collections::HashSet;
 
+use super::error::{internal_error, invalid_request};
 const MAX_DIRECT: usize = 200;
 const MAX_TRANSITIVE: usize = 200;
 
@@ -163,7 +164,7 @@ pub(in crate::tools::dispatch) async fn impact(
     let root = match service.resolve_root(request.path.as_deref()).await {
         Ok((root, _)) => root,
         Err(message) => {
-            return Ok(CallToolResult::error(vec![Content::text(message)]));
+            return Ok(invalid_request(message));
         }
     };
 
@@ -171,9 +172,7 @@ pub(in crate::tools::dispatch) async fn impact(
     let (mut engine, meta) = match service.prepare_semantic_engine(&root, policy).await {
         Ok(engine) => engine,
         Err(e) => {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Error: {e}"
-            ))]));
+            return Ok(internal_error(format!("Error: {e}")));
         }
     };
 

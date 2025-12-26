@@ -2,6 +2,7 @@ use context_indexer::ToolMeta;
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
+use super::ToolNextAction;
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GrepContextRequest {
     /// Project directory path
@@ -115,6 +116,8 @@ pub struct GrepContextResult {
     pub truncation: Option<GrepContextTruncation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_actions: Option<Vec<ToolNextAction>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<ToolMeta>,
     pub hunks: Vec<GrepContextHunk>,

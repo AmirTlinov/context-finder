@@ -216,7 +216,7 @@ If no docs were included, `docs_reason` explains why (e.g. `docs_limit_zero`, `m
 Under tight budgets, the map is trimmed before docs so at least one doc slice can still fit.
 
 One-call reading pack tool (`read_pack`; a single entry point for file/grep/query/onboarding, with cursor-only continuation).
-Errors are returned as structured JSON under `structured_content.error`. `read_pack` strictly honors `max_chars` and may drop `meta`/`next_actions` under tight budgets:
+All MCP tool errors return structured JSON under `structured_content.error` (plus a matching text message). `read_pack` strictly honors `max_chars` and may drop `meta`/`next_actions` under tight budgets:
 
 ```jsonc
 // Read a file window (internally calls file_slice)
@@ -252,6 +252,7 @@ Regex context reads tool (`grep_context`; grep `-B/-A/-C` style, merged hunks, b
 ```
 
 Pagination (cursor): when a tool returns `truncated: true` and `next_cursor`, call it again with the same inputs + `cursor: "<next_cursor>"`.
+Tools also provide `next_actions` — ready-to-run tool + args payloads (including the cursor) for direct continuation.
 
 Cursor tokens are opaque and bound to the original query/options (changing them will be rejected).
 

@@ -15,3 +15,13 @@ pub mod repo_onboarding_pack;
 pub mod search;
 pub mod text_search;
 pub mod trace;
+
+use rmcp::schemars;
+use serde::Serialize;
+
+#[derive(Debug, Serialize, schemars::JsonSchema, Clone)]
+pub struct ToolNextAction {
+    pub tool: String,
+    pub args: serde_json::Value,
+    pub reason: String,
+}

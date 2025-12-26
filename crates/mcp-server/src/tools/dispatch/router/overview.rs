@@ -8,6 +8,7 @@ use context_graph::CodeGraph;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use super::error::{internal_error, invalid_request};
 const MAX_ENTRY_POINTS: usize = 10;
 const MAX_KEY_TYPES: usize = 10;
 const HOTSPOT_LIMIT: usize = 20;
@@ -130,7 +131,7 @@ pub(in crate::tools::dispatch) async fn overview(
     let root = match service.resolve_root(request.path.as_deref()).await {
         Ok((root, _)) => root,
         Err(message) => {
-            return Ok(CallToolResult::error(vec![Content::text(message)]));
+            return Ok(invalid_request(message));
         }
     };
 
@@ -138,9 +139,7 @@ pub(in crate::tools::dispatch) async fn overview(
     let (mut engine, meta) = match service.prepare_semantic_engine(&root, policy).await {
         Ok(engine) => engine,
         Err(e) => {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Error: {e}"
-            ))]));
+            return Ok(internal_error(format!("Error: {e}")));
         }
     };
 
@@ -156,18 +155,16 @@ pub(in crate::tools::dispatch) async fn overview(
         });
 
     if let Err(e) = engine.engine_mut().ensure_graph(language).await {
-        return Ok(CallToolResult::error(vec![Content::text(format!(
-            "Graph build error: {e}"
-        ))]));
+        return Ok(internal_error(format!("Graph build error: {e}")));
     }
 
     let result = {
         let engine_ref = engine.engine_mut();
         let chunks = engine_ref.context_search.hybrid().chunks();
         let Some(assembler) = engine_ref.context_search.assembler() else {
-            return Ok(CallToolResult::error(vec![Content::text(
+            return Ok(internal_error(
                 "Graph build error: missing assembler after build",
-            )]));
+            ));
         };
         let graph = assembler.graph();
 

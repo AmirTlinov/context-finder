@@ -2,6 +2,7 @@ use super::super::{
     AutoIndexPolicy, CallToolResult, Content, ContextFinderService, McpError, TraceRequest,
     TraceResult, TraceStep,
 };
+use super::error::{internal_error, invalid_request};
 
 /// Trace call path between two symbols
 pub(in crate::tools::dispatch) async fn trace(
@@ -11,7 +12,7 @@ pub(in crate::tools::dispatch) async fn trace(
     let root = match service.resolve_root(request.path.as_deref()).await {
         Ok((root, _)) => root,
         Err(message) => {
-            return Ok(CallToolResult::error(vec![Content::text(message)]));
+            return Ok(invalid_request(message));
         }
     };
 
@@ -19,9 +20,7 @@ pub(in crate::tools::dispatch) async fn trace(
     let (mut engine, meta) = match service.prepare_semantic_engine(&root, policy).await {
         Ok(engine) => engine,
         Err(e) => {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Error: {e}"
-            ))]));
+            return Ok(internal_error(format!("Error: {e}")));
         }
     };
 
@@ -35,32 +34,30 @@ pub(in crate::tools::dispatch) async fn trace(
     );
 
     if let Err(e) = engine.engine_mut().ensure_graph(language).await {
-        return Ok(CallToolResult::error(vec![Content::text(format!(
-            "Graph build error: {e}"
-        ))]));
+        return Ok(internal_error(format!("Graph build error: {e}")));
     }
 
     let (found, path_steps, depth) = {
         let Some(assembler) = engine.engine_mut().context_search.assembler() else {
-            return Ok(CallToolResult::error(vec![Content::text(
+            return Ok(internal_error(
                 "Graph build error: missing assembler after build",
-            )]));
+            ));
         };
         let graph = assembler.graph();
 
         // Find both symbols
         let Some(from_node) = graph.find_node(&request.from) else {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
+            return Ok(invalid_request(format!(
                 "Symbol '{}' not found",
                 request.from
-            ))]));
+            )));
         };
 
         let Some(to_node) = graph.find_node(&request.to) else {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
+            return Ok(invalid_request(format!(
                 "Symbol '{}' not found",
                 request.to
-            ))]));
+            )));
         };
 
         // Find path

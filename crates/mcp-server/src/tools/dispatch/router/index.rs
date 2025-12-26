@@ -4,6 +4,7 @@ use super::super::{
 };
 use std::collections::HashSet;
 
+use super::error::{internal_error, invalid_request};
 /// Index a project
 pub(in crate::tools::dispatch) async fn index(
     service: &ContextFinderService,
@@ -17,7 +18,7 @@ pub(in crate::tools::dispatch) async fn index(
     let canonical = match service.resolve_root(request.path.as_deref()).await {
         Ok((root, _)) => root,
         Err(message) => {
-            return Ok(CallToolResult::error(vec![Content::text(message)]));
+            return Ok(invalid_request(message));
         }
     };
 
@@ -55,16 +56,14 @@ pub(in crate::tools::dispatch) async fn index(
     let registry = match context_vector_store::ModelRegistry::from_env() {
         Ok(r) => r,
         Err(e) => {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Model registry error: {e}"
-            ))]));
+            return Ok(internal_error(format!("Model registry error: {e}")));
         }
     };
     for model_id in &models {
         if let Err(e) = registry.dimension(model_id) {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
+            return Ok(invalid_request(format!(
                 "Unknown or unsupported model_id '{model_id}': {e}"
-            ))]));
+            )));
         }
     }
 
@@ -76,18 +75,14 @@ pub(in crate::tools::dispatch) async fn index(
     let indexer = match context_indexer::MultiModelProjectIndexer::new(&canonical).await {
         Ok(i) => i,
         Err(e) => {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Indexer init error: {e}"
-            ))]));
+            return Ok(internal_error(format!("Indexer init error: {e}")));
         }
     };
 
     let stats = match indexer.index_models(&specs, full).await {
         Ok(s) => s,
         Err(e) => {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Indexing error: {e}"
-            ))]));
+            return Ok(internal_error(format!("Indexing error: {e}")));
         }
     };
 

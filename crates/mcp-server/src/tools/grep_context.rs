@@ -492,6 +492,7 @@ pub(super) async fn compute_grep_context_result(
         truncated: acc.truncated,
         truncation: acc.truncation,
         next_cursor,
+        next_actions: None,
         meta: None,
         hunks: acc.hunks,
     };

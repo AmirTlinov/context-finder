@@ -122,6 +122,7 @@ pub(super) async fn compute_list_files_result(
         truncated,
         truncation,
         next_cursor,
+        next_actions: None,
         meta: None,
         files,
     })

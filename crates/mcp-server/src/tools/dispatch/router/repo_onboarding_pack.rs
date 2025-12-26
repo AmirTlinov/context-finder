@@ -3,6 +3,7 @@ use super::super::{
     ContextFinderService, McpError, RepoOnboardingPackRequest,
 };
 
+use super::error::{internal_error, invalid_request};
 /// Repo onboarding pack (map + key docs slices + next actions).
 pub(in crate::tools::dispatch) async fn repo_onboarding_pack(
     service: &ContextFinderService,
@@ -10,7 +11,7 @@ pub(in crate::tools::dispatch) async fn repo_onboarding_pack(
 ) -> Result<CallToolResult, McpError> {
     let (root, root_display) = match service.resolve_root(request.path.as_deref()).await {
         Ok(value) => value,
-        Err(message) => return Ok(CallToolResult::error(vec![Content::text(message)])),
+        Err(message) => return Ok(invalid_request(message)),
     };
     let policy = AutoIndexPolicy::from_request(request.auto_index, request.auto_index_budget_ms);
     let meta = service.tool_meta_with_auto_index(&root, policy).await;
@@ -18,9 +19,7 @@ pub(in crate::tools::dispatch) async fn repo_onboarding_pack(
     {
         Ok(result) => result,
         Err(err) => {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Error: {err:#}"
-            ))]));
+            return Ok(internal_error(format!("Error: {err:#}")));
         }
     };
     result.meta = Some(meta);

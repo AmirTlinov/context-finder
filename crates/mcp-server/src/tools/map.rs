@@ -253,6 +253,7 @@ pub(super) async fn compute_map_result(
         directories,
         truncated,
         next_cursor,
+        next_actions: None,
         meta: None,
     })
 }

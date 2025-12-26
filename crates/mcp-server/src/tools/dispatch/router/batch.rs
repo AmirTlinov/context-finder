@@ -11,6 +11,7 @@ use crate::tools::schemas::batch::BatchItem;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use super::error::invalid_request;
 const DEFAULT_MAX_CHARS: usize = 20_000;
 const MAX_MAX_CHARS: usize = 500_000;
 const MIN_SUPPORTED_VERSION: u32 = 1;
@@ -18,7 +19,7 @@ const LATEST_VERSION: u32 = 2;
 const DEFAULT_VERSION: u32 = LATEST_VERSION;
 
 fn call_error(message: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(message.into())])
+    invalid_request(message)
 }
 
 fn validate_batch_version(version: u32) -> Option<String> {
@@ -40,10 +41,10 @@ async fn dispatch_tool(
         ($req:ty, $method:ident, $tool_name:literal) => {{
             match serde_json::from_value::<$req>(input) {
                 Ok(req) => service.$method(Parameters(req)).await,
-                Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                Err(err) => Ok(invalid_request(format!(
                     "Invalid input for {}: {err}",
                     $tool_name
-                ))])),
+                ))),
             }
         }};
     }

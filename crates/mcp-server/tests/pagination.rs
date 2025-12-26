@@ -70,6 +70,29 @@ async fn call_tool_json(
     serde_json::from_str(text).context("tool output is not valid JSON")
 }
 
+fn assert_next_action(json: &Value, tool: &str, expected_cursor: &str) -> Result<()> {
+    let actions = json
+        .get("next_actions")
+        .and_then(Value::as_array)
+        .context("missing next_actions")?;
+    let first = actions.first().context("next_actions is empty")?;
+    assert_eq!(
+        first.get("tool").and_then(Value::as_str),
+        Some(tool),
+        "unexpected next_actions tool"
+    );
+    let args = first
+        .get("args")
+        .and_then(Value::as_object)
+        .context("next_actions args missing")?;
+    let cursor = args
+        .get("cursor")
+        .and_then(Value::as_str)
+        .context("next_actions cursor missing")?;
+    assert_eq!(cursor, expected_cursor, "next_actions cursor mismatch");
+    Ok(())
+}
+
 async fn start_service() -> Result<(tempfile::TempDir, RunningService<RoleClient, ()>)> {
     let bin = locate_context_finder_mcp_bin()?;
 
@@ -128,10 +151,14 @@ async fn list_files_supports_cursor_pagination() -> Result<()> {
             .to_string();
         seen.push(first);
 
-        cursor = json
+        let next_cursor = json
             .get("next_cursor")
             .and_then(Value::as_str)
             .map(str::to_string);
+        if let Some(cursor) = next_cursor.as_deref() {
+            assert_next_action(&json, "list_files", cursor)?;
+        }
+        cursor = next_cursor;
         if cursor.is_none() {
             break;
         }
@@ -149,6 +176,53 @@ async fn list_files_supports_cursor_pagination() -> Result<()> {
     assert!(
         !root.join(".context-finder").exists(),
         "list_files created .context-finder side effects"
+    );
+
+    service.cancel().await.context("shutdown mcp service")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_files_invalid_cursor_returns_structured_error() -> Result<()> {
+    let (tmp, service) = start_service().await?;
+    let root = tmp.path();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        service.call_tool(CallToolRequestParam {
+            name: "list_files".into(),
+            arguments: serde_json::json!({
+                "path": root.to_string_lossy(),
+                "cursor": "not-a-valid-cursor"
+            })
+            .as_object()
+            .cloned(),
+        }),
+    )
+    .await
+    .context("timeout calling list_files")??;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = result
+        .structured_content
+        .clone()
+        .context("list_files error missing structured_content")?;
+    let error = structured
+        .get("error")
+        .context("list_files error missing error object")?;
+    assert_eq!(
+        error.get("code").and_then(Value::as_str),
+        Some("invalid_cursor")
+    );
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .unwrap_or("");
+    assert!(
+        text.contains("Invalid cursor"),
+        "expected invalid cursor message"
     );
 
     service.cancel().await.context("shutdown mcp service")?;
@@ -196,6 +270,7 @@ async fn map_supports_cursor_pagination() -> Result<()> {
         .and_then(Value::as_str)
         .context("missing next_cursor")?
         .to_string();
+    assert_next_action(&first, "map", &cursor)?;
 
     let second = call_tool_json(
         &service,
@@ -281,6 +356,9 @@ async fn text_search_supports_cursor_pagination_filesystem() -> Result<()> {
             .get("next_cursor")
             .and_then(Value::as_str)
             .map(str::to_string);
+        if let Some(cursor) = cursor.as_deref() {
+            assert_next_action(&json, "text_search", cursor)?;
+        }
         if cursor.is_none() {
             break;
         }
@@ -336,6 +414,7 @@ async fn grep_context_supports_cursor_pagination() -> Result<()> {
         .and_then(Value::as_str)
         .context("missing next_cursor")?
         .to_string();
+    assert_next_action(&first, "grep_context", &cursor)?;
 
     let second = call_tool_json(
         &service,
@@ -417,6 +496,7 @@ async fn file_slice_supports_cursor_pagination() -> Result<()> {
         .and_then(Value::as_str)
         .context("missing next_cursor")?
         .to_string();
+    assert_next_action(&first, "file_slice", &cursor)?;
 
     let second = call_tool_json(
         &service,

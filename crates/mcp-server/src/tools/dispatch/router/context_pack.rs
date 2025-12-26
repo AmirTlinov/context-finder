@@ -10,9 +10,7 @@ use std::path::Path;
 
 type ToolResult<T> = std::result::Result<T, CallToolResult>;
 
-fn tool_error(message: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(message.into())])
-}
+use super::error::{internal_error, invalid_request};
 
 #[derive(Clone, Copy, Debug)]
 struct ContextPackFlags(u8);
@@ -86,7 +84,7 @@ fn parse_related_mode(
     match raw.unwrap_or(default) {
         "explore" => Ok(RelatedMode::Explore),
         "focus" => Ok(RelatedMode::Focus),
-        _ => Err(tool_error(
+        _ => Err(invalid_request(
             "Error: related_mode must be 'explore' or 'focus'",
         )),
     }
@@ -94,7 +92,7 @@ fn parse_related_mode(
 
 fn parse_inputs(request: &ContextPackRequest) -> ToolResult<ContextPackInputs> {
     if request.query.trim().is_empty() {
-        return Err(tool_error("Error: Query cannot be empty"));
+        return Err(invalid_request("Error: Query cannot be empty"));
     }
 
     let limit = request.limit.unwrap_or(10).clamp(1, 50);
@@ -216,11 +214,11 @@ async fn load_or_build_graph_nodes_store(
             GRAPH_DOC_VERSION,
             template_hash,
         )
-        .map_err(|err| tool_error(format!("graph_nodes meta error: {err}")))?;
+        .map_err(|err| internal_error(format!("graph_nodes meta error: {err}")))?;
 
         return GraphNodeStore::build_or_update(&graph_nodes_path, meta, docs)
             .await
-            .map_err(|err| tool_error(format!("graph_nodes build error: {err}")));
+            .map_err(|err| internal_error(format!("graph_nodes build error: {err}")));
     };
 
     Ok(store)
@@ -469,7 +467,7 @@ pub(in crate::tools::dispatch) async fn context_pack(
 
     let root = match service.resolve_root(inputs.path.as_deref()).await {
         Ok((root, _)) => root,
-        Err(message) => return Ok(tool_error(message)),
+        Err(message) => return Ok(invalid_request(message)),
     };
 
     let policy = AutoIndexPolicy::from_request(
@@ -478,12 +476,12 @@ pub(in crate::tools::dispatch) async fn context_pack(
     );
     let (mut engine, meta) = match service.prepare_semantic_engine(&root, policy).await {
         Ok(engine) => engine,
-        Err(err) => return Ok(tool_error(format!("Error: {err}"))),
+        Err(err) => return Ok(internal_error(format!("Error: {err}"))),
     };
 
     let language = select_language(request.language.as_deref(), &mut engine);
     if let Err(err) = engine.engine_mut().ensure_graph(language).await {
-        return Ok(tool_error(format!("Graph build error: {err}")));
+        return Ok(internal_error(format!("Graph build error: {err}")));
     }
 
     let available_models = engine.engine_mut().available_models.clone();
@@ -497,7 +495,7 @@ pub(in crate::tools::dispatch) async fn context_pack(
     {
         Ok(r) => r,
         Err(e) => {
-            return Ok(tool_error(format!("Search error: {e}")));
+            return Ok(internal_error(format!("Search error: {e}")));
         }
     };
 

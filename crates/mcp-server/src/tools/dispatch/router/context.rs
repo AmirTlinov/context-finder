@@ -3,6 +3,7 @@ use super::super::{
     ContextResult, McpError, RelatedCode,
 };
 
+use super::error::{internal_error, invalid_request};
 /// Search with graph context
 pub(in crate::tools::dispatch) async fn context(
     service: &ContextFinderService,
@@ -16,15 +17,13 @@ pub(in crate::tools::dispatch) async fn context(
     };
 
     if request.query.trim().is_empty() {
-        return Ok(CallToolResult::error(vec![Content::text(
-            "Error: Query cannot be empty",
-        )]));
+        return Ok(invalid_request("Error: Query cannot be empty"));
     }
 
     let root = match service.resolve_root(request.path.as_deref()).await {
         Ok((root, _)) => root,
         Err(message) => {
-            return Ok(CallToolResult::error(vec![Content::text(message)]));
+            return Ok(invalid_request(message));
         }
     };
 
@@ -32,9 +31,7 @@ pub(in crate::tools::dispatch) async fn context(
     let (mut engine, meta) = match service.prepare_semantic_engine(&root, policy).await {
         Ok(engine) => engine,
         Err(e) => {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Error: {e}"
-            ))]));
+            return Ok(internal_error(format!("Error: {e}")));
         }
     };
 
@@ -49,9 +46,7 @@ pub(in crate::tools::dispatch) async fn context(
         );
 
         if let Err(e) = engine.engine_mut().ensure_graph(language).await {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Graph build error: {e}"
-            ))]));
+            return Ok(internal_error(format!("Graph build error: {e}")));
         }
 
         match engine
@@ -62,9 +57,7 @@ pub(in crate::tools::dispatch) async fn context(
         {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Search error: {e}"
-                ))]));
+                return Ok(internal_error(format!("Search error: {e}")));
             }
         }
     };
