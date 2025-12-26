@@ -195,6 +195,28 @@ impl ContextFinderService {
         }
     }
 
+    async fn tool_meta_with_auto_index(&self, root: &Path, policy: AutoIndexPolicy) -> ToolMeta {
+        let mut index_state = match gather_index_state(root, &self.profile).await {
+            Ok(state) => state,
+            Err(err) => {
+                log::debug!("index_state unavailable for {}: {err:#}", root.display());
+                return ToolMeta { index_state: None };
+            }
+        };
+
+        if policy.enabled && (index_state.stale || !index_state.index.exists) {
+            let reindex = self.attempt_reindex(root, policy.budget_ms).await;
+            if let Ok(refreshed) = gather_index_state(root, &self.profile).await {
+                index_state = refreshed;
+            }
+            index_state.reindex = Some(reindex);
+        }
+
+        ToolMeta {
+            index_state: Some(index_state),
+        }
+    }
+
     async fn prepare_semantic_engine(
         &self,
         root: &Path,

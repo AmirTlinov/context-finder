@@ -11,7 +11,7 @@ If you’re tired of “search → open file → search again → maybe the righ
 - **Safe file reads:** MCP `file_slice` returns a bounded file window (root-locked, line-based, hashed).
 - **Regex context reads:** MCP `grep_context` returns all regex matches with `before/after` context (grep `-B/-A/-C`), merged into compact hunks under hard budgets.
 - **Safe file listing:** MCP `list_files` returns bounded file paths (glob/substring filter).
-- **Repo onboarding pack:** MCP `repo_onboarding_pack` returns `map` + key docs (`file_slice`) + `next_actions` in one bounded response.
+- **Repo onboarding pack:** MCP `repo_onboarding_pack` returns `map` + key docs (`file_slice`) + `next_actions` in one bounded response, auto-refreshes the index by default, and reports `docs_reason` when no docs were included.
 - **One-call reading pack:** MCP `read_pack` picks the right tool (`file_slice` / `grep_context` / `context_pack` / `repo_onboarding_pack`) and returns `sections` + `next_actions` under one `max_chars` budget.
 - **Cursor pagination:** `map`, `list_files`, `text_search`, `grep_context`, `file_slice` return `next_cursor` when truncated so agents can continue without guessing.
 - **Freshness by default:** every response can carry `meta.index_state`; `options.stale_policy=auto|warn|fail` controls (re)index behavior.

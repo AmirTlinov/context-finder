@@ -5,8 +5,8 @@ use std::path::Path;
 use super::file_slice::compute_onboarding_doc_slice;
 use super::map::compute_map_result;
 use super::schemas::repo_onboarding_pack::{
-    RepoOnboardingNextAction, RepoOnboardingPackBudget, RepoOnboardingPackRequest,
-    RepoOnboardingPackResult, RepoOnboardingPackTruncation,
+    RepoOnboardingDocsReason, RepoOnboardingNextAction, RepoOnboardingPackBudget,
+    RepoOnboardingPackRequest, RepoOnboardingPackResult, RepoOnboardingPackTruncation,
 };
 use super::ContextFinderService;
 
@@ -230,6 +230,7 @@ pub(super) async fn compute_repo_onboarding_pack_result(
         root: root_display.to_string(),
         map,
         docs: Vec::new(),
+        docs_reason: None,
         next_actions,
         budget: RepoOnboardingPackBudget {
             max_chars,
@@ -249,6 +250,20 @@ pub(super) async fn compute_repo_onboarding_pack_result(
         doc_max_chars,
     )?;
     trim_to_budget(&mut result)?;
+    if result.docs.is_empty() {
+        result.docs_reason = Some(if docs_limit == 0 {
+            RepoOnboardingDocsReason::DocsLimitZero
+        } else if doc_candidates.is_empty() {
+            RepoOnboardingDocsReason::NoDocCandidates
+        } else if matches!(
+            result.budget.truncation,
+            Some(RepoOnboardingPackTruncation::MaxChars)
+        ) {
+            RepoOnboardingDocsReason::MaxChars
+        } else {
+            RepoOnboardingDocsReason::DocsNotFound
+        });
+    }
 
     Ok(result)
 }

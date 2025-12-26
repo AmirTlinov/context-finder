@@ -84,15 +84,15 @@ pub struct ReadPackRequest {
     #[schemars(description = "Whether to include docs in primary/related results")]
     pub include_docs: Option<bool>,
 
-    /// Automatically build or refresh the semantic index before intent=query (default: true)
+    /// Automatically build or refresh the semantic index before intent=query/onboarding (default: true)
     #[schemars(
-        description = "Automatically build or refresh the semantic index before intent=query (default: true)."
+        description = "Automatically build or refresh the semantic index before intent=query/onboarding (default: true)."
     )]
     pub auto_index: Option<bool>,
 
-    /// Auto-index time budget in milliseconds for intent=query (default: 3000)
+    /// Auto-index time budget in milliseconds for intent=query/onboarding (default: 3000)
     #[schemars(
-        description = "Auto-index time budget in milliseconds for intent=query (default: 3000)."
+        description = "Auto-index time budget in milliseconds for intent=query/onboarding (default: 3000)."
     )]
     pub auto_index_budget_ms: Option<u64>,
 }

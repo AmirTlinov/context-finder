@@ -46,6 +46,7 @@ async fn repo_onboarding_pack_returns_map_docs_and_next_actions() -> Result<()> 
     cmd.env("CONTEXT_FINDER_PROFILE", "quality");
     cmd.env("RUST_LOG", "warn");
     cmd.env("CONTEXT_FINDER_DISABLE_DAEMON", "1");
+    cmd.env("CONTEXT_FINDER_EMBEDDING_MODE", "stub");
 
     let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
     let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))
@@ -76,6 +77,7 @@ async fn repo_onboarding_pack_returns_map_docs_and_next_actions() -> Result<()> 
         "doc_max_lines": 50,
         "doc_max_chars": 2000,
         "max_chars": 20000,
+        "auto_index": true
     });
     let result = tokio::time::timeout(
         Duration::from_secs(10),
@@ -125,6 +127,15 @@ async fn repo_onboarding_pack_returns_map_docs_and_next_actions() -> Result<()> 
         .context("missing next_actions array")?;
     assert!(!next_actions.is_empty(), "expected non-empty next_actions");
 
+    let reindex_attempted = json
+        .get("meta")
+        .and_then(|meta| meta.get("index_state"))
+        .and_then(|state| state.get("reindex"))
+        .and_then(|reindex| reindex.get("attempted"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    assert!(reindex_attempted, "expected auto-index attempt metadata");
+
     let budget = json.get("budget").context("missing budget")?;
     let max_chars = budget
         .get("max_chars")
@@ -137,8 +148,71 @@ async fn repo_onboarding_pack_returns_map_docs_and_next_actions() -> Result<()> 
     assert!(used_chars <= max_chars);
 
     assert!(
-        !root.join(".context-finder").exists(),
-        "repo_onboarding_pack created .context-finder side effects"
+        root.join(".context-finder").exists(),
+        "repo_onboarding_pack should auto-refresh the index"
+    );
+
+    service.cancel().await.context("shutdown mcp service")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn repo_onboarding_pack_reports_docs_reason_when_docs_disabled() -> Result<()> {
+    let bin = locate_context_finder_mcp_bin()?;
+
+    let mut cmd = Command::new(bin);
+    cmd.env_remove("CONTEXT_FINDER_MODEL_DIR");
+    cmd.env("CONTEXT_FINDER_PROFILE", "quality");
+    cmd.env("RUST_LOG", "warn");
+    cmd.env("CONTEXT_FINDER_DISABLE_DAEMON", "1");
+    cmd.env("CONTEXT_FINDER_EMBEDDING_MODE", "stub");
+
+    let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
+    let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))
+        .await
+        .context("timeout starting MCP server")??;
+
+    let tmp = tempfile::tempdir().context("tempdir")?;
+    let root = tmp.path();
+    std::fs::write(root.join("README.md"), "# Hello\n").context("write README.md")?;
+
+    let args = serde_json::json!({
+        "path": root.to_string_lossy(),
+        "docs_limit": 0,
+        "auto_index": false
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        service.call_tool(CallToolRequestParam {
+            name: "repo_onboarding_pack".into(),
+            arguments: args.as_object().cloned(),
+        }),
+    )
+    .await
+    .context("timeout calling repo_onboarding_pack")??;
+
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "repo_onboarding_pack returned error"
+    );
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .context("repo_onboarding_pack did not return text content")?;
+    let json: Value =
+        serde_json::from_str(text).context("repo_onboarding_pack output is not valid JSON")?;
+
+    let docs = json
+        .get("docs")
+        .and_then(Value::as_array)
+        .context("missing docs array")?;
+    assert!(docs.is_empty(), "expected no docs when docs_limit=0");
+    assert_eq!(
+        json.get("docs_reason").and_then(Value::as_str),
+        Some("docs_limit_zero")
     );
 
     service.cancel().await.context("shutdown mcp service")?;
@@ -175,6 +249,7 @@ async fn repo_onboarding_pack_clamps_tiny_budget_and_keeps_next_actions() -> Res
         "doc_max_lines": 10,
         "doc_max_chars": 200,
         "max_chars": 5,
+        "auto_index": false
     });
     let result = tokio::time::timeout(
         Duration::from_secs(10),

@@ -43,6 +43,14 @@ pub struct RepoOnboardingPackRequest {
     /// Maximum number of UTF-8 characters for the entire onboarding pack (default: 20000)
     #[schemars(description = "Maximum number of UTF-8 characters for the onboarding pack")]
     pub max_chars: Option<usize>,
+
+    /// Automatically build or refresh the semantic index (default: true)
+    #[schemars(description = "Automatically build or refresh the semantic index (default: true).")]
+    pub auto_index: Option<bool>,
+
+    /// Auto-index time budget in milliseconds (default: 3000)
+    #[schemars(description = "Auto-index time budget in milliseconds (default: 3000).")]
+    pub auto_index_budget_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +58,15 @@ pub struct RepoOnboardingPackRequest {
 pub enum RepoOnboardingPackTruncation {
     MaxChars,
     DocsLimit,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoOnboardingDocsReason {
+    DocsLimitZero,
+    NoDocCandidates,
+    DocsNotFound,
+    MaxChars,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -74,6 +91,8 @@ pub struct RepoOnboardingPackResult {
     pub root: String,
     pub map: MapResult,
     pub docs: Vec<FileSliceResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docs_reason: Option<RepoOnboardingDocsReason>,
     pub next_actions: Vec<RepoOnboardingNextAction>,
     pub budget: RepoOnboardingPackBudget,
     #[serde(skip_serializing_if = "Option::is_none")]

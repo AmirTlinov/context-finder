@@ -207,9 +207,12 @@ Repo onboarding pack tool (best default for agents; one call → `map` + key doc
   "path": "/path/to/project",
   "map_depth": 2,
   "docs_limit": 6,
-  "max_chars": 20000
+  "max_chars": 20000,
+  "auto_index": true
 }
 ```
+
+If no docs were included, `docs_reason` explains why (e.g. `docs_limit_zero`, `max_chars`).
 
 One-call reading pack tool (`read_pack`; a single entry point for file/grep/query/onboarding, with cursor-only continuation):
 

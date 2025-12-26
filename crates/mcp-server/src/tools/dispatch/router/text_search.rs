@@ -28,10 +28,19 @@ struct TextSearchSettings<'a> {
 struct TextSearchOutcome {
     matches: Vec<TextSearchMatch>,
     matched_files: HashSet<String>,
+    seen: HashSet<TextSearchKey>,
     scanned_files: usize,
     skipped_large_files: usize,
     truncated: bool,
     next_state: Option<TextSearchCursorModeV1>,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct TextSearchKey {
+    file: String,
+    line: usize,
+    column: usize,
+    text: String,
 }
 
 impl TextSearchOutcome {
@@ -39,11 +48,27 @@ impl TextSearchOutcome {
         Self {
             matches: Vec::new(),
             matched_files: HashSet::new(),
+            seen: HashSet::new(),
             scanned_files: 0,
             skipped_large_files: 0,
             truncated: false,
             next_state: None,
         }
+    }
+
+    fn push_match(&mut self, item: TextSearchMatch) -> bool {
+        let key = TextSearchKey {
+            file: item.file.clone(),
+            line: item.line,
+            column: item.column,
+            text: item.text.clone(),
+        };
+        if !self.seen.insert(key) {
+            return false;
+        }
+        self.matched_files.insert(item.file.clone());
+        self.matches.push(item);
+        true
     }
 }
 
@@ -226,8 +251,7 @@ fn search_in_corpus(
 
                 let line = chunk.start_line + offset;
                 let column = line_text[..col_byte].chars().count() + 1;
-                outcome.matched_files.insert(chunk.file_path.clone());
-                outcome.matches.push(TextSearchMatch {
+                let _ = outcome.push_match(TextSearchMatch {
                     file: chunk.file_path.clone(),
                     line,
                     column,
@@ -309,8 +333,7 @@ fn search_in_filesystem(
                 continue;
             };
             let column = line_text[..col_byte].chars().count() + 1;
-            outcome.matched_files.insert(rel_path.clone());
-            outcome.matches.push(TextSearchMatch {
+            let _ = outcome.push_match(TextSearchMatch {
                 file: rel_path.clone(),
                 line: offset + 1,
                 column,
@@ -430,4 +453,31 @@ pub(in crate::tools::dispatch) async fn text_search(
     Ok(CallToolResult::success(vec![Content::text(
         serde_json::to_string_pretty(&result).unwrap_or_default(),
     )]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TextSearchMatch, TextSearchOutcome};
+
+    #[test]
+    fn text_search_dedupes_matches() {
+        let mut outcome = TextSearchOutcome::new();
+        let first = TextSearchMatch {
+            file: "src/main.rs".to_string(),
+            line: 1,
+            column: 1,
+            text: "fn main() {}".to_string(),
+        };
+        assert!(outcome.push_match(first));
+
+        let dup = TextSearchMatch {
+            file: "src/main.rs".to_string(),
+            line: 1,
+            column: 1,
+            text: "fn main() {}".to_string(),
+        };
+        assert!(!outcome.push_match(dup));
+        assert_eq!(outcome.matches.len(), 1);
+        assert_eq!(outcome.matched_files.len(), 1);
+    }
 }

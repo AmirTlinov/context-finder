@@ -63,10 +63,16 @@ fn decode_resume_cursor(
         return Err("Invalid cursor: different file".to_string());
     }
     if decoded.max_lines != validation.max_lines {
-        return Err("Invalid cursor: different max_lines".to_string());
+        return Err(format!(
+            "Invalid cursor: different max_lines (cursor={}, expected={})",
+            decoded.max_lines, validation.max_lines
+        ));
     }
     if decoded.max_chars != validation.max_chars {
-        return Err("Invalid cursor: different max_chars".to_string());
+        return Err(format!(
+            "Invalid cursor: different max_chars (cursor={}, expected={}). Resume with the same max_chars that produced this cursor.",
+            decoded.max_chars, validation.max_chars
+        ));
     }
     if decoded.file_size_bytes != validation.file_size_bytes
         || decoded.file_mtime_ms != validation.file_mtime_ms

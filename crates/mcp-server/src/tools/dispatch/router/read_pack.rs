@@ -1,10 +1,10 @@
 use super::super::{
     compute_file_slice_result, compute_grep_context_result, compute_repo_onboarding_pack_result,
-    decode_cursor, finalize_read_pack_budget, CallToolResult, Content, ContextFinderService,
-    ContextPackRequest, FileSliceCursorV1, FileSliceRequest, GrepContextComputeOptions,
-    GrepContextCursorV1, GrepContextRequest, McpError, Parameters, ReadPackBudget, ReadPackIntent,
-    ReadPackNextAction, ReadPackRequest, ReadPackResult, ReadPackSection, ReadPackTruncation,
-    RepoOnboardingPackRequest, CURSOR_VERSION,
+    decode_cursor, finalize_read_pack_budget, AutoIndexPolicy, CallToolResult, Content,
+    ContextFinderService, ContextPackRequest, FileSliceCursorV1, FileSliceRequest,
+    GrepContextComputeOptions, GrepContextCursorV1, GrepContextRequest, McpError, Parameters,
+    ReadPackBudget, ReadPackIntent, ReadPackNextAction, ReadPackRequest, ReadPackResult,
+    ReadPackSection, ReadPackTruncation, RepoOnboardingPackRequest, CURSOR_VERSION,
 };
 use context_indexer::ToolMeta;
 use regex::RegexBuilder;
@@ -36,6 +36,12 @@ fn call_error(message: impl Into<String>) -> CallToolResult {
 
 fn trimmed_non_empty_str(input: Option<&str>) -> Option<&str> {
     input.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn suggest_outer_max_chars(inner_max_chars: usize) -> usize {
+    let mut outer = inner_max_chars.saturating_mul(5).saturating_add(2) / 3;
+    outer = outer.clamp(MIN_MAX_CHARS, MAX_MAX_CHARS);
+    outer.max(inner_max_chars)
 }
 
 struct ReadPackContext {
@@ -282,24 +288,30 @@ fn handle_file_intent(
     sections: &mut Vec<ReadPackSection>,
     next_actions: &mut Vec<ReadPackNextAction>,
 ) -> ToolResult<()> {
-    let requested_file = trimmed_non_empty_str(request.file.as_deref()).map(ToString::to_string);
-    let need_cursor_defaults = requested_file.is_none() || request.max_lines.is_none();
-    let cursor_payload = if need_cursor_defaults {
-        match decode_file_slice_cursor(request.cursor.as_deref())? {
-            Some(decoded) => {
-                if decoded.v != CURSOR_VERSION || decoded.tool != "file_slice" {
-                    return Err(call_error("Invalid cursor: wrong tool"));
-                }
-                if decoded.root != ctx.root_display {
-                    return Err(call_error("Invalid cursor: different root"));
-                }
-                Some(decoded)
-            }
-            None => None,
+    let cursor_payload = decode_file_slice_cursor(request.cursor.as_deref())?;
+    if let Some(decoded) = cursor_payload.as_ref() {
+        if decoded.v != CURSOR_VERSION || decoded.tool != "file_slice" {
+            return Err(call_error(
+                "Invalid cursor: wrong tool (expected file_slice)",
+            ));
         }
-    } else {
-        None
-    };
+        if decoded.root != ctx.root_display {
+            return Err(call_error(format!(
+                "Invalid cursor: different root (cursor={}, expected={})",
+                decoded.root, ctx.root_display
+            )));
+        }
+    }
+
+    let requested_file = trimmed_non_empty_str(request.file.as_deref()).map(ToString::to_string);
+    if let (Some(decoded), Some(requested)) = (cursor_payload.as_ref(), requested_file.as_ref()) {
+        if requested != &decoded.file {
+            return Err(call_error(format!(
+                "Invalid cursor: different file (cursor={}, request={})",
+                decoded.file, requested
+            )));
+        }
+    }
 
     let file = requested_file.or_else(|| cursor_payload.as_ref().map(|c| c.file.clone()));
     let Some(file) = file else {
@@ -309,6 +321,32 @@ fn handle_file_intent(
     let max_lines = request
         .max_lines
         .or_else(|| cursor_payload.as_ref().map(|c| c.max_lines));
+    if let (Some(decoded), Some(requested)) = (cursor_payload.as_ref(), request.max_lines) {
+        if requested != decoded.max_lines {
+            return Err(call_error(format!(
+                "Invalid cursor: different max_lines (cursor={}, request={})",
+                decoded.max_lines, requested
+            )));
+        }
+    }
+
+    let file_slice_max_chars = if let Some(decoded) = cursor_payload.as_ref() {
+        if let Some(requested) = request.max_chars {
+            if ctx.inner_max_chars != decoded.max_chars {
+                let suggested = suggest_outer_max_chars(decoded.max_chars);
+                return Err(call_error(format!(
+                    "Invalid cursor: different max_chars (cursor={}, request_max_chars={} -> inner={}). \
+For continuation, omit max_chars or set max_chars to {}.",
+                    decoded.max_chars, requested, ctx.inner_max_chars, suggested
+                )));
+            }
+            ctx.inner_max_chars
+        } else {
+            decoded.max_chars
+        }
+    } else {
+        ctx.inner_max_chars
+    };
     let slice = compute_file_slice_result(
         &ctx.root,
         &ctx.root_display,
@@ -317,7 +355,7 @@ fn handle_file_intent(
             file: file.clone(),
             start_line: request.start_line,
             max_lines,
-            max_chars: Some(ctx.inner_max_chars),
+            max_chars: Some(file_slice_max_chars),
             cursor: request.cursor.clone(),
         },
     )
@@ -586,6 +624,7 @@ async fn handle_query_intent(
 
 async fn handle_onboarding_intent(
     ctx: &ReadPackContext,
+    request: &ReadPackRequest,
     sections: &mut Vec<ReadPackSection>,
 ) -> ToolResult<()> {
     let onboarding_request = RepoOnboardingPackRequest {
@@ -597,6 +636,8 @@ async fn handle_onboarding_intent(
         doc_max_lines: None,
         doc_max_chars: None,
         max_chars: Some(ctx.inner_max_chars),
+        auto_index: request.auto_index,
+        auto_index_budget_ms: request.auto_index_budget_ms,
     };
 
     let pack =
@@ -632,7 +673,14 @@ pub(in crate::tools::dispatch) async fn read_pack(
         .timeout_ms
         .unwrap_or(DEFAULT_TIMEOUT_MS)
         .clamp(1_000, MAX_TIMEOUT_MS);
-    let meta = service.tool_meta(&ctx.root).await;
+    let meta = match intent {
+        ReadPackIntent::Onboarding => {
+            let policy =
+                AutoIndexPolicy::from_request(request.auto_index, request.auto_index_budget_ms);
+            service.tool_meta_with_auto_index(&ctx.root, policy).await
+        }
+        _ => service.tool_meta(&ctx.root).await,
+    };
 
     let mut sections: Vec<ReadPackSection> = Vec::new();
     let mut next_actions: Vec<ReadPackNextAction> = Vec::new();
@@ -649,7 +697,9 @@ pub(in crate::tools::dispatch) async fn read_pack(
             ReadPackIntent::Query => {
                 handle_query_intent(service, &ctx, &request, &mut sections).await
             }
-            ReadPackIntent::Onboarding => handle_onboarding_intent(&ctx, &mut sections).await,
+            ReadPackIntent::Onboarding => {
+                handle_onboarding_intent(&ctx, &request, &mut sections).await
+            }
         }
     };
     let handler_result =
