@@ -133,6 +133,12 @@ context-finder serve-grpc --bind 127.0.0.1:50051
 cargo install --path crates/mcp-server
 ```
 
+Self-audit tool inventory (no MCP client required):
+
+```bash
+context-finder-mcp --print-tools
+```
+
 Example Codex config (`~/.codex/config.toml`):
 
 ```toml

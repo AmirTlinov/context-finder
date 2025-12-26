@@ -194,6 +194,12 @@ cargo install --path crates/mcp-server
 context-finder-mcp
 ```
 
+Self-audit tool inventory (no MCP client required):
+
+```bash
+context-finder-mcp --print-tools
+```
+
 Repo onboarding pack tool (best default for agents; one call → `map` + key docs + `next_actions`):
 
 ```jsonc

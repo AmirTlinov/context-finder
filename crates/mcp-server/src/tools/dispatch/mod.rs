@@ -6,6 +6,7 @@ use super::batch::{
     compute_used_chars, extract_path_from_input, parse_tool_result_as_json, prepare_item_input,
     push_item_or_truncate, resolve_batch_refs,
 };
+use super::catalog;
 use super::cursor::{decode_cursor, encode_cursor, CURSOR_VERSION};
 use super::file_slice::compute_file_slice_result;
 use super::grep_context::{compute_grep_context_result, GrepContextComputeOptions};
@@ -163,7 +164,7 @@ fn load_profile_from_env() -> SearchProfile {
 impl ServerHandler for ContextFinderService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("Context Finder provides semantic code search for AI agents. Use 'map' to explore project structure, 'search' for semantic queries, 'context' for search with related code, 'index' to index new projects, and 'doctor' to diagnose model/GPU/index configuration.".into()),
+            instructions: Some(catalog::tool_instructions()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation::from_build_env(),
             ..Default::default()

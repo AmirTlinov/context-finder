@@ -4,6 +4,7 @@
 //! implementations reviewable and evolvable.
 
 mod batch;
+pub(crate) mod catalog;
 mod cursor;
 mod dispatch;
 mod file_slice;
