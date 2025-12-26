@@ -220,6 +220,90 @@ async fn repo_onboarding_pack_reports_docs_reason_when_docs_disabled() -> Result
 }
 
 #[tokio::test]
+async fn repo_onboarding_pack_keeps_docs_under_tight_budget() -> Result<()> {
+    let bin = locate_context_finder_mcp_bin()?;
+
+    let mut cmd = Command::new(bin);
+    cmd.env_remove("CONTEXT_FINDER_MODEL_DIR");
+    cmd.env("CONTEXT_FINDER_PROFILE", "quality");
+    cmd.env("RUST_LOG", "warn");
+    cmd.env("CONTEXT_FINDER_DISABLE_DAEMON", "1");
+    cmd.env("CONTEXT_FINDER_EMBEDDING_MODE", "stub");
+
+    let transport = TokioChildProcess::new(cmd).context("spawn mcp server")?;
+    let service = tokio::time::timeout(Duration::from_secs(10), ().serve(transport))
+        .await
+        .context("timeout starting MCP server")??;
+
+    let tmp = tempfile::tempdir().context("tempdir")?;
+    let root = tmp.path();
+
+    std::fs::create_dir_all(root.join("src")).context("mkdir src")?;
+    for idx in 0..60 {
+        std::fs::create_dir_all(root.join("src").join(format!("mod{idx}")))
+            .with_context(|| format!("mkdir mod{idx}"))?;
+    }
+    std::fs::write(root.join("README.md"), "# Hello\n").context("write README.md")?;
+    std::fs::create_dir_all(root.join("docs")).context("mkdir docs")?;
+    std::fs::write(root.join("docs").join("README.md"), "# Docs\n")
+        .context("write docs/README.md")?;
+
+    let args = serde_json::json!({
+        "path": root.to_string_lossy(),
+        "map_depth": 2,
+        "map_limit": 200,
+        "docs_limit": 2,
+        "doc_max_lines": 20,
+        "doc_max_chars": 200,
+        "max_chars": 1200,
+        "auto_index": false
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        service.call_tool(CallToolRequestParam {
+            name: "repo_onboarding_pack".into(),
+            arguments: args.as_object().cloned(),
+        }),
+    )
+    .await
+    .context("timeout calling repo_onboarding_pack")??;
+
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "repo_onboarding_pack returned error"
+    );
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .context("repo_onboarding_pack did not return text content")?;
+    let json: Value =
+        serde_json::from_str(text).context("repo_onboarding_pack output is not valid JSON")?;
+
+    let docs = json
+        .get("docs")
+        .and_then(Value::as_array)
+        .context("missing docs array")?;
+    assert!(!docs.is_empty(), "expected docs even under tight budget");
+
+    let budget = json.get("budget").context("missing budget")?;
+    let max_chars = budget
+        .get("max_chars")
+        .and_then(Value::as_u64)
+        .context("budget.max_chars missing")?;
+    let used_chars = budget
+        .get("used_chars")
+        .and_then(Value::as_u64)
+        .context("budget.used_chars missing")?;
+    assert!(used_chars <= max_chars);
+
+    service.cancel().await.context("shutdown mcp service")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn repo_onboarding_pack_clamps_tiny_budget_and_keeps_next_actions() -> Result<()> {
     let bin = locate_context_finder_mcp_bin()?;
 

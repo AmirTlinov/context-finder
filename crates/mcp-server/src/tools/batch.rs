@@ -66,6 +66,16 @@ pub(super) fn parse_tool_result_as_json(
     tool: BatchToolName,
 ) -> Result<serde_json::Value, String> {
     if result.is_error.unwrap_or(false) {
+        if let Some(value) = result.structured_content.clone() {
+            if let Some(message) = value
+                .get("error")
+                .and_then(|err| err.get("message"))
+                .and_then(|msg| msg.as_str())
+            {
+                return Err(message.to_string());
+            }
+            return Err(value.to_string());
+        }
         return Err(extract_tool_text(result).unwrap_or_else(|| "Tool returned error".to_string()));
     }
 
@@ -128,6 +138,7 @@ pub(super) fn push_item_or_truncate(output: &mut BatchResult, item: BatchItemRes
                 message: Some(format!("Failed to compute batch budget: {err:#}")),
                 data: serde_json::Value::Null,
             });
+            trim_output_to_budget(output);
             return false;
         }
     };
@@ -147,9 +158,16 @@ pub(super) fn push_item_or_truncate(output: &mut BatchResult, item: BatchItemRes
                 )),
                 data: serde_json::Value::Null,
             });
+            if let Ok(over) = compute_used_chars(output) {
+                if over > output.budget.max_chars {
+                    if let Some(last) = output.items.last_mut() {
+                        last.message = None;
+                    }
+                }
+            }
         }
 
-        output.budget.used_chars = compute_used_chars(output).unwrap_or(output.budget.max_chars);
+        trim_output_to_budget(output);
         return false;
     }
 
@@ -180,4 +198,32 @@ pub(super) fn compute_used_chars(output: &BatchResult) -> anyhow::Result<usize> 
     tmp.budget.used_chars = used;
     let raw = serde_json::to_string(&tmp)?;
     Ok(raw.chars().count())
+}
+
+pub(super) fn trim_output_to_budget(output: &mut BatchResult) {
+    loop {
+        let used = match compute_used_chars(output) {
+            Ok(used) => used,
+            Err(_) => {
+                output.budget.truncated = true;
+                output.budget.used_chars = output.budget.max_chars;
+                return;
+            }
+        };
+        if used <= output.budget.max_chars {
+            output.budget.used_chars = used;
+            return;
+        }
+        output.budget.truncated = true;
+        if output.meta.is_some() {
+            output.meta = None;
+            continue;
+        }
+        if !output.items.is_empty() {
+            output.items.pop();
+            continue;
+        }
+        output.budget.used_chars = used.min(output.budget.max_chars);
+        return;
+    }
 }

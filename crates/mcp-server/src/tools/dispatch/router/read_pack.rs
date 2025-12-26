@@ -9,6 +9,7 @@ use super::super::{
 use context_indexer::ToolMeta;
 use regex::RegexBuilder;
 use serde::Deserialize;
+use serde_json::json;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -30,8 +31,39 @@ struct CursorHeader {
     tool: String,
 }
 
-fn call_error(message: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(message.into())])
+fn call_error(code: &'static str, message: impl Into<String>) -> CallToolResult {
+    let payload = json!({
+        "error": {
+            "code": code,
+            "message": message.into(),
+        }
+    });
+    let mut result = CallToolResult::error(Vec::new());
+    result.structured_content = Some(payload);
+    result
+}
+
+fn extract_tool_error_message(result: &CallToolResult) -> String {
+    if let Some(value) = result.structured_content.as_ref() {
+        if let Some(message) = value
+            .get("error")
+            .and_then(|err| err.get("message"))
+            .and_then(|msg| msg.as_str())
+        {
+            return message.to_string();
+        }
+        return value.to_string();
+    }
+
+    let blocks: Vec<String> = result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect();
+    if blocks.is_empty() {
+        return "Tool returned error".to_string();
+    }
+    blocks.join("\n")
 }
 
 fn trimmed_non_empty_str(input: Option<&str>) -> Option<&str> {
@@ -78,15 +110,23 @@ fn resolve_intent(request: &ReadPackRequest) -> ToolResult<ReadPackIntent> {
     }
 
     if let Some(cursor) = trimmed_non_empty_str(request.cursor.as_deref()) {
-        let header: CursorHeader =
-            decode_cursor(cursor).map_err(|err| call_error(format!("Invalid cursor: {err}")))?;
+        let header: CursorHeader = decode_cursor(cursor)
+            .map_err(|err| call_error("invalid_cursor", format!("Invalid cursor: {err}")))?;
         if header.v != CURSOR_VERSION {
-            return Err(call_error("Invalid cursor: wrong version"));
+            return Err(call_error(
+                "invalid_cursor",
+                "Invalid cursor: wrong version",
+            ));
         }
         intent = match header.tool.as_str() {
             "file_slice" => ReadPackIntent::File,
             "grep_context" => ReadPackIntent::Grep,
-            _ => return Err(call_error("Invalid cursor: unsupported tool for read_pack")),
+            _ => {
+                return Err(call_error(
+                    "invalid_cursor",
+                    "Invalid cursor: unsupported tool for read_pack",
+                ))
+            }
         };
         return Ok(intent);
     }
@@ -115,7 +155,8 @@ fn intent_label(intent: ReadPackIntent) -> &'static str {
 }
 
 fn finalize_and_trim(mut result: ReadPackResult, max_chars: usize) -> ToolResult<ReadPackResult> {
-    finalize_read_pack_budget(&mut result).map_err(|err| call_error(format!("Error: {err:#}")))?;
+    finalize_read_pack_budget(&mut result)
+        .map_err(|err| call_error("internal", format!("Error: {err:#}")))?;
 
     while result.budget.used_chars > max_chars && result.next_actions.len() > 1 {
         result.next_actions.pop();
@@ -277,8 +318,8 @@ fn decode_file_slice_cursor(cursor: Option<&str>) -> ToolResult<Option<FileSlice
         return Ok(None);
     };
 
-    let decoded: FileSliceCursorV1 =
-        decode_cursor(cursor).map_err(|err| call_error(format!("Invalid cursor: {err}")))?;
+    let decoded: FileSliceCursorV1 = decode_cursor(cursor)
+        .map_err(|err| call_error("invalid_cursor", format!("Invalid cursor: {err}")))?;
     Ok(Some(decoded))
 }
 
@@ -292,30 +333,40 @@ fn handle_file_intent(
     if let Some(decoded) = cursor_payload.as_ref() {
         if decoded.v != CURSOR_VERSION || decoded.tool != "file_slice" {
             return Err(call_error(
+                "invalid_cursor",
                 "Invalid cursor: wrong tool (expected file_slice)",
             ));
         }
         if decoded.root != ctx.root_display {
-            return Err(call_error(format!(
-                "Invalid cursor: different root (cursor={}, expected={})",
-                decoded.root, ctx.root_display
-            )));
+            return Err(call_error(
+                "invalid_cursor",
+                format!(
+                    "Invalid cursor: different root (cursor={}, expected={})",
+                    decoded.root, ctx.root_display
+                ),
+            ));
         }
     }
 
     let requested_file = trimmed_non_empty_str(request.file.as_deref()).map(ToString::to_string);
     if let (Some(decoded), Some(requested)) = (cursor_payload.as_ref(), requested_file.as_ref()) {
         if requested != &decoded.file {
-            return Err(call_error(format!(
-                "Invalid cursor: different file (cursor={}, request={})",
-                decoded.file, requested
-            )));
+            return Err(call_error(
+                "invalid_cursor",
+                format!(
+                    "Invalid cursor: different file (cursor={}, request={})",
+                    decoded.file, requested
+                ),
+            ));
         }
     }
 
     let file = requested_file.or_else(|| cursor_payload.as_ref().map(|c| c.file.clone()));
     let Some(file) = file else {
-        return Err(call_error("Error: file is required for intent=file"));
+        return Err(call_error(
+            "missing_field",
+            "Error: file is required for intent=file",
+        ));
     };
 
     let max_lines = request
@@ -323,10 +374,13 @@ fn handle_file_intent(
         .or_else(|| cursor_payload.as_ref().map(|c| c.max_lines));
     if let (Some(decoded), Some(requested)) = (cursor_payload.as_ref(), request.max_lines) {
         if requested != decoded.max_lines {
-            return Err(call_error(format!(
-                "Invalid cursor: different max_lines (cursor={}, request={})",
-                decoded.max_lines, requested
-            )));
+            return Err(call_error(
+                "invalid_cursor",
+                format!(
+                    "Invalid cursor: different max_lines (cursor={}, request={})",
+                    decoded.max_lines, requested
+                ),
+            ));
         }
     }
 
@@ -334,11 +388,14 @@ fn handle_file_intent(
         if let Some(requested) = request.max_chars {
             if ctx.inner_max_chars != decoded.max_chars {
                 let suggested = suggest_outer_max_chars(decoded.max_chars);
-                return Err(call_error(format!(
-                    "Invalid cursor: different max_chars (cursor={}, request_max_chars={} -> inner={}). \
+                return Err(call_error(
+                    "invalid_cursor",
+                    format!(
+                        "Invalid cursor: different max_chars (cursor={}, request_max_chars={} -> inner={}). \
 For continuation, omit max_chars or set max_chars to {}.",
-                    decoded.max_chars, requested, ctx.inner_max_chars, suggested
-                )));
+                        decoded.max_chars, requested, ctx.inner_max_chars, suggested
+                    ),
+                ));
             }
             ctx.inner_max_chars
         } else {
@@ -359,7 +416,7 @@ For continuation, omit max_chars or set max_chars to {}.",
             cursor: request.cursor.clone(),
         },
     )
-    .map_err(call_error)?;
+    .map_err(|err| call_error("internal", err))?;
 
     if let Some(next_cursor) = slice.next_cursor.as_deref() {
         next_actions.push(ReadPackNextAction {
@@ -385,8 +442,8 @@ fn decode_grep_cursor(cursor: Option<&str>) -> ToolResult<Option<GrepContextCurs
         return Ok(None);
     };
 
-    let decoded: GrepContextCursorV1 =
-        decode_cursor(cursor).map_err(|err| call_error(format!("Invalid cursor: {err}")))?;
+    let decoded: GrepContextCursorV1 = decode_cursor(cursor)
+        .map_err(|err| call_error("invalid_cursor", format!("Invalid cursor: {err}")))?;
     Ok(Some(decoded))
 }
 
@@ -395,10 +452,13 @@ fn validate_grep_cursor_tool_root(
     root_display: &str,
 ) -> ToolResult<()> {
     if decoded.v != CURSOR_VERSION || decoded.tool != "grep_context" {
-        return Err(call_error("Invalid cursor: wrong tool"));
+        return Err(call_error("invalid_cursor", "Invalid cursor: wrong tool"));
     }
     if decoded.root != root_display {
-        return Err(call_error("Invalid cursor: different root"));
+        return Err(call_error(
+            "invalid_cursor",
+            "Invalid cursor: different root",
+        ));
     }
     Ok(())
 }
@@ -417,7 +477,10 @@ fn resolve_grep_pattern(
         return Ok(decoded.pattern.clone());
     }
 
-    Err(call_error("Error: pattern is required for intent=grep"))
+    Err(call_error(
+        "missing_field",
+        "Error: pattern is required for intent=grep",
+    ))
 }
 
 struct GrepResumeCheck<'a> {
@@ -440,19 +503,31 @@ fn resolve_grep_resume(
     validate_grep_cursor_tool_root(decoded, root_display)?;
 
     if decoded.pattern != check.pattern {
-        return Err(call_error("Invalid cursor: different pattern"));
+        return Err(call_error(
+            "invalid_cursor",
+            "Invalid cursor: different pattern",
+        ));
     }
     if decoded.file.as_ref() != check.file {
-        return Err(call_error("Invalid cursor: different file"));
+        return Err(call_error(
+            "invalid_cursor",
+            "Invalid cursor: different file",
+        ));
     }
     if decoded.file_pattern.as_ref() != check.file_pattern {
-        return Err(call_error("Invalid cursor: different file_pattern"));
+        return Err(call_error(
+            "invalid_cursor",
+            "Invalid cursor: different file_pattern",
+        ));
     }
     if decoded.case_sensitive != check.case_sensitive
         || decoded.before != check.before
         || decoded.after != check.after
     {
-        return Err(call_error("Invalid cursor: different search options"));
+        return Err(call_error(
+            "invalid_cursor",
+            "Invalid cursor: different search options",
+        ));
     }
 
     Ok((
@@ -481,7 +556,7 @@ async fn handle_grep_intent(
     let regex = RegexBuilder::new(&pattern)
         .case_insensitive(!case_sensitive)
         .build()
-        .map_err(|err| call_error(format!("Invalid regex: {err}")))?;
+        .map_err(|err| call_error("invalid_request", format!("Invalid regex: {err}")))?;
 
     let before = request
         .before
@@ -546,7 +621,7 @@ async fn handle_grep_intent(
         },
     )
     .await
-    .map_err(|err| call_error(format!("Error: {err:#}")))?;
+    .map_err(|err| call_error("internal", format!("Error: {err:#}")))?;
 
     if let Some(next_cursor) = result.next_cursor.as_deref() {
         let GrepContextRequest {
@@ -584,7 +659,10 @@ async fn handle_query_intent(
         .unwrap_or("")
         .to_string();
     if query.is_empty() {
-        return Err(call_error("Error: query is required for intent=query"));
+        return Err(call_error(
+            "missing_field",
+            "Error: query is required for intent=query",
+        ));
     }
 
     let tool_result = service
@@ -604,10 +682,14 @@ async fn handle_query_intent(
             trace: Some(false),
         }))
         .await
-        .map_err(|err| call_error(format!("Error: {err}")))?;
+        .map_err(|err| call_error("internal", format!("Error: {err}")))?;
 
     if tool_result.is_error == Some(true) {
-        return Err(tool_result);
+        let message = extract_tool_error_message(&tool_result);
+        return Err(call_error(
+            "internal",
+            format!("context_pack failed: {message}"),
+        ));
     }
 
     let text = tool_result
@@ -615,8 +697,12 @@ async fn handle_query_intent(
         .first()
         .and_then(|c| c.as_text())
         .map_or("", |t| t.text.as_str());
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|err| call_error(format!("Error: context_pack returned invalid JSON: {err}")))?;
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|err| {
+        call_error(
+            "internal",
+            format!("Error: context_pack returned invalid JSON: {err}"),
+        )
+    })?;
 
     sections.push(ReadPackSection::ContextPack { result: value });
     Ok(())
@@ -643,7 +729,7 @@ async fn handle_onboarding_intent(
     let pack =
         compute_repo_onboarding_pack_result(&ctx.root, &ctx.root_display, &onboarding_request)
             .await
-            .map_err(|err| call_error(format!("Error: {err:#}")))?;
+            .map_err(|err| call_error("internal", format!("Error: {err:#}")))?;
 
     sections.push(ReadPackSection::RepoOnboardingPack {
         result: Box::new(pack),
@@ -658,7 +744,7 @@ pub(in crate::tools::dispatch) async fn read_pack(
 ) -> Result<CallToolResult, McpError> {
     let (root, root_display) = match service.resolve_root(request.path.as_deref()).await {
         Ok(value) => value,
-        Err(message) => return Ok(call_error(message)),
+        Err(message) => return Ok(call_error("invalid_request", message)),
     };
     let ctx = match build_context(&request, root, root_display) {
         Ok(value) => value,

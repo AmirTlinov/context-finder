@@ -565,6 +565,51 @@ async fn read_pack_file_supports_cursor_only_continuation() -> Result<()> {
 }
 
 #[tokio::test]
+async fn read_pack_missing_file_returns_structured_error() -> Result<()> {
+    let (tmp, service) = start_service().await?;
+    let root = tmp.path();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        service.call_tool(CallToolRequestParam {
+            name: "read_pack".into(),
+            arguments: serde_json::json!({
+                "path": root.to_string_lossy(),
+                "intent": "file"
+            })
+            .as_object()
+            .cloned(),
+        }),
+    )
+    .await
+    .context("timeout calling read_pack")??;
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = result
+        .structured_content
+        .clone()
+        .context("read_pack error missing structured_content")?;
+    let error = structured
+        .get("error")
+        .context("read_pack error missing error object")?;
+    assert_eq!(
+        error.get("code").and_then(Value::as_str),
+        Some("missing_field")
+    );
+    assert!(
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .contains("file is required"),
+        "expected missing file message"
+    );
+
+    service.cancel().await.context("shutdown mcp service")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn read_pack_grep_supports_cursor_only_continuation() -> Result<()> {
     let (tmp, service) = start_service().await?;
     let root = tmp.path();

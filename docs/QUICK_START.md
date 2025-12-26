@@ -213,8 +213,10 @@ Repo onboarding pack tool (best default for agents; one call → `map` + key doc
 ```
 
 If no docs were included, `docs_reason` explains why (e.g. `docs_limit_zero`, `max_chars`).
+Under tight budgets, the map is trimmed before docs so at least one doc slice can still fit.
 
-One-call reading pack tool (`read_pack`; a single entry point for file/grep/query/onboarding, with cursor-only continuation):
+One-call reading pack tool (`read_pack`; a single entry point for file/grep/query/onboarding, with cursor-only continuation).
+Errors are returned as structured JSON under `structured_content.error`:
 
 ```jsonc
 // Read a file window (internally calls file_slice)
@@ -258,7 +260,8 @@ For semantic tools (`context_pack`, `context`, `impact`, `trace`, `explain`, `ov
 `auto_index` defaults to true; use `auto_index=false` or `auto_index_budget_ms` to control the
 reindex budget. The attempt is reported under `meta.index_state.reindex`.
 
-Batch tool (one MCP call → many tools, bounded output). In `version: 2`, item inputs can depend on earlier outputs via `$ref` (JSON Pointer):
+Batch tool (one MCP call → many tools, bounded output). Output is compact JSON and strictly capped by `max_chars`.
+In `version: 2`, item inputs can depend on earlier outputs via `$ref` (JSON Pointer):
 
 ```jsonc
 {

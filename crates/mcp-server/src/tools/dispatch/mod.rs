@@ -4,7 +4,7 @@
 
 use super::batch::{
     compute_used_chars, extract_path_from_input, parse_tool_result_as_json, prepare_item_input,
-    push_item_or_truncate, resolve_batch_refs,
+    push_item_or_truncate, resolve_batch_refs, trim_output_to_budget,
 };
 use super::catalog;
 use super::cursor::{decode_cursor, encode_cursor, CURSOR_VERSION};

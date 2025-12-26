@@ -1,10 +1,11 @@
 use super::super::{
     compute_used_chars, extract_path_from_input, parse_tool_result_as_json, prepare_item_input,
-    push_item_or_truncate, resolve_batch_refs, BatchBudget, BatchItemResult, BatchItemStatus,
-    BatchRequest, BatchResult, BatchToolName, CallToolResult, Content, ContextFinderService,
-    ContextPackRequest, ContextRequest, DoctorRequest, ExplainRequest, FileSliceRequest,
-    GrepContextRequest, ImpactRequest, IndexRequest, ListFilesRequest, MapRequest, McpError,
-    OverviewRequest, Parameters, SearchRequest, TextSearchRequest, TraceRequest,
+    push_item_or_truncate, resolve_batch_refs, trim_output_to_budget, BatchBudget, BatchItemResult,
+    BatchItemStatus, BatchRequest, BatchResult, BatchToolName, CallToolResult, Content,
+    ContextFinderService, ContextPackRequest, ContextRequest, DoctorRequest, ExplainRequest,
+    FileSliceRequest, GrepContextRequest, ImpactRequest, IndexRequest, ListFilesRequest,
+    MapRequest, McpError, OverviewRequest, Parameters, SearchRequest, TextSearchRequest,
+    TraceRequest,
 };
 use crate::tools::schemas::batch::BatchItem;
 use std::collections::HashSet;
@@ -252,7 +253,7 @@ impl<'a> BatchRunner<'a> {
 
     fn finish(self) -> CallToolResult {
         CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&self.output).unwrap_or_default(),
+            serde_json::to_string(&self.output).unwrap_or_default(),
         )])
     }
 
@@ -264,12 +265,7 @@ impl<'a> BatchRunner<'a> {
             return;
         };
         self.output.meta = Some(self.service.tool_meta(&root).await);
-        if let Ok(used_chars) = compute_used_chars(&self.output) {
-            self.output.budget.used_chars = used_chars;
-            if used_chars > self.output.budget.max_chars {
-                self.output.budget.truncated = true;
-            }
-        }
+        trim_output_to_budget(&mut self.output);
     }
 }
 
@@ -322,6 +318,24 @@ pub(in crate::tools::dispatch) async fn batch(
     let version = request.version.unwrap_or(DEFAULT_VERSION);
     if let Some(message) = validate_batch_version(version) {
         return Ok(call_error(message));
+    }
+
+    let min_payload = BatchResult {
+        version,
+        items: Vec::new(),
+        budget: BatchBudget {
+            max_chars,
+            used_chars: 0,
+            truncated: true,
+        },
+        meta: None,
+    };
+    if let Ok(min_chars) = compute_used_chars(&min_payload) {
+        if min_chars > max_chars {
+            return Ok(call_error(format!(
+                "max_chars too small for batch envelope (min_chars={min_chars})"
+            )));
+        }
     }
 
     let inferred_path = match service.resolve_root(request.path.as_deref()).await {

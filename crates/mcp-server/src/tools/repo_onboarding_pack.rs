@@ -152,10 +152,9 @@ fn add_docs_best_effort(
 
         finalize_repo_onboarding_budget(result)?;
         if result.budget.used_chars > result.budget.max_chars {
-            result.docs.pop();
             result.budget.truncated = true;
             result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
-            let _ = finalize_repo_onboarding_budget(result);
+            // Keep the current doc slice; map/next_actions can be trimmed to make room.
             break;
         }
     }
@@ -171,15 +170,15 @@ fn trim_to_budget(result: &mut RepoOnboardingPackResult) -> anyhow::Result<()> {
         result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
         let _ = finalize_repo_onboarding_budget(result);
     }
-    while result.budget.used_chars > result.budget.max_chars && !result.docs.is_empty() {
-        result.docs.pop();
+    while result.budget.used_chars > result.budget.max_chars && !result.map.directories.is_empty() {
+        result.map.directories.pop();
+        result.map.truncated = true;
         result.budget.truncated = true;
         result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
         let _ = finalize_repo_onboarding_budget(result);
     }
-    while result.budget.used_chars > result.budget.max_chars && !result.map.directories.is_empty() {
-        result.map.directories.pop();
-        result.map.truncated = true;
+    while result.budget.used_chars > result.budget.max_chars && !result.docs.is_empty() {
+        result.docs.pop();
         result.budget.truncated = true;
         result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
         let _ = finalize_repo_onboarding_budget(result);
