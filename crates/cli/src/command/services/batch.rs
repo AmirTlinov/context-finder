@@ -7,6 +7,7 @@ use crate::command::domain::{
 use crate::command::freshness;
 use anyhow::Result;
 use context_batch_ref::resolve_batch_refs;
+use context_protocol::{enforce_max_chars, finalize_used_chars, BudgetTruncation, ErrorEnvelope};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -33,8 +34,29 @@ pub async fn run(
             max_chars,
             used_chars: 0,
             truncated: false,
+            truncation: None,
         },
+        next_actions: Vec::new(),
     };
+    let min_chars = {
+        let mut min_output = BatchOutput {
+            version: BATCH_VERSION,
+            items: Vec::new(),
+            budget: BatchBudget {
+                max_chars,
+                used_chars: 0,
+                truncated: true,
+                truncation: Some(BudgetTruncation::MaxChars),
+            },
+            next_actions: Vec::new(),
+        };
+        finalize_batch_budget(&mut min_output)?
+    };
+    if min_chars > max_chars {
+        return Err(anyhow::anyhow!(
+            "max_chars too small for batch envelope (min_chars={min_chars})"
+        ));
+    }
 
     let mut inferred_project: Option<PathBuf> = payload.project;
     let mut gate: Option<freshness::FreshnessGate> = None;
@@ -195,8 +217,7 @@ pub async fn run(
                 Err(block) => {
                     let mut hints = block.hints;
                     hints.extend(project_ctx.hints);
-                    hints.extend(classify_error(&block.message));
-                    let rejected = error_item(
+                    let rejected = error_item_with_context(
                         id.clone(),
                         block.message,
                         hints,
@@ -208,6 +229,8 @@ pub async fn run(
                             index_updated: Some(false),
                             ..Default::default()
                         },
+                        Some(item.action),
+                        Some(&resolved_payload),
                     );
                     if !push_item_or_truncate(&mut output, rejected.clone())? {
                         break;
@@ -238,6 +261,7 @@ pub async fn run(
             remaining_chars,
         );
 
+        let item_payload_for_meta = item_payload.clone();
         let item_outcome = match services.route_item(item.action, item_payload, ctx).await {
             Ok(mut outcome) => {
                 if matches!(item.action, CommandAction::Index) {
@@ -265,6 +289,7 @@ pub async fn run(
                     id: id.clone(),
                     status: CommandStatus::Ok,
                     message: None,
+                    error: None,
                     hints: outcome.hints,
                     data: outcome.data,
                     meta: outcome.meta,
@@ -272,7 +297,9 @@ pub async fn run(
             }
             Err(err) => {
                 let message = format!("{err:#}");
-                let mut hints = classify_error(&message);
+                let classification =
+                    classify_error(&message, Some(item.action), Some(&item_payload_for_meta));
+                let mut hints = classification.hints;
                 let mut meta = ResponseMeta::default();
                 if requires_index {
                     if let Some(ref gate) = gate {
@@ -283,11 +310,22 @@ pub async fn run(
                         }
                     }
                 }
+                let hint = classification
+                    .hint
+                    .or_else(|| hints.first().map(|h| h.text.clone()));
+                let error = ErrorEnvelope {
+                    code: classification.code,
+                    message: message.clone(),
+                    details: None,
+                    hint,
+                    next_actions: classification.next_actions,
+                };
 
                 BatchItemResult {
                     id: id.clone(),
                     status: CommandStatus::Error,
                     message: Some(message),
+                    error: Some(error),
                     hints,
                     data: Value::Null,
                     meta,
@@ -319,9 +357,7 @@ pub async fn run(
         }
     }
 
-    if output.budget.truncated {
-        output.items.shrink_to_fit();
-    }
+    trim_batch_output(&mut output)?;
 
     let mut outcome = CommandOutcome::from_value(output.clone())?;
     if output.budget.truncated {
@@ -369,11 +405,12 @@ fn prepare_item_payload(
 
 fn push_item_or_truncate(output: &mut BatchOutput, item: BatchItemResult) -> Result<bool> {
     output.items.push(item);
-    let used = compute_used_chars(output)?;
+    let used = finalize_batch_budget(output)?;
 
     if used > output.budget.max_chars {
         let rejected = output.items.pop().expect("just pushed");
         output.budget.truncated = true;
+        output.budget.truncation = Some(BudgetTruncation::MaxChars);
 
         if output.items.is_empty() {
             output.items.push(error_item(
@@ -385,9 +422,10 @@ fn push_item_or_truncate(output: &mut BatchOutput, item: BatchItemResult) -> Res
                 Vec::new(),
                 ResponseMeta::default(),
             ));
+        } else {
+            output.items.shrink_to_fit();
         }
-
-        output.budget.used_chars = compute_used_chars(output)?;
+        trim_batch_output(output)?;
         return Ok(false);
     }
 
@@ -395,21 +433,8 @@ fn push_item_or_truncate(output: &mut BatchOutput, item: BatchItemResult) -> Res
     Ok(true)
 }
 
-fn compute_used_chars(output: &BatchOutput) -> Result<usize> {
-    let mut tmp = output.clone();
-    tmp.budget.used_chars = 0;
-    let raw = serde_json::to_string(&tmp)?;
-    let mut used = raw.chars().count();
-    tmp.budget.used_chars = used;
-    let raw = serde_json::to_string(&tmp)?;
-    let next = raw.chars().count();
-    if next == used {
-        return Ok(used);
-    }
-    used = next;
-    tmp.budget.used_chars = used;
-    let raw = serde_json::to_string(&tmp)?;
-    Ok(raw.chars().count())
+fn finalize_batch_budget(output: &mut BatchOutput) -> Result<usize> {
+    finalize_used_chars(output, |inner, used| inner.budget.used_chars = used)
 }
 
 fn error_item(
@@ -418,14 +443,59 @@ fn error_item(
     hints: Vec<Hint>,
     meta: ResponseMeta,
 ) -> BatchItemResult {
-    let mut out_hints = classify_error(&message);
+    error_item_with_context(id, message, hints, meta, None, None)
+}
+
+fn error_item_with_context(
+    id: String,
+    message: String,
+    hints: Vec<Hint>,
+    meta: ResponseMeta,
+    action: Option<CommandAction>,
+    payload: Option<&Value>,
+) -> BatchItemResult {
+    let classification = classify_error(&message, action, payload);
+    let mut out_hints = classification.hints;
     out_hints.extend(hints);
+    let hint = classification
+        .hint
+        .or_else(|| out_hints.first().map(|h| h.text.clone()));
+    let error = ErrorEnvelope {
+        code: classification.code,
+        message: message.clone(),
+        details: None,
+        hint,
+        next_actions: classification.next_actions,
+    };
     BatchItemResult {
         id,
         status: CommandStatus::Error,
         message: Some(message),
+        error: Some(error),
         hints: out_hints,
         data: Value::Null,
         meta,
     }
+}
+
+fn trim_batch_output(output: &mut BatchOutput) -> Result<()> {
+    let max_chars = output.budget.max_chars;
+    let used = enforce_max_chars(
+        output,
+        max_chars,
+        |inner, used| inner.budget.used_chars = used,
+        |inner| {
+            inner.budget.truncated = true;
+            inner.budget.truncation = Some(BudgetTruncation::MaxChars);
+        },
+        |inner| {
+            if !inner.items.is_empty() {
+                inner.items.pop();
+                return true;
+            }
+            false
+        },
+    )?;
+    output.budget.used_chars = used;
+    Ok(())
 }

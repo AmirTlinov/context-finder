@@ -53,8 +53,8 @@ pub struct ImpactResult {
     pub public_api: bool,
     /// Mermaid diagram
     pub mermaid: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolMeta>,
+    #[serde(default)]
+    pub meta: ToolMeta,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]

@@ -19,6 +19,7 @@ context-indexer = { path = "../indexer" }
 context-search = { path = "../search" }
 context-graph = { path = "../graph" }
 context-batch-ref = { path = "../batch-ref" }
+context-protocol = { path = "../protocol" }
 
 # CLI
 clap.workspace = true

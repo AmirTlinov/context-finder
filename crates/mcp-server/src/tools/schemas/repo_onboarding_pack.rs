@@ -1,4 +1,5 @@
 use context_indexer::ToolMeta;
+use context_protocol::{BudgetTruncation, ToolNextAction};
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
@@ -53,12 +54,7 @@ pub struct RepoOnboardingPackRequest {
     pub auto_index_budget_ms: Option<u64>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RepoOnboardingPackTruncation {
-    MaxChars,
-    DocsLimit,
-}
+pub type RepoOnboardingPackTruncation = BudgetTruncation;
 
 #[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -78,12 +74,7 @@ pub struct RepoOnboardingPackBudget {
     pub truncation: Option<RepoOnboardingPackTruncation>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct RepoOnboardingNextAction {
-    pub tool: String,
-    pub args: serde_json::Value,
-    pub reason: String,
-}
+pub type RepoOnboardingNextAction = ToolNextAction;
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct RepoOnboardingPackResult {
@@ -95,6 +86,6 @@ pub struct RepoOnboardingPackResult {
     pub docs_reason: Option<RepoOnboardingDocsReason>,
     pub next_actions: Vec<RepoOnboardingNextAction>,
     pub budget: RepoOnboardingPackBudget,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolMeta>,
+    #[serde(default)]
+    pub meta: ToolMeta,
 }

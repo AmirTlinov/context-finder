@@ -37,8 +37,8 @@ pub struct OverviewResult {
     pub key_types: Vec<KeyTypeInfo>,
     /// Graph statistics
     pub graph_stats: GraphStats,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolMeta>,
+    #[serde(default)]
+    pub meta: ToolMeta,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]

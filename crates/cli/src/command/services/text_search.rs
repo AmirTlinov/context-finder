@@ -6,7 +6,9 @@ use crate::command::domain::{
 use crate::command::warm;
 use anyhow::{anyhow, Result};
 use context_indexer::FileScanner;
+use context_protocol::ToolNextAction;
 use context_vector_store::{corpus_path_for_project_root, ChunkCorpus};
+use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -184,6 +186,29 @@ impl TextSearchService {
             outcome.hints.push(Hint {
                 kind: HintKind::Info,
                 text: format!("File pattern: {pat}"),
+            });
+        }
+        if truncated {
+            let next_max_results = max_results.saturating_mul(2).min(1000);
+            let mut args = Map::new();
+            args.insert(
+                "project".to_string(),
+                Value::String(project_ctx.root.display().to_string()),
+            );
+            args.insert("pattern".to_string(), Value::String(pattern.to_string()));
+            args.insert(
+                "max_results".to_string(),
+                Value::Number(serde_json::Number::from(next_max_results as u64)),
+            );
+            args.insert("case_sensitive".to_string(), Value::Bool(case_sensitive));
+            args.insert("whole_word".to_string(), Value::Bool(whole_word));
+            if let Some(pat) = file_pattern {
+                args.insert("file_pattern".to_string(), Value::String(pat.to_string()));
+            }
+            outcome.next_actions.push(ToolNextAction {
+                tool: "text_search".to_string(),
+                args: Value::Object(args),
+                reason: "Retry text_search with a higher max_results budget.".to_string(),
             });
         }
         Ok(outcome)

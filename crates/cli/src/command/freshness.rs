@@ -211,7 +211,7 @@ pub async fn enforce_stale_policy(
     Ok(Ok(gate))
 }
 
-async fn attempt_reindex(
+pub async fn attempt_reindex(
     project_root: &Path,
     profile: &SearchProfile,
     max_reindex_ms: u64,
@@ -258,7 +258,7 @@ async fn attempt_reindex(
     attempt
 }
 
-fn render_reindex_hint(attempt: &ReindexAttempt) -> Hint {
+pub fn render_reindex_hint(attempt: &ReindexAttempt) -> Hint {
     let budget = attempt
         .budget_ms
         .map(|v| format!("{v}ms"))

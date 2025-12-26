@@ -2,9 +2,11 @@ use super::super::{
     current_model_id, index_path_for_model, CallToolResult, Content, ContextFinderService,
     IndexRequest, IndexResult, McpError, QueryKind,
 };
+use context_protocol::{DefaultBudgets, ToolNextAction};
+use serde_json::json;
 use std::collections::HashSet;
 
-use super::error::{internal_error, invalid_request};
+use super::error::{internal_error_with_meta, invalid_request_with_meta, meta_for_request};
 /// Index a project
 pub(in crate::tools::dispatch) async fn index(
     service: &ContextFinderService,
@@ -15,12 +17,14 @@ pub(in crate::tools::dispatch) async fn index(
     let experts = request.experts.unwrap_or(false);
     let extra_models = request.models.unwrap_or_default();
 
-    let canonical = match service.resolve_root(request.path.as_deref()).await {
-        Ok((root, _)) => root,
+    let (canonical, root_display) = match service.resolve_root(request.path.as_deref()).await {
+        Ok(value) => value,
         Err(message) => {
-            return Ok(invalid_request(message));
+            let meta = meta_for_request(service, request.path.as_deref()).await;
+            return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
         }
     };
+    let meta = service.tool_meta(&canonical).await;
 
     let start = std::time::Instant::now();
 
@@ -56,14 +60,20 @@ pub(in crate::tools::dispatch) async fn index(
     let registry = match context_vector_store::ModelRegistry::from_env() {
         Ok(r) => r,
         Err(e) => {
-            return Ok(internal_error(format!("Model registry error: {e}")));
+            return Ok(internal_error_with_meta(
+                format!("Model registry error: {e}"),
+                meta.clone(),
+            ));
         }
     };
     for model_id in &models {
         if let Err(e) = registry.dimension(model_id) {
-            return Ok(invalid_request(format!(
-                "Unknown or unsupported model_id '{model_id}': {e}"
-            )));
+            return Ok(invalid_request_with_meta(
+                format!("Unknown or unsupported model_id '{model_id}': {e}"),
+                meta.clone(),
+                None,
+                Vec::new(),
+            ));
         }
     }
 
@@ -75,14 +85,20 @@ pub(in crate::tools::dispatch) async fn index(
     let indexer = match context_indexer::MultiModelProjectIndexer::new(&canonical).await {
         Ok(i) => i,
         Err(e) => {
-            return Ok(internal_error(format!("Indexer init error: {e}")));
+            return Ok(internal_error_with_meta(
+                format!("Indexer init error: {e}"),
+                meta.clone(),
+            ));
         }
     };
 
     let stats = match indexer.index_models(&specs, full).await {
         Ok(s) => s,
         Err(e) => {
-            return Ok(internal_error(format!("Indexing error: {e}")));
+            return Ok(internal_error_with_meta(
+                format!("Indexing error: {e}"),
+                meta.clone(),
+            ));
         }
     };
 
@@ -94,11 +110,29 @@ pub(in crate::tools::dispatch) async fn index(
         chunks: stats.chunks,
         time_ms,
         index_path: index_path.to_string_lossy().to_string(),
-        meta: None,
+        next_actions: Vec::new(),
+        meta: service.tool_meta(&canonical).await,
     };
-    result.meta = Some(service.tool_meta(&canonical).await);
+    let budgets = DefaultBudgets::default();
+    result.next_actions.push(ToolNextAction {
+        tool: "repo_onboarding_pack".to_string(),
+        args: json!({
+            "path": root_display.clone(),
+            "max_chars": budgets.repo_onboarding_pack_max_chars
+        }),
+        reason: "Start with a compact repo map + key docs after indexing.".to_string(),
+    });
+    result.next_actions.push(ToolNextAction {
+        tool: "context_pack".to_string(),
+        args: json!({
+            "path": root_display.clone(),
+            "query": "project overview",
+            "max_chars": budgets.context_pack_max_chars
+        }),
+        reason: "Build a bounded semantic overview after indexing.".to_string(),
+    });
 
     Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&result).unwrap_or_default(),
+        context_protocol::serialize_json(&result).unwrap_or_default(),
     )]))
 }

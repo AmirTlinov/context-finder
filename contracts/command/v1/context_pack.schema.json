@@ -53,8 +53,15 @@
         "max_chars": { "type": "integer", "minimum": 0 },
         "used_chars": { "type": "integer", "minimum": 0 },
         "truncated": { "type": "boolean" },
-        "dropped_items": { "type": "integer", "minimum": 0 }
+        "dropped_items": { "type": "integer", "minimum": 0 },
+        "truncation": { "$ref": "./budget_truncation.schema.json" }
       }
+    },
+    "next_actions": {
+      "type": "array",
+      "description": "Optional next-step tool/actions for agents.",
+      "items": { "$ref": "./next_action.schema.json" },
+      "default": []
     },
     "meta": {
       "type": "object",
@@ -62,7 +69,7 @@
       "description": "Optional diagnostic metadata for agent tooling.",
       "properties": {
         "index_state": {
-          "$ref": "./index_state.schema.json",
+          "anyOf": [{ "type": "null" }, { "$ref": "./index_state.schema.json" }],
           "description": "Best-effort snapshot of the semantic index and freshness."
         }
       }

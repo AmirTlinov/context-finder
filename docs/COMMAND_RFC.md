@@ -50,8 +50,8 @@ Notes:
 | `eval`               | `EvalPayload`                 | `EvalOutput`               |
 | `eval_compare`       | `EvalComparePayload`          | `EvalCompareOutput`        |
 
-`ContextPackOutput` optionally carries `meta.index_state` with a best-effort index freshness
-snapshot (schema: [contracts/command/v1/index_state.schema.json](../contracts/command/v1/index_state.schema.json)).
+All responses (including errors) include `meta.index_state` when the project root is resolvable,
+providing a best-effort freshness snapshot (schema: [contracts/command/v1/index_state.schema.json](../contracts/command/v1/index_state.schema.json)).
 
 ### `batch` (one request → many actions)
 
@@ -110,7 +110,7 @@ Notes:
 - `$ref` is recognized only when the object contains exactly `$ref` (+ optional `$default`).
 - `$ref` pointers are resolved against an evaluation context keyed by item `id` (so `#/items/<id>/...`, not `#/items/<index>/...`).
 - `$ref` to a failed item’s `data` is rejected (use `$default` when you want a fallback).
-- The MCP server `batch` tool uses the same `$ref` wrapper resolver in **batch v2** (canonical fields `tool/input`; `action/payload` are accepted as aliases to mirror Command API).
+- The MCP server `batch` tool uses the same `$ref` wrapper resolver in **batch v2** (canonical fields `tool/input`; `action/payload` are accepted as aliases to mirror Command API). The response layout is also aligned on `items[].id` so the same `#/items/<id>/...` pointers work across surfaces.
 
 ### Request options (cross-cutting)
 
@@ -134,17 +134,33 @@ High-signal knobs:
 {
   "status": "ok" | "error",
   "message": "optional human text",
+  "error": {
+    "code": "machine_readable_code",
+    "message": "human message",
+    "details": { ... } | null,
+    "hint": "optional hint",
+    "next_actions": [{ "tool": "...", "args": { ... }, "reason": "..." }]
+  },
   "hints": [
     { "type": "info" | "cache" | "action" | "warn" | "deprecation", "text": "..." }
   ],
+  "next_actions": [
+    { "tool": "...", "args": { ... }, "reason": "..." }
+  ],
   "data": { ... },  // action-specific result
-  "meta": { ... }   // optional diagnostics (see contract)
+  "meta": { "index_state": { ... } | null, ... }   // diagnostics (see contract)
 }
 ```
 
 Canonical response contract:
 
 - [contracts/command/v1/command_response.schema.json](../contracts/command/v1/command_response.schema.json)
+- [contracts/command/v1/error.schema.json](../contracts/command/v1/error.schema.json)
+- [contracts/command/v1/next_action.schema.json](../contracts/command/v1/next_action.schema.json)
+
+Error interpretation:
+
+- `error.next_actions` is always present (may be empty). When recovery is obvious (missing index, budget too small), it includes a ready-to-run retry action with tuned arguments.
 
 Interpretation highlights:
 
@@ -153,6 +169,11 @@ Interpretation highlights:
 - `index_mtime_ms`: last index timestamp (unix-ms). Useful to detect stale results.
 - `health_*`: watcher/index health signals and recent failures.
 - `compare_*`: aggregated A/B metrics emitted by `compare_search`.
+
+### Capabilities handshake
+
+- `action: "capabilities"` returns server versions, default budgets, and a recommended starting tool call.
+- Data schema: [contracts/command/v1/capabilities.schema.json](../contracts/command/v1/capabilities.schema.json)
 
 ## 4. CLI behavior
 

@@ -1,4 +1,6 @@
 use anyhow::Result;
+use context_indexer::ToolMeta;
+use context_protocol::{enforce_max_chars, finalize_used_chars};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -38,20 +40,7 @@ const DEFAULT_DOC_CANDIDATES: &[&str] = &[
 pub(super) fn finalize_repo_onboarding_budget(
     result: &mut RepoOnboardingPackResult,
 ) -> anyhow::Result<()> {
-    let mut used = 0usize;
-    for _ in 0..8 {
-        result.budget.used_chars = used;
-        let raw = serde_json::to_string(result)?;
-        let next = raw.chars().count();
-        if next == used {
-            result.budget.used_chars = next;
-            return Ok(());
-        }
-        used = next;
-    }
-
-    result.budget.used_chars = used;
-    Ok(())
+    finalize_used_chars(result, |inner, used| inner.budget.used_chars = used).map(|_| ())
 }
 
 fn build_next_actions(root_display: &str, has_corpus: bool) -> Vec<RepoOnboardingNextAction> {
@@ -163,31 +152,49 @@ fn add_docs_best_effort(
 }
 
 fn trim_to_budget(result: &mut RepoOnboardingPackResult) -> anyhow::Result<()> {
-    finalize_repo_onboarding_budget(result)?;
-    while result.budget.used_chars > result.budget.max_chars && result.next_actions.len() > 1 {
-        result.next_actions.pop();
-        result.budget.truncated = true;
-        result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
-        let _ = finalize_repo_onboarding_budget(result);
-    }
-    while result.budget.used_chars > result.budget.max_chars && !result.map.directories.is_empty() {
-        result.map.directories.pop();
-        result.map.truncated = true;
-        result.budget.truncated = true;
-        result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
-        let _ = finalize_repo_onboarding_budget(result);
-    }
-    while result.budget.used_chars > result.budget.max_chars && !result.docs.is_empty() {
-        result.docs.pop();
-        result.budget.truncated = true;
-        result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
-        let _ = finalize_repo_onboarding_budget(result);
-    }
-    if result.budget.used_chars > result.budget.max_chars {
-        result.budget.truncated = true;
-        result.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
-        let _ = finalize_repo_onboarding_budget(result);
-    }
+    let max_chars = result.budget.max_chars;
+    let reserved_docs = if result.docs.is_empty() { 0 } else { 1 };
+    let enforce = |target: &mut RepoOnboardingPackResult, min_docs: usize| {
+        enforce_max_chars(
+            target,
+            max_chars,
+            |inner, used| inner.budget.used_chars = used,
+            |inner| {
+                inner.budget.truncated = true;
+                inner.budget.truncation = Some(RepoOnboardingPackTruncation::MaxChars);
+            },
+            |inner| {
+                if !inner.map.directories.is_empty() {
+                    inner.map.directories.pop();
+                    inner.map.truncated = true;
+                    return true;
+                }
+                if inner.next_actions.len() > 1 {
+                    inner.next_actions.pop();
+                    return true;
+                }
+                if inner.docs.len() > min_docs {
+                    inner.docs.pop();
+                    return true;
+                }
+                false
+            },
+        )
+    };
+
+    let used = match enforce(result, reserved_docs) {
+        Ok(used) => used,
+        Err(err) => {
+            if !result.docs.is_empty() {
+                result.docs.clear();
+                result.docs_reason = Some(RepoOnboardingDocsReason::MaxChars);
+                enforce(result, 0)?
+            } else {
+                return Err(err);
+            }
+        }
+    };
+    result.budget.used_chars = used;
     Ok(())
 }
 
@@ -237,7 +244,7 @@ pub(super) async fn compute_repo_onboarding_pack_result(
             truncated: false,
             truncation: None,
         },
-        meta: None,
+        meta: ToolMeta { index_state: None },
     };
 
     add_docs_best_effort(

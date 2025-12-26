@@ -4,11 +4,15 @@ use super::super::{
 };
 use crate::tools::util::path_has_extension_ignore_ascii_case;
 use context_graph::{CodeGraph, RelationshipType};
+use context_protocol::ErrorEnvelope;
 use petgraph::graph::NodeIndex;
 
 type ToolResult<T> = std::result::Result<T, CallToolResult>;
 
-use super::error::{internal_error, invalid_request};
+use super::error::{
+    attach_meta, index_recovery_actions, internal_error, internal_error_with_meta, invalid_request,
+    invalid_request_with_meta, meta_for_request, tool_error_envelope_with_meta,
+};
 
 fn format_symbol_relations(
     graph: &CodeGraph,
@@ -129,19 +133,40 @@ pub(in crate::tools::dispatch) async fn explain(
     let path = request.path;
     let symbol = request.symbol;
     let language = request.language;
-    let root = match service.resolve_root(path.as_deref()).await {
-        Ok((root, _)) => root,
-        Err(message) => return Ok(invalid_request(message)),
+    let (root, root_display) = match service.resolve_root(path.as_deref()).await {
+        Ok(value) => value,
+        Err(message) => {
+            let meta = meta_for_request(service, path.as_deref()).await;
+            return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
+        }
     };
     let policy = AutoIndexPolicy::from_request(request.auto_index, request.auto_index_budget_ms);
     let (mut engine, meta) = match service.prepare_semantic_engine(&root, policy).await {
         Ok(engine) => engine,
-        Err(err) => return Ok(internal_error(format!("Error: {err}"))),
+        Err(err) => {
+            let message = format!("Error: {err}");
+            let meta = service.tool_meta(&root).await;
+            if message.contains("Index not found")
+                || message.contains("No semantic indices available")
+            {
+                return Ok(tool_error_envelope_with_meta(
+                    ErrorEnvelope {
+                        code: "index_missing".to_string(),
+                        message,
+                        details: None,
+                        hint: Some("Index missing — run index (see next_actions).".to_string()),
+                        next_actions: index_recovery_actions(&root_display),
+                    },
+                    meta,
+                ));
+            }
+            return Ok(internal_error_with_meta(message, meta));
+        }
     };
 
     let data = match compute_explain_data(&mut engine, language.as_deref(), &symbol).await {
         Ok(data) => data,
-        Err(err) => return Ok(err),
+        Err(err) => return Ok(attach_meta(err, meta.clone())),
     };
     drop(engine);
 
@@ -155,10 +180,10 @@ pub(in crate::tools::dispatch) async fn explain(
         dependents: data.dependents,
         tests: data.tests,
         content: data.content,
-        meta: Some(meta),
+        meta,
     };
 
     Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&result).unwrap_or_default(),
+        context_protocol::serialize_json(&result).unwrap_or_default(),
     )]))
 }

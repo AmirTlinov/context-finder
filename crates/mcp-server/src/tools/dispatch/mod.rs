@@ -9,7 +9,9 @@ use super::batch::{
 use super::catalog;
 use super::cursor::{decode_cursor, encode_cursor, CURSOR_VERSION};
 use super::file_slice::compute_file_slice_result;
+pub(super) use super::grep_context::finalize_grep_context_budget;
 use super::grep_context::{compute_grep_context_result, GrepContextComputeOptions};
+pub(super) use super::list_files::finalize_list_files_budget;
 use super::list_files::{compute_list_files_result, decode_list_files_cursor};
 use super::map::{compute_map_result, decode_map_cursor};
 use super::paths::normalize_relative_path;
@@ -17,6 +19,7 @@ use super::repo_onboarding_pack::compute_repo_onboarding_pack_result;
 use super::schemas::batch::{
     BatchBudget, BatchItemResult, BatchItemStatus, BatchRequest, BatchResult, BatchToolName,
 };
+use super::schemas::capabilities::CapabilitiesRequest;
 use super::schemas::context::{ContextHit, ContextRequest, ContextResult, RelatedCode};
 use super::schemas::context_pack::ContextPackRequest;
 use super::schemas::doctor::{
@@ -40,7 +43,7 @@ use super::schemas::read_pack::{
     ReadPackSection, ReadPackTruncation,
 };
 use super::schemas::repo_onboarding_pack::RepoOnboardingPackRequest;
-use super::schemas::search::{SearchRequest, SearchResult};
+pub(super) use super::schemas::search::{SearchRequest, SearchResponse, SearchResult};
 use super::schemas::text_search::{
     TextSearchCursorModeV1, TextSearchCursorV1, TextSearchMatch, TextSearchRequest,
     TextSearchResult,
@@ -58,6 +61,7 @@ use context_indexer::{
     IndexState, IndexerError, PersistedIndexWatermark, ReindexAttempt, ReindexResult, ToolMeta,
     INDEX_STATE_SCHEMA_VERSION,
 };
+use context_protocol::{finalize_used_chars, BudgetTruncation};
 use context_search::{
     ContextPackBudget, ContextPackItem, ContextPackOutput, MultiModelContextSearch,
     MultiModelHybridSearch, QueryClassifier, QueryType, SearchProfile, CONTEXT_PACK_VERSION,
@@ -1185,6 +1189,17 @@ mod router;
 
 #[tool_router]
 impl ContextFinderService {
+    /// Tool capabilities handshake (versions, budgets, start route).
+    #[tool(
+        description = "Return tool capabilities: versions, default budgets, and the recommended start route for zero-guesswork onboarding."
+    )]
+    pub async fn capabilities(
+        &self,
+        Parameters(request): Parameters<CapabilitiesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        router::capabilities::capabilities(self, request).await
+    }
+
     /// Get project structure overview
     #[tool(
         description = "Get project structure overview with directories, files, and top symbols. Use this first to understand a new codebase."
@@ -1374,20 +1389,7 @@ impl ContextFinderService {
 }
 
 fn finalize_read_pack_budget(result: &mut ReadPackResult) -> anyhow::Result<()> {
-    let mut used = 0usize;
-    for _ in 0..8 {
-        result.budget.used_chars = used;
-        let raw = serde_json::to_string(result)?;
-        let next = raw.chars().count();
-        if next == used {
-            result.budget.used_chars = next;
-            return Ok(());
-        }
-        used = next;
-    }
-
-    result.budget.used_chars = used;
-    Ok(())
+    finalize_used_chars(result, |inner, used| inner.budget.used_chars = used).map(|_| ())
 }
 // ============================================================================
 // Helper functions
@@ -2007,6 +2009,7 @@ fn pack_enriched_results(
             used_chars,
             truncated,
             dropped_items,
+            truncation: truncated.then_some(BudgetTruncation::MaxChars),
         },
     )
 }
@@ -2199,7 +2202,7 @@ mod tests {
             .await
             .unwrap();
         assert!(limited.truncated);
-        assert_eq!(limited.truncation, Some(ListFilesTruncation::Limit));
+        assert_eq!(limited.truncation, Some(ListFilesTruncation::MaxItems));
         assert_eq!(limited.files.len(), 1);
         assert!(limited.next_cursor.is_some());
 

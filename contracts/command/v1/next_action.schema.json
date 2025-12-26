@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/command/v1/next_action.schema.json",
+  "title": "Context Finder ToolNextAction (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tool", "args", "reason"],
+  "properties": {
+    "tool": { "type": "string" },
+    "args": {
+      "type": "object",
+      "description": "Arguments to call the tool/action with.",
+      "default": {},
+      "additionalProperties": true
+    },
+    "reason": { "type": "string" }
+  }
+}

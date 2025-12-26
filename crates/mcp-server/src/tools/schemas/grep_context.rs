@@ -1,4 +1,5 @@
 use context_indexer::ToolMeta;
+use context_protocol::BudgetTruncation;
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
@@ -74,16 +75,7 @@ pub(in crate::tools) struct GrepContextCursorV1 {
     pub(in crate::tools) resume_line: usize,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum GrepContextTruncation {
-    #[serde(rename = "max_chars")]
-    Chars,
-    #[serde(rename = "max_matches")]
-    Matches,
-    #[serde(rename = "max_hunks")]
-    Hunks,
-}
+pub type GrepContextTruncation = BudgetTruncation;
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct GrepContextHunk {
@@ -118,7 +110,7 @@ pub struct GrepContextResult {
     pub next_cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_actions: Option<Vec<ToolNextAction>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolMeta>,
+    #[serde(default)]
+    pub meta: ToolMeta,
     pub hunks: Vec<GrepContextHunk>,
 }

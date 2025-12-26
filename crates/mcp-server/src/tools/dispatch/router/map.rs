@@ -5,7 +5,9 @@ use super::super::{
 use crate::tools::schemas::ToolNextAction;
 use serde_json::json;
 
-use super::error::{internal_error, invalid_cursor, invalid_request};
+use super::error::{
+    internal_error_with_meta, invalid_cursor_with_meta, invalid_request_with_meta, meta_for_request,
+};
 
 /// Get project structure overview
 pub(in crate::tools::dispatch) async fn map(
@@ -17,8 +19,12 @@ pub(in crate::tools::dispatch) async fn map(
 
     let (root, root_display) = match service.resolve_root(request.path.as_deref()).await {
         Ok(value) => value,
-        Err(message) => return Ok(invalid_request(message)),
+        Err(message) => {
+            let meta = meta_for_request(service, request.path.as_deref()).await;
+            return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
+        }
     };
+    let meta = service.tool_meta(&root).await;
 
     let offset = if let Some(cursor) = request
         .cursor
@@ -29,17 +35,29 @@ pub(in crate::tools::dispatch) async fn map(
         let decoded = match decode_map_cursor(cursor) {
             Ok(v) => v,
             Err(err) => {
-                return Ok(invalid_cursor(format!("Invalid cursor: {err}")));
+                return Ok(invalid_cursor_with_meta(
+                    format!("Invalid cursor: {err}"),
+                    meta.clone(),
+                ));
             }
         };
         if decoded.v != CURSOR_VERSION || decoded.tool != "map" {
-            return Ok(invalid_cursor("Invalid cursor: wrong tool"));
+            return Ok(invalid_cursor_with_meta(
+                "Invalid cursor: wrong tool",
+                meta.clone(),
+            ));
         }
         if decoded.root != root_display {
-            return Ok(invalid_cursor("Invalid cursor: different root"));
+            return Ok(invalid_cursor_with_meta(
+                "Invalid cursor: different root",
+                meta.clone(),
+            ));
         }
         if decoded.depth != depth {
-            return Ok(invalid_cursor("Invalid cursor: different depth"));
+            return Ok(invalid_cursor_with_meta(
+                "Invalid cursor: different depth",
+                meta.clone(),
+            ));
         }
         decoded.offset
     } else {
@@ -49,10 +67,13 @@ pub(in crate::tools::dispatch) async fn map(
     let mut result = match compute_map_result(&root, &root_display, depth, limit, offset).await {
         Ok(result) => result,
         Err(err) => {
-            return Ok(internal_error(format!("Error: {err:#}")));
+            return Ok(internal_error_with_meta(
+                format!("Error: {err:#}"),
+                meta.clone(),
+            ))
         }
     };
-    result.meta = Some(service.tool_meta(&root).await);
+    result.meta = meta;
     if let Some(cursor) = result.next_cursor.clone() {
         result.next_actions = Some(vec![ToolNextAction {
             tool: "map".to_string(),
@@ -67,6 +88,6 @@ pub(in crate::tools::dispatch) async fn map(
     }
 
     Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&result).unwrap_or_default(),
+        context_protocol::serialize_json(&result).unwrap_or_default(),
     )]))
 }

@@ -49,6 +49,6 @@ pub struct ExplainResult {
     pub tests: Vec<String>,
     /// Code content
     pub content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolMeta>,
+    #[serde(default)]
+    pub meta: ToolMeta,
 }

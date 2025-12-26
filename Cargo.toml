@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/batch-ref",
     "crates/code-chunker",
+    "crates/protocol",
     "crates/vector-store",
     "crates/indexer",
     "crates/search",

@@ -36,7 +36,7 @@
     "result": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "items", "budget"],
+      "required": ["version", "items", "budget", "next_actions"],
       "properties": {
         "version": { "type": "integer", "const": 1 },
         "items": {
@@ -50,8 +50,15 @@
           "properties": {
             "max_chars": { "type": "integer", "minimum": 0 },
             "used_chars": { "type": "integer", "minimum": 0 },
-            "truncated": { "type": "boolean" }
+            "truncated": { "type": "boolean" },
+            "truncation": { "$ref": "./budget_truncation.schema.json" }
           }
+        },
+        "next_actions": {
+          "type": "array",
+          "description": "Next-step tool/actions for agents (may be empty).",
+          "items": { "$ref": "./next_action.schema.json" },
+          "default": []
         }
       }
     }
@@ -75,12 +82,14 @@
             "context_pack",
             "task_pack",
             "text_search",
+            "capabilities",
             "index",
             "get_context",
             "list_symbols",
             "config_read",
             "compare_search",
             "map",
+            "repo_onboarding_pack",
             "eval",
             "eval_compare"
           ]
@@ -101,6 +110,7 @@
         "id": { "type": "string" },
         "status": { "type": "string", "enum": ["ok", "error"] },
         "message": { "type": "string" },
+        "error": { "$ref": "./error.schema.json" },
         "hints": { "$ref": "./command_response.schema.json#/properties/hints" },
         "data": {
           "description": "Action-specific output for this item. For item errors: usually null.",

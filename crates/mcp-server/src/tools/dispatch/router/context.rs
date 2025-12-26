@@ -3,7 +3,11 @@ use super::super::{
     ContextResult, McpError, RelatedCode,
 };
 
-use super::error::{internal_error, invalid_request};
+use super::error::{
+    index_recovery_actions, internal_error_with_meta, invalid_request_with_meta, meta_for_request,
+    tool_error_envelope_with_meta,
+};
+use context_protocol::ErrorEnvelope;
 /// Search with graph context
 pub(in crate::tools::dispatch) async fn context(
     service: &ContextFinderService,
@@ -17,13 +21,20 @@ pub(in crate::tools::dispatch) async fn context(
     };
 
     if request.query.trim().is_empty() {
-        return Ok(invalid_request("Error: Query cannot be empty"));
+        let meta = meta_for_request(service, request.path.as_deref()).await;
+        return Ok(invalid_request_with_meta(
+            "Error: Query cannot be empty",
+            meta,
+            None,
+            Vec::new(),
+        ));
     }
 
-    let root = match service.resolve_root(request.path.as_deref()).await {
-        Ok((root, _)) => root,
+    let (root, root_display) = match service.resolve_root(request.path.as_deref()).await {
+        Ok(value) => value,
         Err(message) => {
-            return Ok(invalid_request(message));
+            let meta = meta_for_request(service, request.path.as_deref()).await;
+            return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
         }
     };
 
@@ -31,7 +42,23 @@ pub(in crate::tools::dispatch) async fn context(
     let (mut engine, meta) = match service.prepare_semantic_engine(&root, policy).await {
         Ok(engine) => engine,
         Err(e) => {
-            return Ok(internal_error(format!("Error: {e}")));
+            let message = format!("Error: {e}");
+            let meta = service.tool_meta(&root).await;
+            if message.contains("Index not found")
+                || message.contains("No semantic indices available")
+            {
+                return Ok(tool_error_envelope_with_meta(
+                    ErrorEnvelope {
+                        code: "index_missing".to_string(),
+                        message,
+                        details: None,
+                        hint: Some("Index missing — run index (see next_actions).".to_string()),
+                        next_actions: index_recovery_actions(&root_display),
+                    },
+                    meta,
+                ));
+            }
+            return Ok(internal_error_with_meta(message, meta));
         }
     };
 
@@ -46,7 +73,10 @@ pub(in crate::tools::dispatch) async fn context(
         );
 
         if let Err(e) = engine.engine_mut().ensure_graph(language).await {
-            return Ok(internal_error(format!("Graph build error: {e}")));
+            return Ok(internal_error_with_meta(
+                format!("Graph build error: {e}"),
+                meta.clone(),
+            ));
         }
 
         match engine
@@ -57,7 +87,10 @@ pub(in crate::tools::dispatch) async fn context(
         {
             Ok(r) => r,
             Err(e) => {
-                return Ok(internal_error(format!("Search error: {e}")));
+                return Ok(internal_error_with_meta(
+                    format!("Search error: {e}"),
+                    meta.clone(),
+                ));
             }
         }
     };
@@ -99,10 +132,10 @@ pub(in crate::tools::dispatch) async fn context(
     let result = ContextResult {
         results,
         related_count,
-        meta: Some(meta),
+        meta,
     };
 
     Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&result).unwrap_or_default(),
+        context_protocol::serialize_json(&result).unwrap_or_default(),
     )]))
 }

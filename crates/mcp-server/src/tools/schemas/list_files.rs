@@ -1,4 +1,5 @@
 use context_indexer::ToolMeta;
+use context_protocol::BudgetTruncation;
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
@@ -39,12 +40,7 @@ pub(in crate::tools) struct ListFilesCursorV1 {
     pub(in crate::tools) last_file: String,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ListFilesTruncation {
-    Limit,
-    MaxChars,
-}
+pub type ListFilesTruncation = BudgetTruncation;
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ListFilesResult {
@@ -63,7 +59,7 @@ pub struct ListFilesResult {
     pub next_cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_actions: Option<Vec<ToolNextAction>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolMeta>,
+    #[serde(default)]
+    pub meta: ToolMeta,
     pub files: Vec<String>,
 }

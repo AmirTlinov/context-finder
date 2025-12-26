@@ -9,11 +9,13 @@ use axum::{
 use cache::{CacheBackend, CacheConfig};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use command::{
-    CommandAction, CommandRequest, ContextPackOutput, ContextPackPayload, EvalCacheMode,
-    EvalCompareOutput, EvalComparePayload, EvalOutput, EvalPayload, IndexPayload, IndexResponse,
-    ListSymbolsPayload, MapOutput, MapPayload, SearchOutput, SearchPayload, SearchStrategy,
-    SearchWithContextPayload, SymbolsOutput,
+    CommandAction, CommandRequest, CommandResponse, CommandStatus, ContextPackOutput,
+    ContextPackPayload, EvalCacheMode, EvalCompareOutput, EvalComparePayload, EvalOutput,
+    EvalPayload, IndexPayload, IndexResponse, ListSymbolsPayload, MapOutput, MapPayload,
+    ResponseMeta, SearchOutput, SearchPayload, SearchStrategy, SearchWithContextPayload,
+    SymbolsOutput,
 };
+use context_protocol::{serialize_json, ErrorEnvelope};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -847,7 +849,7 @@ async fn run_command(args: CommandArgs, cache_cfg: CacheConfig) -> Result<()> {
     let output = if args.pretty {
         serde_json::to_string_pretty(&response)?
     } else {
-        serde_json::to_string(&response)?
+        serialize_json(&response)?
     };
     println!("{output}");
 
@@ -1392,13 +1394,45 @@ async fn http_handler(
     body: axum::body::Bytes,
     state: std::sync::Arc<HttpState>,
 ) -> Result<Response, StatusCode> {
-    let request: CommandRequest =
-        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let request: CommandRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(err) => {
+            let response =
+                http_error_response("invalid_request", format!("Invalid JSON request: {err}"));
+            return build_http_response(StatusCode::BAD_REQUEST, response);
+        }
+    };
     let response = command::execute(request, state.cache.clone()).await;
+    build_http_response(StatusCode::OK, response)
+}
 
-    let bytes = serde_json::to_vec(&response).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+fn http_error_response(code: &str, message: String) -> CommandResponse {
+    CommandResponse {
+        status: CommandStatus::Error,
+        message: Some(message.clone()),
+        error: Some(ErrorEnvelope {
+            code: code.to_string(),
+            message,
+            details: None,
+            hint: Some("Check the JSON body against the Command API schema.".to_string()),
+            next_actions: Vec::new(),
+        }),
+        hints: Vec::new(),
+        next_actions: Vec::new(),
+        data: serde_json::Value::Null,
+        meta: ResponseMeta::default(),
+    }
+}
+
+fn build_http_response(
+    status: StatusCode,
+    response: CommandResponse,
+) -> Result<Response, StatusCode> {
+    let bytes = serialize_json(&response)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_bytes();
     Ok(HttpResponse::builder()
-        .status(StatusCode::OK)
+        .status(status)
         .header("content-type", "application/json")
         .body(Body::from(bytes))
         .expect("valid HTTP response"))

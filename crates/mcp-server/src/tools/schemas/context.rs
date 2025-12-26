@@ -45,8 +45,8 @@ pub struct ContextResult {
     pub results: Vec<ContextHit>,
     /// Total related code found
     pub related_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolMeta>,
+    #[serde(default)]
+    pub meta: ToolMeta,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]

@@ -1,5 +1,6 @@
 use anyhow::{Context as AnyhowContext, Result};
-use context_indexer::FileScanner;
+use context_indexer::{FileScanner, ToolMeta};
+use context_protocol::enforce_max_chars;
 use std::path::Path;
 
 use super::cursor::{encode_cursor, CURSOR_VERSION};
@@ -79,7 +80,7 @@ pub(super) async fn compute_list_files_result(
     for file in matched.iter().skip(start_index) {
         if files.len() >= limit {
             truncated = true;
-            truncation = Some(ListFilesTruncation::Limit);
+            truncation = Some(ListFilesTruncation::MaxItems);
             break;
         }
 
@@ -123,7 +124,30 @@ pub(super) async fn compute_list_files_result(
         truncation,
         next_cursor,
         next_actions: None,
-        meta: None,
+        meta: ToolMeta { index_state: None },
         files,
     })
+}
+
+pub(super) fn finalize_list_files_budget(result: &mut ListFilesResult) -> Result<()> {
+    let max_chars = result.max_chars;
+    let used = enforce_max_chars(
+        result,
+        max_chars,
+        |inner, used| inner.used_chars = used,
+        |inner| {
+            inner.truncated = true;
+            inner.truncation = Some(ListFilesTruncation::MaxChars);
+        },
+        |inner| {
+            if !inner.files.is_empty() {
+                inner.files.pop();
+                inner.returned = inner.files.len();
+                return true;
+            }
+            false
+        },
+    )?;
+    result.used_chars = used;
+    Ok(())
 }

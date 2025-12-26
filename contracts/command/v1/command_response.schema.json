@@ -14,6 +14,10 @@
       "type": "string",
       "description": "Optional human-readable message (present mainly on errors)."
     },
+    "error": {
+      "description": "Structured error envelope (present when status=error).",
+      "allOf": [{ "$ref": "./error.schema.json" }]
+    },
     "hints": {
       "type": "array",
       "description": "Optional structured hints for agents (info/warn/cache/deprecation).",
@@ -30,6 +34,12 @@
         }
       }
     },
+    "next_actions": {
+      "type": "array",
+      "description": "Optional next-step tool/actions for agents.",
+      "items": { "$ref": "./next_action.schema.json" },
+      "default": []
+    },
     "data": {
       "description": "Action-specific result. For errors: usually null.",
       "default": null
@@ -38,6 +48,7 @@
       "type": "object",
       "additionalProperties": false,
       "description": "Optional diagnostics and performance metadata.",
+      "required": ["index_state"],
       "properties": {
         "config_path": { "type": "string" },
         "graph_cache": { "type": "boolean" },
@@ -74,7 +85,8 @@
         "profile_path": { "type": "string" },
         "index_state": {
           "description": "Index freshness and watermark information for this response.",
-          "allOf": [{ "$ref": "./index_state.schema.json" }]
+          "anyOf": [{ "type": "null" }, { "$ref": "./index_state.schema.json" }],
+          "default": null
         },
         "compare_avg_baseline_ms": { "type": "number", "minimum": 0 },
         "compare_avg_context_ms": { "type": "number", "minimum": 0 },

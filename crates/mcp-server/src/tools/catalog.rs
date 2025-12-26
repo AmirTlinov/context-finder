@@ -8,6 +8,10 @@ pub(crate) struct ToolDescriptor {
 
 pub(crate) const TOOL_CATALOG: &[ToolDescriptor] = &[
     ToolDescriptor {
+        name: "capabilities",
+        summary: "Handshake: versions, default budgets, and start route.",
+    },
+    ToolDescriptor {
         name: "repo_onboarding_pack",
         summary: "Map + key docs + next_actions (best first call).",
     },

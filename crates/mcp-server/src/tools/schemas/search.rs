@@ -1,3 +1,5 @@
+use context_indexer::ToolMeta;
+use context_protocol::ToolNextAction;
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
@@ -44,4 +46,14 @@ pub struct SearchResult {
     pub score: f32,
     /// Code content
     pub content: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SearchResponse {
+    /// Search results (semantic hits)
+    pub results: Vec<SearchResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<ToolNextAction>,
+    #[serde(default)]
+    pub meta: ToolMeta,
 }

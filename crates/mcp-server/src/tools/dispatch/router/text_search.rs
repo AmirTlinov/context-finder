@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 
 const MAX_FILE_BYTES: u64 = 2_000_000;
 
-use super::error::{internal_error, invalid_cursor, invalid_request};
+use super::error::{
+    attach_meta, internal_error, internal_error_with_meta, invalid_cursor,
+    invalid_request_with_meta, meta_for_request,
+};
 
 fn trimmed_non_empty_str(input: Option<&str>) -> Option<&str> {
     input.map(str::trim).filter(|value| !value.is_empty())
@@ -352,12 +355,21 @@ pub(in crate::tools::dispatch) async fn text_search(
 ) -> Result<CallToolResult, McpError> {
     let (root, root_display) = match service.resolve_root(request.path.as_deref()).await {
         Ok(value) => value,
-        Err(message) => return Ok(invalid_request(message)),
+        Err(message) => {
+            let meta = meta_for_request(service, request.path.as_deref()).await;
+            return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
+        }
     };
+    let meta = service.tool_meta(&root).await;
 
     let pattern = request.pattern.trim();
     if pattern.is_empty() {
-        return Ok(invalid_request("Pattern must not be empty"));
+        return Ok(invalid_request_with_meta(
+            "Pattern must not be empty",
+            meta.clone(),
+            None,
+            Vec::new(),
+        ));
     }
 
     let file_pattern = trimmed_non_empty_str(request.file_pattern.as_deref());
@@ -380,19 +392,24 @@ pub(in crate::tools::dispatch) async fn text_search(
         normalized_file_pattern.as_ref(),
     ) {
         Ok(value) => value,
-        Err(result) => return Ok(result),
+        Err(result) => return Ok(attach_meta(result, meta.clone())),
     };
 
     let corpus = match ContextFinderService::load_chunk_corpus(&root).await {
         Ok(corpus) => corpus,
-        Err(err) => return Ok(internal_error(format!("Error: {err:#}"))),
+        Err(err) => {
+            return Ok(internal_error_with_meta(
+                format!("Error: {err:#}"),
+                meta.clone(),
+            ))
+        }
     };
 
     let (source, mut outcome) = if let Some(corpus) = corpus {
         let (start_file_index, start_chunk_index, start_line_offset) =
             match start_indices_for_corpus(cursor_mode.as_ref()) {
                 Ok(value) => value,
-                Err(result) => return Ok(result),
+                Err(result) => return Ok(attach_meta(result, meta.clone())),
             };
         let outcome = match search_in_corpus(
             &corpus,
@@ -402,19 +419,19 @@ pub(in crate::tools::dispatch) async fn text_search(
             start_line_offset,
         ) {
             Ok(value) => value,
-            Err(result) => return Ok(result),
+            Err(result) => return Ok(attach_meta(result, meta.clone())),
         };
         ("corpus".to_string(), outcome)
     } else {
         let (start_file_index, start_line_offset) =
             match start_indices_for_filesystem(cursor_mode.as_ref()) {
                 Ok(value) => value,
-                Err(result) => return Ok(result),
+                Err(result) => return Ok(attach_meta(result, meta.clone())),
             };
         let outcome =
             match search_in_filesystem(&root, &settings, start_file_index, start_line_offset) {
                 Ok(value) => value,
-                Err(result) => return Ok(result),
+                Err(result) => return Ok(attach_meta(result, meta.clone())),
             };
         ("filesystem".to_string(), outcome)
     };
@@ -430,7 +447,7 @@ pub(in crate::tools::dispatch) async fn text_search(
             mode,
         ) {
             Ok(value) => Some(value),
-            Err(result) => return Ok(result),
+            Err(result) => return Ok(attach_meta(result, meta.clone())),
         }
     } else {
         None
@@ -446,10 +463,10 @@ pub(in crate::tools::dispatch) async fn text_search(
         truncated: outcome.truncated,
         next_cursor,
         next_actions: None,
-        meta: None,
+        meta: context_indexer::ToolMeta { index_state: None },
         matches: outcome.matches,
     };
-    result.meta = Some(service.tool_meta(&root).await);
+    result.meta = meta.clone();
     if let Some(cursor) = result.next_cursor.clone() {
         result.next_actions = Some(vec![ToolNextAction {
             tool: "text_search".to_string(),
@@ -467,7 +484,7 @@ pub(in crate::tools::dispatch) async fn text_search(
     }
 
     Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&result).unwrap_or_default(),
+        context_protocol::serialize_json(&result).unwrap_or_default(),
     )]))
 }
 

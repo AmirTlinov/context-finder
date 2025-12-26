@@ -6,6 +6,7 @@ use crate::command::infra::HealthPort;
 use crate::command::warm;
 use anyhow::Result;
 use context_indexer::{ModelIndexSpec, MultiModelProjectIndexer};
+use context_protocol::{DefaultBudgets, ToolNextAction};
 use context_vector_store::{current_model_id, ModelRegistry, QueryKind};
 use std::collections::HashSet;
 
@@ -106,6 +107,24 @@ impl IndexService {
         outcome.meta.warm = Some(warm.warmed);
         outcome.meta.warm_cost_ms = Some(warm.warm_cost_ms);
         outcome.meta.warm_graph_cache_hit = Some(warm.graph_cache_hit);
+        let budgets = DefaultBudgets::default();
+        outcome.next_actions.push(ToolNextAction {
+            tool: "repo_onboarding_pack".to_string(),
+            args: serde_json::json!({
+                "project": project_ctx.root.display().to_string(),
+                "max_chars": budgets.repo_onboarding_pack_max_chars
+            }),
+            reason: "Start with a compact repo map + key docs after indexing.".to_string(),
+        });
+        outcome.next_actions.push(ToolNextAction {
+            tool: "context_pack".to_string(),
+            args: serde_json::json!({
+                "project": project_ctx.root.display().to_string(),
+                "query": "project overview",
+                "max_chars": budgets.context_pack_max_chars
+            }),
+            reason: "Build a bounded semantic overview after indexing.".to_string(),
+        });
         if models.len() > 1 {
             outcome.hints.push(Hint {
                 kind: HintKind::Info,

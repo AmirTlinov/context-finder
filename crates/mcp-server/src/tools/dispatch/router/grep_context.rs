@@ -1,12 +1,15 @@
 use super::super::{
-    compute_grep_context_result, decode_cursor, CallToolResult, Content, ContextFinderService,
-    GrepContextComputeOptions, GrepContextCursorV1, GrepContextRequest, McpError, CURSOR_VERSION,
+    compute_grep_context_result, decode_cursor, finalize_grep_context_budget, CallToolResult,
+    Content, ContextFinderService, GrepContextComputeOptions, GrepContextCursorV1,
+    GrepContextRequest, McpError, CURSOR_VERSION,
 };
 use crate::tools::schemas::ToolNextAction;
 use regex::RegexBuilder;
 use serde_json::json;
 
-use super::error::{internal_error, invalid_cursor, invalid_request};
+use super::error::{
+    internal_error_with_meta, invalid_cursor_with_meta, invalid_request_with_meta, meta_for_request,
+};
 
 fn build_regex(pattern: &str, case_sensitive: bool) -> Result<regex::Regex, String> {
     RegexBuilder::new(pattern)
@@ -79,18 +82,34 @@ pub(in crate::tools::dispatch) async fn grep_context(
 
     let (root, root_display) = match service.resolve_root(request.path.as_deref()).await {
         Ok(value) => value,
-        Err(message) => return Ok(invalid_request(message)),
+        Err(message) => {
+            let meta = meta_for_request(service, request.path.as_deref()).await;
+            return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
+        }
     };
+    let meta = service.tool_meta(&root).await;
 
     request.pattern = request.pattern.trim().to_string();
     if request.pattern.is_empty() {
-        return Ok(invalid_request("Pattern must not be empty"));
+        return Ok(invalid_request_with_meta(
+            "Pattern must not be empty",
+            meta.clone(),
+            None,
+            Vec::new(),
+        ));
     }
 
     let case_sensitive = request.case_sensitive.unwrap_or(true);
     let regex = match build_regex(&request.pattern, case_sensitive) {
         Ok(re) => re,
-        Err(msg) => return Ok(invalid_request(msg)),
+        Err(msg) => {
+            return Ok(invalid_request_with_meta(
+                msg,
+                meta.clone(),
+                None,
+                Vec::new(),
+            ))
+        }
     };
 
     let before = request
@@ -143,7 +162,7 @@ pub(in crate::tools::dispatch) async fn grep_context(
         },
     ) {
         Ok(v) => v,
-        Err(msg) => return Ok(invalid_cursor(msg)),
+        Err(msg) => return Ok(invalid_cursor_with_meta(msg, meta.clone())),
     };
 
     let mut result = match compute_grep_context_result(
@@ -166,10 +185,13 @@ pub(in crate::tools::dispatch) async fn grep_context(
     {
         Ok(result) => result,
         Err(err) => {
-            return Ok(internal_error(format!("Error: {err:#}")));
+            return Ok(internal_error_with_meta(
+                format!("Error: {err:#}"),
+                meta.clone(),
+            ))
         }
     };
-    result.meta = Some(service.tool_meta(&root).await);
+    result.meta = meta.clone();
     if let Some(cursor) = result.next_cursor.clone() {
         result.next_actions = Some(vec![ToolNextAction {
             tool: "grep_context".to_string(),
@@ -189,8 +211,16 @@ pub(in crate::tools::dispatch) async fn grep_context(
             reason: "Continue grep_context pagination with the next cursor.".to_string(),
         }]);
     }
+    if let Err(err) = finalize_grep_context_budget(&mut result) {
+        return Ok(invalid_request_with_meta(
+            format!("max_chars too small for response envelope ({err:#})"),
+            meta,
+            None,
+            Vec::new(),
+        ));
+    }
 
     Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&result).unwrap_or_default(),
+        context_protocol::serialize_json(&result).unwrap_or_default(),
     )]))
 }

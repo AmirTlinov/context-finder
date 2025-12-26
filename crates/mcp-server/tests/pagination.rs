@@ -400,10 +400,10 @@ async fn grep_context_supports_cursor_pagination() -> Result<()> {
             "pattern": "MATCH",
             "file": "src/main.txt",
             "before": 0,
-            "after": 10,
+            "after": 0,
             "max_matches": 100,
-            "max_hunks": 100,
-            "max_chars": 10,
+            "max_hunks": 1,
+            "max_chars": 5000,
             "case_sensitive": true,
         }),
     )
@@ -424,10 +424,10 @@ async fn grep_context_supports_cursor_pagination() -> Result<()> {
             "pattern": "MATCH",
             "file": "src/main.txt",
             "before": 0,
-            "after": 10,
+            "after": 0,
             "max_matches": 100,
-            "max_hunks": 100,
-            "max_chars": 10,
+            "max_hunks": 1,
+            "max_chars": 5000,
             "case_sensitive": true,
             "cursor": cursor,
         }),
@@ -876,36 +876,60 @@ async fn read_pack_clamps_tiny_budget_and_keeps_continuation() -> Result<()> {
     }
     std::fs::write(root.join("src").join("main.txt"), content).context("write main.txt")?;
 
-    let json = call_tool_json(
-        &service,
-        "read_pack",
-        serde_json::json!({
-            "path": root.to_string_lossy(),
-            "intent": "file",
-            "file": "src/main.txt",
-            "max_lines": 400,
-            "max_chars": 1,
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        service.call_tool(CallToolRequestParam {
+            name: "read_pack".to_string().into(),
+            arguments: serde_json::json!({
+                "path": root.to_string_lossy(),
+                "intent": "file",
+                "file": "src/main.txt",
+                "max_lines": 400,
+                "max_chars": 1,
+            })
+            .as_object()
+            .cloned(),
         }),
     )
-    .await?;
+    .await
+    .context("timeout calling tool")??;
 
-    let budget = json.get("budget").context("missing budget")?;
-    let max_chars = budget
-        .get("max_chars")
-        .and_then(Value::as_u64)
-        .context("budget.max_chars missing")?;
-    assert!(max_chars >= 1000, "expected min budget clamp");
     assert_eq!(
-        budget.get("truncated").and_then(Value::as_bool),
+        result.is_error,
         Some(true),
-        "expected truncated response"
+        "read_pack should return error on tiny budget"
     );
-
-    let next_actions = json
+    let structured = result
+        .structured_content
+        .as_ref()
+        .context("read_pack did not return structured content")?;
+    let error = structured
+        .get("error")
+        .context("read_pack structured content missing error")?;
+    assert_eq!(
+        error.get("code").and_then(Value::as_str),
+        Some("invalid_request")
+    );
+    let hint = error
+        .get("hint")
+        .and_then(Value::as_str)
+        .context("read_pack error missing hint")?;
+    assert!(
+        hint.contains("Increase max_chars"),
+        "expected hint to suggest increasing max_chars"
+    );
+    let next_actions = error
         .get("next_actions")
         .and_then(Value::as_array)
-        .context("missing next_actions")?;
+        .context("read_pack error missing next_actions")?;
     assert!(!next_actions.is_empty(), "expected continuation action");
+    assert!(
+        structured
+            .get("meta")
+            .and_then(|meta| meta.get("index_state"))
+            .is_some(),
+        "read_pack error should include meta.index_state"
+    );
 
     service.cancel().await.context("shutdown mcp service")?;
     Ok(())

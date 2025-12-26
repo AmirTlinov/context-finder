@@ -6,8 +6,9 @@ use super::super::{
     ReadPackBudget, ReadPackIntent, ReadPackNextAction, ReadPackRequest, ReadPackResult,
     ReadPackSection, ReadPackTruncation, RepoOnboardingPackRequest, CURSOR_VERSION,
 };
-use super::error::tool_error;
+use super::error::{attach_meta, invalid_request_with, invalid_request_with_meta, tool_error};
 use context_indexer::ToolMeta;
+use context_protocol::ToolNextAction;
 use regex::RegexBuilder;
 use serde::Deserialize;
 use serde_json::json;
@@ -147,23 +148,6 @@ fn intent_label(intent: ReadPackIntent) -> &'static str {
     }
 }
 
-fn clear_section_meta(sections: &mut [ReadPackSection]) {
-    for section in sections {
-        match section {
-            ReadPackSection::FileSlice { result } => {
-                result.meta = None;
-            }
-            ReadPackSection::GrepContext { result } => {
-                result.meta = None;
-            }
-            ReadPackSection::RepoOnboardingPack { result } => {
-                result.meta = None;
-            }
-            ReadPackSection::ContextPack { .. } => {}
-        }
-    }
-}
-
 fn compute_min_envelope_chars(result: &ReadPackResult) -> ToolResult<usize> {
     let mut tmp = ReadPackResult {
         version: result.version,
@@ -177,7 +161,7 @@ fn compute_min_envelope_chars(result: &ReadPackResult) -> ToolResult<usize> {
             truncated: true,
             truncation: Some(ReadPackTruncation::MaxChars),
         },
-        meta: None,
+        meta: ToolMeta { index_state: None },
     };
     finalize_read_pack_budget(&mut tmp)
         .map_err(|err| call_error("internal", format!("Error: {err:#}")))?;
@@ -202,23 +186,6 @@ fn finalize_and_trim(
         result.budget.truncation = Some(ReadPackTruncation::MaxChars);
     }
 
-    if !result.next_actions.is_empty() {
-        result.next_actions.clear();
-        let _ = finalize_read_pack_budget(&mut result);
-        if result.budget.used_chars <= ctx.max_chars {
-            return Ok(result);
-        }
-    }
-
-    if result.meta.is_some() {
-        result.meta = None;
-        clear_section_meta(&mut result.sections);
-        let _ = finalize_read_pack_budget(&mut result);
-        if result.budget.used_chars <= ctx.max_chars {
-            return Ok(result);
-        }
-    }
-
     while result.budget.used_chars > ctx.max_chars && result.sections.len() > 1 {
         result.sections.pop();
         let _ = finalize_read_pack_budget(&mut result);
@@ -226,14 +193,21 @@ fn finalize_and_trim(
 
     if result.budget.used_chars > ctx.max_chars {
         result.sections.clear();
-        result.next_actions.clear();
         let _ = finalize_read_pack_budget(&mut result);
-
         if result.budget.used_chars > ctx.max_chars {
             let min_chars = compute_min_envelope_chars(&result)?;
-            return Err(call_error(
-                "invalid_request",
+            let suggested_max_chars = min_chars
+                .max(ctx.max_chars.saturating_mul(2))
+                .clamp(MIN_MAX_CHARS, MAX_MAX_CHARS);
+            let retry_args = build_retry_args(ctx, request, intent, suggested_max_chars);
+            return Err(invalid_request_with(
                 format!("max_chars too small for read_pack response (min_chars={min_chars})"),
+                Some(format!("Increase max_chars to at least {min_chars}.")),
+                vec![ToolNextAction {
+                    tool: "read_pack".to_string(),
+                    args: retry_args,
+                    reason: format!("Retry read_pack with max_chars >= {min_chars}."),
+                }],
             ));
         }
     }
@@ -265,6 +239,21 @@ fn ensure_retry_action(
         .saturating_mul(2)
         .clamp(DEFAULT_MAX_CHARS, MAX_MAX_CHARS);
 
+    let args = build_retry_args(ctx, request, intent, suggested_max_chars);
+    result.next_actions.push(ReadPackNextAction {
+        tool: "read_pack".to_string(),
+        args,
+        reason: "Increase max_chars to get a fuller read_pack payload.".to_string(),
+    });
+    let _ = finalize_read_pack_budget(result);
+}
+
+fn build_retry_args(
+    ctx: &ReadPackContext,
+    request: &ReadPackRequest,
+    intent: ReadPackIntent,
+    max_chars: usize,
+) -> serde_json::Value {
     let mut args = serde_json::Map::new();
     args.insert(
         "path".to_string(),
@@ -276,13 +265,31 @@ fn ensure_retry_action(
     );
     args.insert(
         "max_chars".to_string(),
-        serde_json::Value::Number(suggested_max_chars.into()),
+        serde_json::Value::Number(max_chars.into()),
     );
 
     if let Some(cursor) = trimmed_non_empty_str(request.cursor.as_deref()) {
         args.insert(
             "cursor".to_string(),
             serde_json::Value::String(cursor.to_string()),
+        );
+    }
+    if let Some(timeout_ms) = request.timeout_ms {
+        args.insert(
+            "timeout_ms".to_string(),
+            serde_json::Value::Number(timeout_ms.into()),
+        );
+    }
+    if let Some(auto_index) = request.auto_index {
+        args.insert(
+            "auto_index".to_string(),
+            serde_json::Value::Bool(auto_index),
+        );
+    }
+    if let Some(auto_index_budget_ms) = request.auto_index_budget_ms {
+        args.insert(
+            "auto_index_budget_ms".to_string(),
+            serde_json::Value::Number(auto_index_budget_ms.into()),
         );
     }
 
@@ -359,25 +366,20 @@ fn ensure_retry_action(
         ReadPackIntent::Onboarding | ReadPackIntent::Auto => {}
     }
 
-    result.next_actions.push(ReadPackNextAction {
-        tool: "read_pack".to_string(),
-        args: serde_json::Value::Object(args),
-        reason: "Increase max_chars to get a fuller read_pack payload.".to_string(),
-    });
-    let _ = finalize_read_pack_budget(result);
+    serde_json::Value::Object(args)
 }
 
 fn apply_meta_to_sections(meta: &ToolMeta, sections: &mut [ReadPackSection]) {
     for section in sections {
         match section {
             ReadPackSection::FileSlice { result } => {
-                result.meta = Some(meta.clone());
+                result.meta = meta.clone();
             }
             ReadPackSection::GrepContext { result } => {
-                result.meta = Some(meta.clone());
+                result.meta = meta.clone();
             }
             ReadPackSection::RepoOnboardingPack { result } => {
-                result.meta = Some(meta.clone());
+                result.meta = meta.clone();
             }
             ReadPackSection::ContextPack { .. } => {}
         }
@@ -815,15 +817,23 @@ pub(in crate::tools::dispatch) async fn read_pack(
 ) -> Result<CallToolResult, McpError> {
     let (root, root_display) = match service.resolve_root(request.path.as_deref()).await {
         Ok(value) => value,
-        Err(message) => return Ok(call_error("invalid_request", message)),
+        Err(message) => {
+            return Ok(invalid_request_with_meta(
+                message,
+                ToolMeta { index_state: None },
+                None,
+                Vec::new(),
+            ))
+        }
     };
+    let base_meta = service.tool_meta(&root).await;
     let ctx = match build_context(&request, root, root_display) {
         Ok(value) => value,
-        Err(result) => return Ok(result),
+        Err(result) => return Ok(attach_meta(result, base_meta.clone())),
     };
     let intent = match resolve_intent(&request) {
         Ok(value) => value,
-        Err(result) => return Ok(result),
+        Err(result) => return Ok(attach_meta(result, base_meta.clone())),
     };
 
     let timeout_ms = request
@@ -836,7 +846,7 @@ pub(in crate::tools::dispatch) async fn read_pack(
                 AutoIndexPolicy::from_request(request.auto_index, request.auto_index_budget_ms);
             service.tool_meta_with_auto_index(&ctx.root, policy).await
         }
-        _ => service.tool_meta(&ctx.root).await,
+        _ => base_meta.clone(),
     };
 
     let mut sections: Vec<ReadPackSection> = Vec::new();
@@ -875,22 +885,22 @@ pub(in crate::tools::dispatch) async fn read_pack(
                         truncated: true,
                         truncation: Some(ReadPackTruncation::Timeout),
                     },
-                    meta: Some(meta),
+                    meta: meta.clone(),
                 };
-                apply_meta_to_sections(result.meta.as_ref().unwrap(), &mut result.sections);
+                apply_meta_to_sections(&result.meta, &mut result.sections);
                 let mut result = match finalize_and_trim(result, &ctx, &request, intent) {
                     Ok(value) => value,
-                    Err(result) => return Ok(result),
+                    Err(result) => return Ok(attach_meta(result, meta.clone())),
                 };
                 result.budget.truncated = true;
                 result.budget.truncation = Some(ReadPackTruncation::Timeout);
                 return Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string(&result).unwrap_or_default(),
+                    context_protocol::serialize_json(&result).unwrap_or_default(),
                 )]));
             }
         };
     if let Err(result) = handler_result {
-        return Ok(result);
+        return Ok(attach_meta(result, meta.clone()));
     }
 
     apply_meta_to_sections(&meta, &mut sections);
@@ -906,15 +916,15 @@ pub(in crate::tools::dispatch) async fn read_pack(
             truncated: false,
             truncation: None,
         },
-        meta: Some(meta),
+        meta: meta.clone(),
     };
 
     let result = match finalize_and_trim(result, &ctx, &request, intent) {
         Ok(value) => value,
-        Err(result) => return Ok(result),
+        Err(result) => return Ok(attach_meta(result, meta.clone())),
     };
     Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string(&result).unwrap_or_default(),
+        context_protocol::serialize_json(&result).unwrap_or_default(),
     )]))
 }
 

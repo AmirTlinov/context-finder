@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/command/v1/error.schema.json",
+  "title": "Context Finder Error Envelope (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["code", "message", "details", "hint", "next_actions"],
+  "properties": {
+    "code": {
+      "type": "string",
+      "description": "Machine-readable error code."
+    },
+    "message": {
+      "type": "string",
+      "description": "Human-readable error message."
+    },
+    "details": {
+      "description": "Optional structured error details.",
+      "type": ["object", "array", "string", "number", "boolean", "null"],
+      "default": null
+    },
+    "hint": {
+      "type": ["string", "null"],
+      "description": "Optional short, actionable hint."
+    },
+    "next_actions": {
+      "type": "array",
+      "description": "Next-step tool/actions for agents (may be empty).",
+      "items": { "$ref": "./next_action.schema.json" },
+      "default": []
+    }
+  }
+}

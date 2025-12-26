@@ -1,4 +1,5 @@
 use context_indexer::ToolMeta;
+use context_protocol::{BudgetTruncation, ToolNextAction};
 use serde::{Deserialize, Serialize};
 
 pub const CONTEXT_PACK_VERSION: u32 = 1;
@@ -11,8 +12,10 @@ pub struct ContextPackOutput {
     pub profile: String,
     pub items: Vec<ContextPackItem>,
     pub budget: ContextPackBudget,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolMeta>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<ToolNextAction>,
+    #[serde(default)]
+    pub meta: ToolMeta,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -41,4 +44,6 @@ pub struct ContextPackBudget {
     pub used_chars: usize,
     pub truncated: bool,
     pub dropped_items: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<BudgetTruncation>,
 }

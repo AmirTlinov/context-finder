@@ -1,6 +1,6 @@
 use anyhow::{Context as AnyhowContext, Result};
 use context_code_chunker::{Chunker, ChunkerConfig};
-use context_indexer::FileScanner;
+use context_indexer::{FileScanner, ToolMeta};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -254,7 +254,7 @@ pub(super) async fn compute_map_result(
         truncated,
         next_cursor,
         next_actions: None,
-        meta: None,
+        meta: ToolMeta { index_state: None },
     })
 }
 

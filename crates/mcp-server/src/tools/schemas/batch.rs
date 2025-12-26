@@ -1,10 +1,12 @@
 use context_indexer::ToolMeta;
+use context_protocol::{BudgetTruncation, ErrorEnvelope, ToolNextAction};
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchToolName {
+    Capabilities,
     Map,
     FileSlice,
     ListFiles,
@@ -90,6 +92,8 @@ pub struct BatchBudget {
     pub max_chars: usize,
     pub used_chars: usize,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<BudgetTruncation>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema, Clone)]
@@ -99,6 +103,8 @@ pub struct BatchItemResult {
     pub status: BatchItemStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorEnvelope>,
     pub data: serde_json::Value,
 }
 
@@ -107,6 +113,7 @@ pub struct BatchResult {
     pub version: u32,
     pub items: Vec<BatchItemResult>,
     pub budget: BatchBudget,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolMeta>,
+    #[serde(default)]
+    pub next_actions: Vec<ToolNextAction>,
+    pub meta: ToolMeta,
 }

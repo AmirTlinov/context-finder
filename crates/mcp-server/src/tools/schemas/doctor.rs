@@ -1,4 +1,5 @@
 use context_indexer::ToolMeta;
+use context_protocol::ToolNextAction;
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
@@ -19,8 +20,10 @@ pub struct DoctorResult {
     pub project: Option<DoctorProjectResult>,
     pub issues: Vec<String>,
     pub hints: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolMeta>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<ToolNextAction>,
+    #[serde(default)]
+    pub meta: ToolMeta,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]

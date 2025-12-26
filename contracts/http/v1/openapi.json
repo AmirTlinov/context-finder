@@ -28,8 +28,22 @@
               }
             }
           },
-          "400": { "description": "Invalid JSON request" },
-          "500": { "description": "Internal server error" }
+          "400": {
+            "description": "Invalid JSON request (CommandResponse error envelope)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CommandResponse" }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error (CommandResponse error envelope)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CommandResponse" }
+              }
+            }
+          }
         }
       }
     },
@@ -65,4 +79,3 @@
     }
   }
 }
-

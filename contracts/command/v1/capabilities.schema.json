@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/command/v1/capabilities.schema.json",
+  "title": "Capabilities Output (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "server", "versions", "default_budgets", "start_route"],
+  "properties": {
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_api", "mcp", "index_state"],
+      "properties": {
+        "command_api": { "type": "string" },
+        "mcp": { "type": "string" },
+        "index_state": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "default_budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_chars",
+        "read_pack_max_chars",
+        "repo_onboarding_pack_max_chars",
+        "context_pack_max_chars",
+        "batch_max_chars",
+        "file_slice_max_chars",
+        "grep_context_max_chars",
+        "list_files_max_chars",
+        "auto_index_budget_ms"
+      ],
+      "properties": {
+        "max_chars": { "type": "integer", "minimum": 0 },
+        "read_pack_max_chars": { "type": "integer", "minimum": 0 },
+        "repo_onboarding_pack_max_chars": { "type": "integer", "minimum": 0 },
+        "context_pack_max_chars": { "type": "integer", "minimum": 0 },
+        "batch_max_chars": { "type": "integer", "minimum": 0 },
+        "file_slice_max_chars": { "type": "integer", "minimum": 0 },
+        "grep_context_max_chars": { "type": "integer", "minimum": 0 },
+        "list_files_max_chars": { "type": "integer", "minimum": 0 },
+        "auto_index_budget_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "start_route": { "$ref": "./next_action.schema.json" }
+  },
+  "$comment": "Rust source of truth: context_protocol::Capabilities"
+}

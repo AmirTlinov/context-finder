@@ -1,4 +1,5 @@
 use context_indexer::ToolMeta;
+use context_protocol::{BudgetTruncation, ToolNextAction};
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
@@ -97,19 +98,8 @@ pub struct ReadPackRequest {
     pub auto_index_budget_ms: Option<u64>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct ReadPackNextAction {
-    pub tool: String,
-    pub args: serde_json::Value,
-    pub reason: String,
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ReadPackTruncation {
-    MaxChars,
-    Timeout,
-}
+pub type ReadPackNextAction = ToolNextAction;
+pub type ReadPackTruncation = BudgetTruncation;
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ReadPackBudget {
@@ -145,6 +135,6 @@ pub struct ReadPackResult {
     pub sections: Vec<ReadPackSection>,
     pub next_actions: Vec<ReadPackNextAction>,
     pub budget: ReadPackBudget,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolMeta>,
+    #[serde(default)]
+    pub meta: ToolMeta,
 }

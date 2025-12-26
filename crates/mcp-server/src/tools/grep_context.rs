@@ -1,5 +1,6 @@
 use anyhow::{Context as AnyhowContext, Result};
-use context_indexer::FileScanner;
+use context_indexer::{FileScanner, ToolMeta};
+use context_protocol::enforce_max_chars;
 use regex::Regex;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -270,7 +271,7 @@ fn build_hunks_for_file(
 
         if acc.hunks.len() >= max_hunks {
             acc.truncated = true;
-            acc.truncation = Some(GrepContextTruncation::Hunks);
+            acc.truncation = Some(GrepContextTruncation::MaxHunks);
             acc.next_cursor_state = Some((display_file, range_start_line));
             return false;
         }
@@ -306,7 +307,7 @@ fn build_hunks_for_file(
 
             if acc.used_chars.saturating_add(extra_chars) > max_chars {
                 acc.truncated = true;
-                acc.truncation = Some(GrepContextTruncation::Chars);
+                acc.truncation = Some(GrepContextTruncation::MaxChars);
                 stop_due_to_budget = true;
                 break;
             }
@@ -443,7 +444,7 @@ pub(super) async fn compute_grep_context_result(
         acc.matched_files += 1;
         if scan.hit_match_limit {
             acc.truncated = true;
-            acc.truncation = Some(GrepContextTruncation::Matches);
+            acc.truncation = Some(GrepContextTruncation::MaxMatches);
         }
 
         let ranges = build_ranges_from_matches(&scan.match_lines, before, after);
@@ -493,9 +494,34 @@ pub(super) async fn compute_grep_context_result(
         truncation: acc.truncation,
         next_cursor,
         next_actions: None,
-        meta: None,
+        meta: ToolMeta { index_state: None },
         hunks: acc.hunks,
     };
 
     Ok(result)
+}
+
+pub(super) fn finalize_grep_context_budget(result: &mut GrepContextResult) -> Result<()> {
+    let max_chars = result.max_chars;
+    let used = enforce_max_chars(
+        result,
+        max_chars,
+        |inner, used| inner.used_chars = used,
+        |inner| {
+            inner.truncated = true;
+            inner.truncation = Some(GrepContextTruncation::MaxChars);
+        },
+        |inner| {
+            if !inner.hunks.is_empty() {
+                inner.hunks.pop();
+                inner.returned_hunks = inner.hunks.len();
+                inner.returned_matches =
+                    inner.hunks.iter().map(|hunk| hunk.match_lines.len()).sum();
+                return true;
+            }
+            false
+        },
+    )?;
+    result.used_chars = used;
+    Ok(())
 }

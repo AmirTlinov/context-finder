@@ -1,4 +1,5 @@
 use anyhow::{Context as AnyhowContext, Result};
+use context_indexer::ToolMeta;
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Seek};
 use std::path::{Path, PathBuf};
@@ -300,7 +301,7 @@ pub(super) fn compute_file_slice_result(
         truncation: read.truncation,
         next_cursor: read.next_cursor,
         next_actions: None,
-        meta: None,
+        meta: ToolMeta { index_state: None },
         file_size_bytes,
         file_mtime_ms,
         content_sha256,
@@ -402,7 +403,7 @@ pub(super) fn compute_onboarding_doc_slice(
         truncation,
         next_cursor: None,
         next_actions: None,
-        meta: None,
+        meta: ToolMeta { index_state: None },
         file_size_bytes,
         file_mtime_ms,
         content_sha256,

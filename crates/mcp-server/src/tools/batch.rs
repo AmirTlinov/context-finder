@@ -1,4 +1,5 @@
 use anyhow::Result;
+use context_protocol::{enforce_max_chars, finalize_used_chars, BudgetTruncation, ErrorEnvelope};
 use rmcp::model::CallToolResult;
 
 use super::schemas::batch::{
@@ -124,55 +125,76 @@ fn extract_tool_text_blocks(result: &CallToolResult) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn push_item_or_truncate(output: &mut BatchResult, item: BatchItemResult) -> bool {
+pub(super) fn push_item_or_truncate(
+    output: &mut BatchResult,
+    item: BatchItemResult,
+) -> anyhow::Result<bool> {
     output.items.push(item);
     let used = match compute_used_chars(output) {
         Ok(used) => used,
         Err(err) => {
             let rejected = output.items.pop().expect("just pushed");
             output.budget.truncated = true;
+            output.budget.truncation = Some(BudgetTruncation::MaxChars);
             output.items.push(BatchItemResult {
                 id: rejected.id,
                 tool: rejected.tool,
                 status: BatchItemStatus::Error,
                 message: Some(format!("Failed to compute batch budget: {err:#}")),
+                error: Some(ErrorEnvelope {
+                    code: "internal".to_string(),
+                    message: format!("Failed to compute batch budget: {err:#}"),
+                    details: None,
+                    hint: None,
+                    next_actions: Vec::new(),
+                }),
                 data: serde_json::Value::Null,
             });
-            trim_output_to_budget(output);
-            return false;
+            trim_output_to_budget(output)?;
+            return Ok(false);
         }
     };
 
     if used > output.budget.max_chars {
         let rejected = output.items.pop().expect("just pushed");
         output.budget.truncated = true;
+        output.budget.truncation = Some(BudgetTruncation::MaxChars);
 
         if output.items.is_empty() {
+            let message = format!(
+                "Batch budget exceeded (max_chars={}). Reduce payload sizes or raise max_chars.",
+                output.budget.max_chars
+            );
             output.items.push(BatchItemResult {
                 id: rejected.id,
                 tool: rejected.tool,
                 status: BatchItemStatus::Error,
-                message: Some(format!(
-                    "Batch budget exceeded (max_chars={}). Reduce payload sizes or raise max_chars.",
-                    output.budget.max_chars
-                )),
+                message: Some(message.clone()),
+                error: Some(ErrorEnvelope {
+                    code: "invalid_request".to_string(),
+                    message,
+                    details: None,
+                    hint: None,
+                    next_actions: Vec::new(),
+                }),
                 data: serde_json::Value::Null,
             });
             if let Ok(over) = compute_used_chars(output) {
                 if over > output.budget.max_chars {
                     if let Some(last) = output.items.last_mut() {
                         last.message = None;
+                        last.error = None;
                     }
                 }
             }
         }
 
-        trim_output_to_budget(output);
-        return false;
+        trim_output_to_budget(output)?;
+        return Ok(false);
     }
 
     output.budget.used_chars = used;
-    true
+    Ok(true)
 }
 
 pub(super) fn compute_used_chars(output: &BatchResult) -> anyhow::Result<usize> {
@@ -183,47 +205,31 @@ pub(super) fn compute_used_chars(output: &BatchResult) -> anyhow::Result<usize> 
             max_chars: output.budget.max_chars,
             used_chars: 0,
             truncated: output.budget.truncated,
+            truncation: output.budget.truncation.clone(),
         },
+        next_actions: output.next_actions.clone(),
         meta: output.meta.clone(),
     };
-    let raw = serde_json::to_string(&tmp)?;
-    let mut used = raw.chars().count();
-    tmp.budget.used_chars = used;
-    let raw = serde_json::to_string(&tmp)?;
-    let next = raw.chars().count();
-    if next == used {
-        return Ok(used);
-    }
-    used = next;
-    tmp.budget.used_chars = used;
-    let raw = serde_json::to_string(&tmp)?;
-    Ok(raw.chars().count())
+    finalize_used_chars(&mut tmp, |inner, used| inner.budget.used_chars = used)
 }
 
-pub(super) fn trim_output_to_budget(output: &mut BatchResult) {
-    loop {
-        let used = match compute_used_chars(output) {
-            Ok(used) => used,
-            Err(_) => {
-                output.budget.truncated = true;
-                output.budget.used_chars = output.budget.max_chars;
-                return;
+pub(super) fn trim_output_to_budget(output: &mut BatchResult) -> anyhow::Result<()> {
+    let max_chars = output.budget.max_chars;
+    let _ = enforce_max_chars(
+        output,
+        max_chars,
+        |inner, used| inner.budget.used_chars = used,
+        |inner| {
+            inner.budget.truncated = true;
+            inner.budget.truncation = Some(BudgetTruncation::MaxChars);
+        },
+        |inner| {
+            if !inner.items.is_empty() {
+                inner.items.pop();
+                return true;
             }
-        };
-        if used <= output.budget.max_chars {
-            output.budget.used_chars = used;
-            return;
-        }
-        output.budget.truncated = true;
-        if output.meta.is_some() {
-            output.meta = None;
-            continue;
-        }
-        if !output.items.is_empty() {
-            output.items.pop();
-            continue;
-        }
-        output.budget.used_chars = used.min(output.budget.max_chars);
-        return;
-    }
+            false
+        },
+    )?;
+    Ok(())
 }

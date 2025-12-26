@@ -16,12 +16,14 @@
         "task_pack",
         "text_search",
         "batch",
+        "capabilities",
         "index",
         "get_context",
         "list_symbols",
         "config_read",
         "compare_search",
         "map",
+        "repo_onboarding_pack",
         "eval",
         "eval_compare"
       ]

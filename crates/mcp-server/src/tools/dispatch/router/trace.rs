@@ -2,7 +2,7 @@ use super::super::{
     AutoIndexPolicy, CallToolResult, Content, ContextFinderService, McpError, TraceRequest,
     TraceResult, TraceStep,
 };
-use super::error::{internal_error, invalid_request};
+use super::error::{internal_error_with_meta, invalid_request_with_meta, meta_for_request};
 
 /// Trace call path between two symbols
 pub(in crate::tools::dispatch) async fn trace(
@@ -12,7 +12,8 @@ pub(in crate::tools::dispatch) async fn trace(
     let root = match service.resolve_root(request.path.as_deref()).await {
         Ok((root, _)) => root,
         Err(message) => {
-            return Ok(invalid_request(message));
+            let meta = meta_for_request(service, request.path.as_deref()).await;
+            return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
         }
     };
 
@@ -20,7 +21,8 @@ pub(in crate::tools::dispatch) async fn trace(
     let (mut engine, meta) = match service.prepare_semantic_engine(&root, policy).await {
         Ok(engine) => engine,
         Err(e) => {
-            return Ok(internal_error(format!("Error: {e}")));
+            let meta = service.tool_meta(&root).await;
+            return Ok(internal_error_with_meta(format!("Error: {e}"), meta));
         }
     };
 
@@ -34,30 +36,38 @@ pub(in crate::tools::dispatch) async fn trace(
     );
 
     if let Err(e) = engine.engine_mut().ensure_graph(language).await {
-        return Ok(internal_error(format!("Graph build error: {e}")));
+        return Ok(internal_error_with_meta(
+            format!("Graph build error: {e}"),
+            meta.clone(),
+        ));
     }
 
     let (found, path_steps, depth) = {
         let Some(assembler) = engine.engine_mut().context_search.assembler() else {
-            return Ok(internal_error(
+            return Ok(internal_error_with_meta(
                 "Graph build error: missing assembler after build",
+                meta.clone(),
             ));
         };
         let graph = assembler.graph();
 
         // Find both symbols
         let Some(from_node) = graph.find_node(&request.from) else {
-            return Ok(invalid_request(format!(
-                "Symbol '{}' not found",
-                request.from
-            )));
+            return Ok(invalid_request_with_meta(
+                format!("Symbol '{}' not found", request.from),
+                meta.clone(),
+                None,
+                Vec::new(),
+            ));
         };
 
         let Some(to_node) = graph.find_node(&request.to) else {
-            return Ok(invalid_request(format!(
-                "Symbol '{}' not found",
-                request.to
-            )));
+            return Ok(invalid_request_with_meta(
+                format!("Symbol '{}' not found", request.to),
+                meta.clone(),
+                None,
+                Vec::new(),
+            ));
         };
 
         // Find path
@@ -104,10 +114,10 @@ pub(in crate::tools::dispatch) async fn trace(
         path: path_steps,
         depth,
         mermaid,
-        meta: Some(meta),
+        meta,
     };
 
     Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&result).unwrap_or_default(),
+        context_protocol::serialize_json(&result).unwrap_or_default(),
     )]))
 }

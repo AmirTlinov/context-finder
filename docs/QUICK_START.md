@@ -213,10 +213,13 @@ Repo onboarding pack tool (best default for agents; one call → `map` + key doc
 ```
 
 If no docs were included, `docs_reason` explains why (e.g. `docs_limit_zero`, `max_chars`).
-Under tight budgets, the map is trimmed before docs so at least one doc slice can still fit.
+Under tight budgets, the pack reserves space for at least one doc slice by trimming the map first.
+
+Capabilities tool (`capabilities`): one call returns versions, default budgets, and a recommended
+start route for zero-guess onboarding.
 
 One-call reading pack tool (`read_pack`; a single entry point for file/grep/query/onboarding, with cursor-only continuation).
-All MCP tool errors return structured JSON under `structured_content.error` (plus a matching text message). `read_pack` strictly honors `max_chars` and may drop `meta`/`next_actions` under tight budgets:
+All MCP tool errors return structured JSON under `structured_content.error` (code/message/details/hint/next_actions) plus a matching text message. When recovery is obvious (missing index, budget too small), errors include `next_actions` that point to `index`/`doctor` or a tuned retry. `read_pack` strictly honors `max_chars`; `meta.index_state` is always present when available, and `next_actions` are trimmed only if required to fit the budget:
 
 ```jsonc
 // Read a file window (internally calls file_slice)
@@ -256,7 +259,7 @@ Tools also provide `next_actions` — ready-to-run tool + args payloads (includi
 
 Cursor tokens are opaque and bound to the original query/options (changing them will be rejected).
 
-Most read-oriented MCP tools include `meta.index_state` when available to expose index freshness.
+All MCP tools include `meta.index_state` (best-effort) on both success and error responses to expose index freshness.
 For semantic tools (`context_pack`, `context`, `impact`, `trace`, `explain`, `overview`),
 `auto_index` defaults to true; use `auto_index=false` or `auto_index_budget_ms` to control the
 reindex budget. The attempt is reported under `meta.index_state.reindex`.
@@ -338,6 +341,9 @@ For programmatic access, use the `command` subcommand:
 # Index project
 context-finder command --json '{"action": "index", "payload": {"path": "/project"}}'
 
+# Capabilities handshake (versions + budgets + start route)
+context-finder command --json '{"action": "capabilities", "payload": {}}'
+
 # Search
 context-finder command --json '{"action": "search", "payload": {"query": "handler", "limit": 5}}'
 
@@ -347,6 +353,9 @@ context-finder command --file request.json
 # From stdin
 echo '{"action": "search", "payload": {"query": "test"}}' | context-finder command
 ```
+
+Errors return `status: "error"` plus an `error` envelope (`code/message/details/hint/next_actions`).
+Both success and error responses may include `next_actions` when a follow-up is obvious.
 
 Cross-cutting options are supported under `options` (freshness policy, budgets, path filters):
 
@@ -392,6 +401,7 @@ Notes:
 | Action | Description |
 |--------|-------------|
 | `batch` | Execute multiple actions in one request (bounded output, partial success) |
+| `capabilities` | Return versions, default budgets, and recommended start route |
 | `index` | Index a project directory |
 | `search` | Semantic code search |
 | `search_with_context` | Search with surrounding context |

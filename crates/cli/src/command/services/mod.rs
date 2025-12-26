@@ -1,9 +1,11 @@
 mod batch;
+mod capabilities;
 mod compare;
 mod config;
 mod context;
 mod eval;
 mod index;
+mod repo_onboarding_pack;
 mod search;
 mod text_search;
 
@@ -17,11 +19,13 @@ use anyhow::Result;
 use serde_json::Value;
 
 pub struct Services {
+    capabilities: capabilities::CapabilitiesService,
     compare: compare::CompareService,
     config: config::ConfigService,
     context: context::ContextService,
     eval: eval::EvalService,
     index: index::IndexService,
+    repo_onboarding_pack: repo_onboarding_pack::RepoOnboardingPackService,
     search: search::SearchService,
     text_search: text_search::TextSearchService,
 }
@@ -33,11 +37,13 @@ impl Services {
         let health = HealthPort;
 
         Self {
+            capabilities: capabilities::CapabilitiesService,
             compare: compare::CompareService::new(cache.clone(), graph.clone(), health.clone()),
             config: config::ConfigService,
             context: context::ContextService,
             eval: eval::EvalService,
             index: index::IndexService::new(health.clone()),
+            repo_onboarding_pack: repo_onboarding_pack::RepoOnboardingPackService,
             search: search::SearchService::new(graph, health, cache),
             text_search: text_search::TextSearchService,
         }
@@ -62,6 +68,7 @@ impl Services {
         ctx: &CommandContext,
     ) -> Result<CommandOutcome> {
         match action {
+            CommandAction::Capabilities => self.capabilities.run(payload, ctx).await,
             CommandAction::Index => self.index.run(payload, ctx).await,
             CommandAction::Search => self.search.basic(payload, ctx).await,
             CommandAction::SearchWithContext => self.search.with_context(payload, ctx).await,
@@ -74,6 +81,7 @@ impl Services {
             CommandAction::ConfigRead => self.config.read(payload, ctx).await,
             CommandAction::CompareSearch => self.compare.run(payload, ctx).await,
             CommandAction::Map => self.context.map(payload, ctx).await,
+            CommandAction::RepoOnboardingPack => self.repo_onboarding_pack.run(payload, ctx).await,
             CommandAction::Eval => self.eval.run(payload, ctx).await,
             CommandAction::EvalCompare => self.eval.compare(payload, ctx).await,
         }

@@ -3,10 +3,12 @@ use super::super::{
     sample_file_paths, CallToolResult, Content, ContextFinderService, DoctorEnvResult,
     DoctorIndexDrift, DoctorProjectResult, DoctorRequest, DoctorResult, McpError,
 };
+use context_protocol::{DefaultBudgets, ToolNextAction};
 use context_vector_store::corpus_path_for_project_root;
+use serde_json::json;
 use std::path::Path;
 
-use super::error::{internal_error, invalid_request};
+use super::error::{internal_error_with_meta, invalid_request_with_meta, meta_for_request};
 async fn diagnose_project(
     root: &Path,
     issues: &mut Vec<String>,
@@ -119,10 +121,14 @@ pub(in crate::tools::dispatch) async fn doctor(
     let (model_manifest_exists, models) = match load_model_statuses(&model_dir).await {
         Ok(result) => result,
         Err(err) => {
-            return Ok(internal_error(format!(
-                "Failed to load model manifest {}: {err:#}",
-                manifest_path.display()
-            )));
+            let meta = meta_for_request(service, path.as_deref()).await;
+            return Ok(internal_error_with_meta(
+                format!(
+                    "Failed to load model manifest {}: {err:#}",
+                    manifest_path.display()
+                ),
+                meta,
+            ));
         }
     };
 
@@ -150,10 +156,14 @@ pub(in crate::tools::dispatch) async fn doctor(
         hints.push("Some models are missing assets. Run `context-finder install-models` to download them into the model directory.".into());
     }
 
-    let root = match service.resolve_root(path.as_deref()).await {
-        Ok((root, _)) => root,
-        Err(message) => return Ok(invalid_request(message)),
+    let (root, root_display) = match service.resolve_root(path.as_deref()).await {
+        Ok(value) => value,
+        Err(message) => {
+            let meta = meta_for_request(service, path.as_deref()).await;
+            return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
+        }
     };
+    let meta = service.tool_meta(&root).await;
     let project = diagnose_project(&root, &mut issues, &mut hints).await;
 
     let mut result = DoctorResult {
@@ -169,11 +179,40 @@ pub(in crate::tools::dispatch) async fn doctor(
         project,
         issues,
         hints,
-        meta: None,
+        next_actions: Vec::new(),
+        meta,
     };
-    result.meta = Some(service.tool_meta(&root).await);
+    if let Some(project) = result.project.as_ref() {
+        let budgets = DefaultBudgets::default();
+        if !project.has_corpus || project.indexed_models.is_empty() {
+            result.next_actions.push(ToolNextAction {
+                tool: "index".to_string(),
+                args: json!({ "path": root_display.clone() }),
+                reason: "Build the semantic index for this project.".to_string(),
+            });
+        }
+        result.next_actions.push(ToolNextAction {
+            tool: "repo_onboarding_pack".to_string(),
+            args: json!({
+                "path": root_display.clone(),
+                "max_chars": budgets.repo_onboarding_pack_max_chars
+            }),
+            reason: "Get a compact repo map + key docs for fast onboarding.".to_string(),
+        });
+        if project.has_corpus {
+            result.next_actions.push(ToolNextAction {
+                tool: "context_pack".to_string(),
+                args: json!({
+                    "path": root_display.clone(),
+                    "query": "project overview",
+                    "max_chars": budgets.context_pack_max_chars
+                }),
+                reason: "Build a bounded semantic overview after diagnostics.".to_string(),
+            });
+        }
+    }
 
     Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&result).unwrap_or_default(),
+        context_protocol::serialize_json(&result).unwrap_or_default(),
     )]))
 }

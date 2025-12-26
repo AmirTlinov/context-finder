@@ -65,7 +65,7 @@ Defaults are chosen heuristically for agent workflows:
     "dropped_items": 0
   },
   "meta": {
-    "index_state": { /* optional, see index_state.schema.json */ }
+    "index_state": { /* best-effort, see index_state.schema.json */ }
   }
 }
 ```
@@ -73,7 +73,8 @@ Defaults are chosen heuristically for agent workflows:
 ## Index freshness metadata
 
 `ContextPackOutput.meta.index_state` provides a best-effort snapshot of the current project
-watermark and index freshness. It is optional and may be omitted if unavailable.
+watermark and index freshness. It is included when the project root is resolvable; otherwise it
+may be null or omitted by the caller.
 
 - Canonical schema: [contracts/command/v1/index_state.schema.json](../contracts/command/v1/index_state.schema.json)
 

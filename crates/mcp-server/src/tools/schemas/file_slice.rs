@@ -1,4 +1,5 @@
 use context_indexer::ToolMeta;
+use context_protocol::BudgetTruncation;
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
@@ -46,12 +47,7 @@ pub(in crate::tools) struct FileSliceCursorV1 {
     pub(in crate::tools) file_mtime_ms: u64,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FileSliceTruncation {
-    MaxLines,
-    MaxChars,
-}
+pub type FileSliceTruncation = BudgetTruncation;
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct FileSliceResult {
@@ -69,8 +65,8 @@ pub struct FileSliceResult {
     pub next_cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_actions: Option<Vec<ToolNextAction>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolMeta>,
+    #[serde(default)]
+    pub meta: ToolMeta,
     pub file_size_bytes: u64,
     pub file_mtime_ms: u64,
     pub content_sha256: String,

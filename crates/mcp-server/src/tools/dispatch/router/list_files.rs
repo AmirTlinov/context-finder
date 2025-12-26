@@ -1,11 +1,13 @@
 use super::super::{
-    compute_list_files_result, decode_list_files_cursor, CallToolResult, Content,
-    ContextFinderService, ListFilesRequest, McpError, CURSOR_VERSION,
+    compute_list_files_result, decode_list_files_cursor, finalize_list_files_budget,
+    CallToolResult, Content, ContextFinderService, ListFilesRequest, McpError, CURSOR_VERSION,
 };
 use crate::tools::schemas::ToolNextAction;
 use serde_json::json;
 
-use super::error::{internal_error, invalid_cursor, invalid_request};
+use super::error::{
+    internal_error_with_meta, invalid_cursor_with_meta, invalid_request_with_meta, meta_for_request,
+};
 
 /// List project files within the project root (safe file enumeration for agents).
 pub(in crate::tools::dispatch) async fn list_files(
@@ -19,8 +21,12 @@ pub(in crate::tools::dispatch) async fn list_files(
 
     let (root, root_display) = match service.resolve_root(request.path.as_deref()).await {
         Ok(value) => value,
-        Err(message) => return Ok(invalid_request(message)),
+        Err(message) => {
+            let meta = meta_for_request(service, request.path.as_deref()).await;
+            return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
+        }
     };
+    let meta = service.tool_meta(&root).await;
 
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let max_chars = request
@@ -44,17 +50,29 @@ pub(in crate::tools::dispatch) async fn list_files(
         let decoded = match decode_list_files_cursor(cursor) {
             Ok(v) => v,
             Err(err) => {
-                return Ok(invalid_cursor(format!("Invalid cursor: {err}")));
+                return Ok(invalid_cursor_with_meta(
+                    format!("Invalid cursor: {err}"),
+                    meta.clone(),
+                ));
             }
         };
         if decoded.v != CURSOR_VERSION || decoded.tool != "list_files" {
-            return Ok(invalid_cursor("Invalid cursor: wrong tool"));
+            return Ok(invalid_cursor_with_meta(
+                "Invalid cursor: wrong tool",
+                meta.clone(),
+            ));
         }
         if decoded.root != root_display {
-            return Ok(invalid_cursor("Invalid cursor: different root"));
+            return Ok(invalid_cursor_with_meta(
+                "Invalid cursor: different root",
+                meta.clone(),
+            ));
         }
         if decoded.file_pattern != normalized_file_pattern {
-            return Ok(invalid_cursor("Invalid cursor: different file_pattern"));
+            return Ok(invalid_cursor_with_meta(
+                "Invalid cursor: different file_pattern",
+                meta.clone(),
+            ));
         }
         Some(decoded.last_file)
     } else {
@@ -72,10 +90,13 @@ pub(in crate::tools::dispatch) async fn list_files(
     {
         Ok(result) => result,
         Err(err) => {
-            return Ok(internal_error(format!("Error: {err:#}")));
+            return Ok(internal_error_with_meta(
+                format!("Error: {err:#}"),
+                meta.clone(),
+            ))
         }
     };
-    result.meta = Some(service.tool_meta(&root).await);
+    result.meta = meta.clone();
     if let Some(cursor) = result.next_cursor.clone() {
         result.next_actions = Some(vec![ToolNextAction {
             tool: "list_files".to_string(),
@@ -89,8 +110,27 @@ pub(in crate::tools::dispatch) async fn list_files(
             reason: "Continue list_files pagination with the next cursor.".to_string(),
         }]);
     }
+    if let Err(err) = finalize_list_files_budget(&mut result) {
+        let suggested = max_chars.saturating_mul(2).clamp(1, MAX_MAX_CHARS);
+        return Ok(invalid_request_with_meta(
+            format!("max_chars too small for response envelope ({err:#})"),
+            meta,
+            Some(format!("Increase max_chars (suggested: {suggested}).")),
+            vec![ToolNextAction {
+                tool: "list_files".to_string(),
+                args: json!({
+                    "path": root_display,
+                    "file_pattern": request.file_pattern,
+                    "limit": limit,
+                    "max_chars": suggested,
+                    "cursor": request.cursor
+                }),
+                reason: "Retry list_files with a larger max_chars budget.".to_string(),
+            }],
+        ));
+    }
 
     Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&result).unwrap_or_default(),
+        context_protocol::serialize_json(&result).unwrap_or_default(),
     )]))
 }

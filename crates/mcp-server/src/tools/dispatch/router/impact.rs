@@ -5,16 +5,17 @@ use super::super::{
 use crate::tools::util::path_has_extension_ignore_ascii_case;
 use context_code_chunker::CodeChunk;
 use context_graph::CodeGraph;
+use context_indexer::ToolMeta;
 use petgraph::graph::NodeIndex;
 use std::collections::HashSet;
 
-use super::error::{internal_error, invalid_request};
+use super::error::{internal_error_with_meta, invalid_request_with_meta, meta_for_request};
 const MAX_DIRECT: usize = 200;
 const MAX_TRANSITIVE: usize = 200;
 
 fn success_payload(result: &ImpactResult) -> CallToolResult {
     CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(result).unwrap_or_default(),
+        context_protocol::serialize_json(result).unwrap_or_default(),
     )])
 }
 
@@ -33,7 +34,7 @@ fn best_effort_text_only(symbol: String, chunks: &[CodeChunk]) -> ImpactResult {
         tests: Vec::new(),
         public_api: false,
         mermaid,
-        meta: None,
+        meta: ToolMeta { index_state: None },
     }
 }
 
@@ -164,7 +165,8 @@ pub(in crate::tools::dispatch) async fn impact(
     let root = match service.resolve_root(request.path.as_deref()).await {
         Ok((root, _)) => root,
         Err(message) => {
-            return Ok(invalid_request(message));
+            let meta = meta_for_request(service, request.path.as_deref()).await;
+            return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
         }
     };
 
@@ -172,7 +174,8 @@ pub(in crate::tools::dispatch) async fn impact(
     let (mut engine, meta) = match service.prepare_semantic_engine(&root, policy).await {
         Ok(engine) => engine,
         Err(e) => {
-            return Ok(internal_error(format!("Error: {e}")));
+            let meta = service.tool_meta(&root).await;
+            return Ok(internal_error_with_meta(format!("Error: {e}"), meta));
         }
     };
 
@@ -242,7 +245,7 @@ pub(in crate::tools::dispatch) async fn impact(
                             tests,
                             public_api,
                             mermaid,
-                            meta: None,
+                            meta: ToolMeta { index_state: None },
                         }
                     }
                 }
@@ -254,6 +257,6 @@ pub(in crate::tools::dispatch) async fn impact(
     };
 
     drop(engine);
-    result.meta = Some(meta);
+    result.meta = meta;
     Ok(success_payload(&result))
 }

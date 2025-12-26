@@ -1,10 +1,13 @@
 use anyhow::Result;
+use context_protocol::{
+    BudgetTruncation, Capabilities, DefaultBudgets, ErrorEnvelope, ToolNextAction,
+};
 pub use context_search::{ContextPackBudget, ContextPackItem, ContextPackOutput};
 pub use context_search::{
     NextAction, NextActionKind, TaskPackItem, TaskPackOutput, TASK_PACK_VERSION,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
 pub const DEFAULT_LIMIT: usize = 10;
@@ -35,14 +38,39 @@ pub enum CommandAction {
     TaskPack,
     TextSearch,
     Batch,
+    Capabilities,
     Index,
     GetContext,
     ListSymbols,
     ConfigRead,
     CompareSearch,
     Map,
+    RepoOnboardingPack,
     Eval,
     EvalCompare,
+}
+
+impl CommandAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            CommandAction::Search => "search",
+            CommandAction::SearchWithContext => "search_with_context",
+            CommandAction::ContextPack => "context_pack",
+            CommandAction::TaskPack => "task_pack",
+            CommandAction::TextSearch => "text_search",
+            CommandAction::Batch => "batch",
+            CommandAction::Capabilities => "capabilities",
+            CommandAction::Index => "index",
+            CommandAction::GetContext => "get_context",
+            CommandAction::ListSymbols => "list_symbols",
+            CommandAction::ConfigRead => "config_read",
+            CommandAction::CompareSearch => "compare_search",
+            CommandAction::Map => "map",
+            CommandAction::RepoOnboardingPack => "repo_onboarding_pack",
+            CommandAction::Eval => "eval",
+            CommandAction::EvalCompare => "eval_compare",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +97,8 @@ pub struct BatchBudget {
     pub max_chars: usize,
     pub used_chars: usize,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<BudgetTruncation>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -77,6 +107,8 @@ pub struct BatchItemResult {
     pub status: CommandStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorEnvelope>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<Hint>,
     #[serde(default)]
@@ -90,6 +122,8 @@ pub struct BatchOutput {
     pub version: u32,
     pub items: Vec<BatchItemResult>,
     pub budget: BatchBudget,
+    #[serde(default)]
+    pub next_actions: Vec<ToolNextAction>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,8 +131,12 @@ pub struct CommandResponse {
     pub status: CommandStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorEnvelope>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<Hint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<ToolNextAction>,
     #[serde(default)]
     pub data: Value,
     #[serde(default)]
@@ -134,6 +172,14 @@ pub enum HintKind {
     Action,
     Warn,
     Deprecation,
+}
+
+#[derive(Debug, Clone)]
+pub struct ErrorClassification {
+    pub code: String,
+    pub hint: Option<String>,
+    pub hints: Vec<Hint>,
+    pub next_actions: Vec<ToolNextAction>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -244,7 +290,7 @@ pub struct ResponseMeta {
     pub profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub index_state: Option<context_indexer::IndexState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compare_avg_baseline_ms: Option<f32>,
@@ -260,6 +306,7 @@ pub struct CommandOutcome {
     pub data: Value,
     pub hints: Vec<Hint>,
     pub meta: ResponseMeta,
+    pub next_actions: Vec<ToolNextAction>,
 }
 
 impl CommandOutcome {
@@ -268,6 +315,7 @@ impl CommandOutcome {
             data: serde_json::to_value(value)?,
             hints: Vec::new(),
             meta: ResponseMeta::default(),
+            next_actions: Vec::new(),
         })
     }
 }
@@ -732,6 +780,9 @@ pub struct ConfigReadResponse {
     pub config: Option<Value>,
 }
 
+#[allow(dead_code)]
+pub type CapabilitiesResponse = Capabilities;
+
 #[derive(Serialize, Deserialize)]
 pub struct SearchOutput {
     pub query: String,
@@ -842,7 +893,7 @@ pub struct SymbolsOutput {
     pub files_count: Option<usize>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SymbolInfo {
     pub name: String,
     #[serde(rename = "type")]
@@ -869,7 +920,7 @@ fn map_default_depth() -> usize {
     2
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MapOutput {
     pub nodes: Vec<MapNode>,
     pub total_files: usize,
@@ -884,7 +935,7 @@ pub struct MapOutput {
     pub coverage_lines_pct: Option<f32>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MapNode {
     pub path: String,
     pub files: usize,
@@ -901,18 +952,111 @@ pub struct MapNode {
     pub avg_symbol_coverage: Option<f32>,
 }
 
-pub fn classify_error(message: &str) -> Vec<Hint> {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RepoOnboardingPackPayload {
+    #[serde(default, alias = "path")]
+    pub project: Option<PathBuf>,
+    #[serde(default)]
+    pub map_depth: Option<usize>,
+    #[serde(default)]
+    pub map_limit: Option<usize>,
+    #[serde(default)]
+    pub doc_paths: Option<Vec<String>>,
+    #[serde(default)]
+    pub docs_limit: Option<usize>,
+    #[serde(default)]
+    pub doc_max_lines: Option<usize>,
+    #[serde(default)]
+    pub doc_max_chars: Option<usize>,
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+    #[serde(default)]
+    pub auto_index: Option<bool>,
+    #[serde(default)]
+    pub auto_index_budget_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoOnboardingDocsReason {
+    DocsLimitZero,
+    NoDocCandidates,
+    DocsNotFound,
+    MaxChars,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RepoOnboardingPackBudget {
+    pub max_chars: usize,
+    pub used_chars: usize,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<BudgetTruncation>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RepoOnboardingDocSlice {
+    pub file: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub returned_lines: usize,
+    pub used_chars: usize,
+    pub max_lines: usize,
+    pub max_chars: usize,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<BudgetTruncation>,
+    pub file_size_bytes: u64,
+    pub file_mtime_ms: u64,
+    pub content_sha256: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RepoOnboardingPackOutput {
+    pub version: u32,
+    pub root: String,
+    pub map: MapOutput,
+    pub docs: Vec<RepoOnboardingDocSlice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docs_reason: Option<RepoOnboardingDocsReason>,
+    pub next_actions: Vec<ToolNextAction>,
+    pub budget: RepoOnboardingPackBudget,
+}
+
+pub fn classify_error(
+    message: &str,
+    action: Option<CommandAction>,
+    payload: Option<&Value>,
+) -> ErrorClassification {
     let mut hints = Vec::new();
+    let mut next_actions = Vec::new();
+    let mut code = "internal".to_string();
+    let mut hint = None;
 
     if message.contains("Index not found") {
+        code = "index_missing".to_string();
+        hint = Some(
+            "Index missing — run action=index with payload.path set to the project root."
+                .to_string(),
+        );
         hints.push(Hint {
             kind: HintKind::Action,
-            text: "Index missing — run Command {\"action\":\"index\",\"payload\":{\"path\":\".\"}} to build it."
-                .to_string(),
+            text: hint.clone().expect("hint"),
         });
+        let path = extract_project_path(payload).unwrap_or_else(|| ".".to_string());
+        if action != Some(CommandAction::Index) {
+            next_actions.push(ToolNextAction {
+                tool: CommandAction::Index.as_str().to_string(),
+                args: json!({ "path": path }),
+                reason: "Build the semantic index (required for search/context/context_pack)."
+                    .to_string(),
+            });
+        }
     }
 
     if message.contains("Failed to load vector store") {
+        code = "index_corrupt".to_string();
         hints.push(Hint {
             kind: HintKind::Action,
             text: "Index file looks corrupted — delete .context-finder/indexes/<model_id>/index.json and rerun the index action.".to_string(),
@@ -920,6 +1064,7 @@ pub fn classify_error(message: &str) -> Vec<Hint> {
     }
 
     if message.contains("Failed to read metadata") {
+        code = "filesystem_error".to_string();
         hints.push(Hint {
             kind: HintKind::Warn,
             text: "Filesystem metadata unavailable — check permissions or run from inside the project directory.".to_string(),
@@ -927,6 +1072,7 @@ pub fn classify_error(message: &str) -> Vec<Hint> {
     }
 
     if message.to_lowercase().contains("graph language") {
+        code = "invalid_request".to_string();
         hints.push(Hint {
             kind: HintKind::Action,
             text: "Specify graph_language in config or payload to enable context graph assembly."
@@ -935,6 +1081,7 @@ pub fn classify_error(message: &str) -> Vec<Hint> {
     }
 
     if message.to_lowercase().contains("config") {
+        code = "config_error".to_string();
         hints.push(Hint {
             kind: HintKind::Warn,
             text: "Config issue detected — verify .context-finder/config.json or remove it."
@@ -943,6 +1090,7 @@ pub fn classify_error(message: &str) -> Vec<Hint> {
     }
 
     if message.contains("Project path does not exist") {
+        code = "invalid_request".to_string();
         hints.push(Hint {
             kind: HintKind::Action,
             text: "Check payload.path/project or run from the repository root.".to_string(),
@@ -950,6 +1098,7 @@ pub fn classify_error(message: &str) -> Vec<Hint> {
     }
 
     if message.contains("File not found") {
+        code = "invalid_request".to_string();
         hints.push(Hint {
             kind: HintKind::Action,
             text: "Verify the 'file' value is relative to project root and exists on disk."
@@ -957,5 +1106,91 @@ pub fn classify_error(message: &str) -> Vec<Hint> {
         });
     }
 
-    hints
+    if message.contains("max_chars too small") {
+        code = "invalid_request".to_string();
+        hints.push(Hint {
+            kind: HintKind::Action,
+            text: "Increase max_chars; current budget is too small for the response envelope."
+                .to_string(),
+        });
+        let min_chars = parse_min_chars(message);
+        if let Some(action) = action {
+            if let Some(mut max_chars) = default_max_chars_for_action(action) {
+                if let Some(min_chars) = min_chars {
+                    max_chars = max_chars.max(min_chars);
+                }
+                let args = build_retry_args(payload, max_chars);
+                next_actions.push(ToolNextAction {
+                    tool: action.as_str().to_string(),
+                    args,
+                    reason: format!("Retry {} with max_chars={}.", action.as_str(), max_chars),
+                });
+            }
+        }
+    }
+
+    if message.contains("budget exceeded") {
+        code = "invalid_request".to_string();
+        hints.push(Hint {
+            kind: HintKind::Action,
+            text: "Increase max_chars; response budget was exceeded.".to_string(),
+        });
+        if let Some(action) = action {
+            if let Some(max_chars) = default_max_chars_for_action(action) {
+                let args = build_retry_args(payload, max_chars);
+                next_actions.push(ToolNextAction {
+                    tool: action.as_str().to_string(),
+                    args,
+                    reason: format!("Retry {} with max_chars={}.", action.as_str(), max_chars),
+                });
+            }
+        }
+    }
+
+    if hint.is_none() {
+        hint = hints.first().map(|h| h.text.clone());
+    }
+
+    ErrorClassification {
+        code,
+        hint,
+        hints,
+        next_actions,
+    }
+}
+
+fn extract_project_path(payload: Option<&Value>) -> Option<String> {
+    let payload = payload?;
+    payload
+        .get("project")
+        .or_else(|| payload.get("path"))
+        .and_then(Value::as_str)
+        .map(|value| value.to_string())
+}
+
+fn parse_min_chars(message: &str) -> Option<usize> {
+    let (_, tail) = message.split_once("min_chars=")?;
+    let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+fn build_retry_args(payload: Option<&Value>, max_chars: usize) -> Value {
+    let mut map = payload
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    map.insert("max_chars".to_string(), Value::Number(max_chars.into()));
+    Value::Object(map)
+}
+
+fn default_max_chars_for_action(action: CommandAction) -> Option<usize> {
+    let budgets = DefaultBudgets::default();
+    match action {
+        CommandAction::ContextPack | CommandAction::TaskPack => {
+            Some(budgets.context_pack_max_chars)
+        }
+        CommandAction::RepoOnboardingPack => Some(budgets.repo_onboarding_pack_max_chars),
+        CommandAction::Batch => Some(budgets.batch_max_chars),
+        _ => None,
+    }
 }

@@ -521,6 +521,7 @@ dependencies = [
  "context-code-chunker",
  "context-graph",
  "context-indexer",
+ "context-protocol",
  "context-search",
  "context-vector-store",
  "dirs",
@@ -552,6 +553,7 @@ dependencies = [
  "context-code-chunker",
  "context-graph",
  "context-indexer",
+ "context-protocol",
  "context-search",
  "context-vector-store",
  "dirs",
@@ -610,6 +612,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "context-protocol"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "context-search"
 version = "0.1.1"
 dependencies = [
@@ -617,6 +629,7 @@ dependencies = [
  "context-code-chunker",
  "context-graph",
  "context-indexer",
+ "context-protocol",
  "context-vector-store",
  "globset",
  "log",

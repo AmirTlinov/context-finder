@@ -172,9 +172,10 @@ async fn grep_context_can_be_case_insensitive_and_reports_max_chars_truncation()
     let tmp = tempfile::tempdir().context("tempdir")?;
     let root = tmp.path();
     std::fs::create_dir_all(root.join("src")).context("mkdir src")?;
+    let long_tail = "c".repeat(20_000);
     std::fs::write(
         root.join("src").join("main.txt"),
-        "aaa\nTARGETTARGETTARGETTARGET\ncccccccccccccccccccc\n",
+        format!("aaa\nTARGETTARGETTARGETTARGET\n{long_tail}\n"),
     )
     .context("write main.txt")?;
 
@@ -191,7 +192,7 @@ async fn grep_context_can_be_case_insensitive_and_reports_max_chars_truncation()
         "after": 1,
         "max_matches": 10,
         "max_hunks": 10,
-        "max_chars": 35,
+        "max_chars": 8000,
         "case_sensitive": false,
     });
     let result = tokio::time::timeout(
@@ -244,7 +245,7 @@ async fn grep_context_can_be_case_insensitive_and_reports_max_chars_truncation()
         "expected match line in content, got: {content:?}"
     );
     assert!(
-        !content.contains("cccccccccccccccccccc"),
+        !content.contains(&long_tail),
         "expected last context line to be truncated"
     );
 

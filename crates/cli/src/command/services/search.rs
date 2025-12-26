@@ -15,6 +15,7 @@ use anyhow::{anyhow, Context as AnyhowContext, Result};
 use context_graph::{
     build_graph_docs, ContextAssembler, GraphDocConfig, GraphLanguage, GRAPH_DOC_VERSION,
 };
+use context_protocol::{enforce_max_chars, finalize_used_chars, BudgetTruncation, ToolNextAction};
 use context_search::{EnrichedResult, RelatedContext};
 use context_search::{
     MultiModelContextSearch, MultiModelHybridSearch, QueryClassifier, QueryType, SearchProfile,
@@ -795,6 +796,20 @@ impl SearchService {
             &query_tokens,
         );
 
+        let query = payload.query.clone();
+        let project_root = project_ctx.root.display().to_string();
+        let mut output = ContextPackOutput {
+            version: CONTEXT_PACK_VERSION,
+            query: query.clone(),
+            model_id,
+            profile: project_ctx.profile_name.clone(),
+            items,
+            budget,
+            next_actions: Vec::new(),
+            meta: context_indexer::ToolMeta { index_state: None },
+        };
+        enforce_context_pack_budget(&mut output)?;
+
         let debug_hints = if trace {
             let query_kind = match query_type {
                 QueryType::Identifier => QueryKind::Identifier,
@@ -850,11 +865,11 @@ impl SearchService {
                     kind: HintKind::Info,
                     text: format!(
                         "debug: pack items={} chars={}/{} truncated={} dropped={}",
-                        items.len(),
-                        budget.used_chars,
-                        budget.max_chars,
-                        budget.truncated,
-                        budget.dropped_items
+                        output.items.len(),
+                        output.budget.used_chars,
+                        output.budget.max_chars,
+                        output.budget.truncated,
+                        output.budget.dropped_items
                     ),
                 },
             ]
@@ -863,7 +878,7 @@ impl SearchService {
         };
 
         if trace {
-            for item in &items {
+            for item in &output.items {
                 debug!(
                     "pack item: {} {}:{}-{} ({})",
                     item.role, item.file, item.start_line, item.end_line, item.score
@@ -871,16 +886,20 @@ impl SearchService {
             }
         }
 
-        let output = ContextPackOutput {
-            version: CONTEXT_PACK_VERSION,
-            query: payload.query.clone(),
-            model_id,
-            profile: project_ctx.profile_name.clone(),
-            items,
-            budget,
-            meta: None,
+        let budget_truncated = output.budget.truncated;
+        let next_max_chars = output.budget.max_chars.saturating_mul(2).min(500_000);
+        let retry_action = ToolNextAction {
+            tool: "context_pack".to_string(),
+            args: serde_json::json!({
+                "project": project_root,
+                "query": query,
+                "max_chars": next_max_chars
+            }),
+            reason: "Retry context_pack with a larger max_chars budget.".to_string(),
         };
-
+        if budget_truncated {
+            output.next_actions.push(retry_action.clone());
+        }
         let mut outcome = CommandOutcome::from_value(output)?;
         outcome.hints.extend(debug_hints);
         outcome.meta.graph_cache = Some(graph_cache_used);
@@ -913,6 +932,9 @@ impl SearchService {
                 kind: HintKind::Info,
                 text: format!("Path filters excluded {filtered_out} pack items"),
             });
+        }
+        if budget_truncated {
+            outcome.next_actions.push(retry_action);
         }
         self.health.attach(&project_ctx.root, &mut outcome).await;
         Ok(outcome)
@@ -1450,9 +1472,40 @@ fn pack_enriched_results(
             used_chars,
             truncated,
             dropped_items,
+            truncation: truncated.then_some(BudgetTruncation::MaxChars),
         },
         filtered_out,
     )
+}
+
+fn enforce_context_pack_budget(output: &mut ContextPackOutput) -> Result<()> {
+    let max_chars = output.budget.max_chars;
+    let used = enforce_max_chars(
+        output,
+        max_chars,
+        |inner, used| inner.budget.used_chars = used,
+        |inner| {
+            inner.budget.truncated = true;
+            if inner.budget.truncation.is_none() {
+                inner.budget.truncation = Some(BudgetTruncation::MaxChars);
+            }
+        },
+        |inner| {
+            if !inner.items.is_empty() {
+                inner.items.pop();
+                inner.budget.dropped_items += 1;
+                return true;
+            }
+            false
+        },
+    )
+    .map_err(|_| {
+        let min_chars = finalize_used_chars(output, |inner, used| inner.budget.used_chars = used)
+            .unwrap_or(output.budget.used_chars);
+        anyhow!("max_chars too small for context_pack response (min_chars={min_chars})")
+    })?;
+    output.budget.used_chars = used;
+    Ok(())
 }
 
 fn estimate_item_chars(item: &ContextPackItem) -> usize {

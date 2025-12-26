@@ -90,9 +90,9 @@ pub struct StaleAssessment {
     pub reasons: Vec<StaleReason>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
 pub struct ToolMeta {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub index_state: Option<IndexState>,
 }
 

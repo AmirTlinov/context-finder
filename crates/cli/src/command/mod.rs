@@ -18,6 +18,7 @@ pub use domain::{
 };
 
 use crate::cache::CacheConfig;
+use context_protocol::ErrorEnvelope;
 use domain::CommandOutcome;
 use services::Services;
 use std::time::Instant;
@@ -45,8 +46,7 @@ impl CommandHandler {
 
         let ctx = context::CommandContext::new(config, options);
         let request_options = ctx.request_options();
-        let attach_index_state_fallback =
-            freshness::action_requires_index(&action) || matches!(action, CommandAction::Index);
+        let attach_index_state_fallback = true;
 
         let mut guard_index_state = None;
         let mut guard_hints = Vec::new();
@@ -82,14 +82,32 @@ impl CommandHandler {
                                 ..Default::default()
                             };
 
-                            let mut hints = block.hints;
+                            let classification = classify_error(
+                                &block.message,
+                                Some(action),
+                                Some(&payload_for_meta),
+                            );
+                            let mut hints = classification.hints;
+                            hints.extend(block.hints);
                             hints.extend(project_ctx.hints);
-                            hints.extend(domain::classify_error(&block.message));
+                            let hint = classification
+                                .hint
+                                .or_else(|| hints.first().map(|h| h.text.clone()));
+
+                            let error = ErrorEnvelope {
+                                code: classification.code,
+                                message: block.message.clone(),
+                                details: None,
+                                hint,
+                                next_actions: classification.next_actions.clone(),
+                            };
 
                             return CommandResponse {
                                 status: CommandStatus::Error,
                                 message: Some(block.message),
+                                error: Some(error),
                                 hints,
+                                next_actions: classification.next_actions,
                                 data: serde_json::Value::Null,
                                 meta,
                             };
@@ -125,14 +143,18 @@ impl CommandHandler {
                 CommandResponse {
                     status: CommandStatus::Ok,
                     message: None,
+                    error: None,
                     hints: outcome.hints,
+                    next_actions: outcome.next_actions,
                     data: outcome.data,
                     meta: outcome.meta,
                 }
             }
             Err(err) => {
                 let message = format!("{err:#}");
-                let mut hints = domain::classify_error(&message);
+                let classification =
+                    classify_error(&message, Some(action), Some(&payload_for_meta));
+                let mut hints = classification.hints;
                 if guard_index_updated {
                     hints.push(Hint {
                         kind: HintKind::Cache,
@@ -140,6 +162,16 @@ impl CommandHandler {
                     });
                 }
                 hints.extend(guard_hints);
+                let hint = classification
+                    .hint
+                    .or_else(|| hints.first().map(|h| h.text.clone()));
+                let error = ErrorEnvelope {
+                    code: classification.code,
+                    message: message.clone(),
+                    details: None,
+                    hint,
+                    next_actions: classification.next_actions.clone(),
+                };
                 let meta = ResponseMeta {
                     duration_ms: Some(started.elapsed().as_millis() as u64),
                     index_state: guard_index_state,
@@ -149,7 +181,9 @@ impl CommandHandler {
                 CommandResponse {
                     status: CommandStatus::Error,
                     message: Some(message),
+                    error: Some(error),
                     hints,
+                    next_actions: classification.next_actions,
                     data: serde_json::Value::Null,
                     meta,
                 }
@@ -176,11 +210,24 @@ impl CommandHandler {
 
 fn error_response(err: anyhow::Error, duration_ms: u64) -> CommandResponse {
     let message = format!("{err:#}");
-    let hints = domain::classify_error(&message);
+    let classification = classify_error(&message, None, None);
+    let hints = classification.hints;
+    let hint = classification
+        .hint
+        .or_else(|| hints.first().map(|h| h.text.clone()));
+    let error = ErrorEnvelope {
+        code: classification.code,
+        message: message.clone(),
+        details: None,
+        hint,
+        next_actions: classification.next_actions.clone(),
+    };
     CommandResponse {
         status: CommandStatus::Error,
         message: Some(message),
+        error: Some(error),
         hints,
+        next_actions: classification.next_actions,
         data: serde_json::Value::Null,
         meta: ResponseMeta {
             duration_ms: Some(duration_ms),

@@ -5,12 +5,16 @@ use super::super::{
     ContextPackRequest, GraphDocConfig, GraphNodeDoc, GraphNodeStore, GraphNodeStoreMeta, McpError,
     QueryClassifier, QueryKind, QueryType, RelatedMode, CONTEXT_PACK_VERSION, GRAPH_DOC_VERSION,
 };
+use context_protocol::{enforce_max_chars, BudgetTruncation, ErrorEnvelope, ToolNextAction};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 type ToolResult<T> = std::result::Result<T, CallToolResult>;
 
-use super::error::{internal_error, invalid_request};
+use super::error::{
+    attach_meta, index_recovery_actions, internal_error, internal_error_with_meta, invalid_request,
+    invalid_request_with_meta, meta_for_request, tool_error_envelope_with_meta,
+};
 
 #[derive(Clone, Copy, Debug)]
 struct ContextPackFlags(u8);
@@ -88,6 +92,35 @@ fn parse_related_mode(
             "Error: related_mode must be 'explore' or 'focus'",
         )),
     }
+}
+
+fn enforce_context_pack_budget(output: &mut ContextPackOutput) -> ToolResult<()> {
+    let max_chars = output.budget.max_chars;
+    enforce_max_chars(
+        output,
+        max_chars,
+        |inner, used| inner.budget.used_chars = used,
+        |inner| {
+            inner.budget.truncated = true;
+            if inner.budget.truncation.is_none() {
+                inner.budget.truncation = Some(BudgetTruncation::MaxChars);
+            }
+        },
+        |inner| {
+            if !inner.items.is_empty() {
+                inner.items.pop();
+                inner.budget.dropped_items += 1;
+                return true;
+            }
+            false
+        },
+    )
+    .map(|_| ())
+    .map_err(|err| {
+        invalid_request(format!(
+            "Error: max_chars too small for response envelope ({err:#})"
+        ))
+    })
 }
 
 fn parse_inputs(request: &ContextPackRequest) -> ToolResult<ContextPackInputs> {
@@ -451,7 +484,7 @@ fn append_trace_debug(
         }
     });
     contents.push(Content::text(
-        serde_json::to_string_pretty(&debug).unwrap_or_default(),
+        context_protocol::serialize_json(&debug).unwrap_or_default(),
     ));
 }
 
@@ -462,12 +495,18 @@ pub(in crate::tools::dispatch) async fn context_pack(
 ) -> Result<CallToolResult, McpError> {
     let inputs = match parse_inputs(&request) {
         Ok(parsed) => parsed,
-        Err(err) => return Ok(err),
+        Err(err) => {
+            let meta = meta_for_request(service, request.path.as_deref()).await;
+            return Ok(attach_meta(err, meta));
+        }
     };
 
-    let root = match service.resolve_root(inputs.path.as_deref()).await {
-        Ok((root, _)) => root,
-        Err(message) => return Ok(invalid_request(message)),
+    let (root, root_display) = match service.resolve_root(inputs.path.as_deref()).await {
+        Ok(value) => value,
+        Err(message) => {
+            let meta = meta_for_request(service, inputs.path.as_deref()).await;
+            return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
+        }
     };
 
     let policy = AutoIndexPolicy::from_request(
@@ -476,12 +515,33 @@ pub(in crate::tools::dispatch) async fn context_pack(
     );
     let (mut engine, meta) = match service.prepare_semantic_engine(&root, policy).await {
         Ok(engine) => engine,
-        Err(err) => return Ok(internal_error(format!("Error: {err}"))),
+        Err(err) => {
+            let message = format!("Error: {err}");
+            let meta = service.tool_meta(&root).await;
+            if message.contains("Index not found")
+                || message.contains("No semantic indices available")
+            {
+                return Ok(tool_error_envelope_with_meta(
+                    ErrorEnvelope {
+                        code: "index_missing".to_string(),
+                        message,
+                        details: None,
+                        hint: Some("Index missing — run index (see next_actions).".to_string()),
+                        next_actions: index_recovery_actions(&root_display),
+                    },
+                    meta,
+                ));
+            }
+            return Ok(internal_error_with_meta(message, meta));
+        }
     };
 
     let language = select_language(request.language.as_deref(), &mut engine);
     if let Err(err) = engine.engine_mut().ensure_graph(language).await {
-        return Ok(internal_error(format!("Graph build error: {err}")));
+        return Ok(internal_error_with_meta(
+            format!("Graph build error: {err}"),
+            meta.clone(),
+        ));
     }
 
     let available_models = engine.engine_mut().available_models.clone();
@@ -495,7 +555,10 @@ pub(in crate::tools::dispatch) async fn context_pack(
     {
         Ok(r) => r,
         Err(e) => {
-            return Ok(internal_error(format!("Search error: {e}")));
+            return Ok(internal_error_with_meta(
+                format!("Search error: {e}"),
+                meta.clone(),
+            ));
         }
     };
 
@@ -511,7 +574,7 @@ pub(in crate::tools::dispatch) async fn context_pack(
     if let Err(err) =
         maybe_apply_graph_nodes(service, graph_nodes_ctx, &mut enriched, &mut engine).await
     {
-        return Ok(err);
+        return Ok(attach_meta(err, meta.clone()));
     }
 
     drop(engine);
@@ -532,19 +595,43 @@ pub(in crate::tools::dispatch) async fn context_pack(
         &inputs.query_tokens,
     );
     let model_id = current_model_id().unwrap_or_else(|_| "bge-small".to_string());
-    let output = ContextPackOutput {
+    let query = request.query.clone();
+    let mut output = ContextPackOutput {
         version: CONTEXT_PACK_VERSION,
-        query: request.query,
+        query: query.clone(),
         model_id,
         profile: service.profile.name().to_string(),
         items,
         budget,
-        meta: Some(meta),
+        next_actions: Vec::new(),
+        meta,
     };
+    let next_max_chars = output.budget.max_chars.saturating_mul(2).min(500_000);
+    let retry_action = ToolNextAction {
+        tool: "context_pack".to_string(),
+        args: serde_json::json!({
+            "path": root_display,
+            "query": query,
+            "max_chars": next_max_chars
+        }),
+        reason: "Retry context_pack with a larger max_chars budget.".to_string(),
+    };
+    if output.budget.truncated {
+        output.next_actions.push(retry_action.clone());
+    }
+    if let Err(result) = enforce_context_pack_budget(&mut output) {
+        return Ok(result);
+    }
+    if output.budget.truncated && output.next_actions.is_empty() {
+        output.next_actions.push(retry_action);
+        if let Err(result) = enforce_context_pack_budget(&mut output) {
+            return Ok(result);
+        }
+    }
 
     let mut contents = Vec::new();
     contents.push(Content::text(
-        serde_json::to_string_pretty(&output).unwrap_or_default(),
+        context_protocol::serialize_json(&output).unwrap_or_default(),
     ));
 
     if inputs.flags.trace() {

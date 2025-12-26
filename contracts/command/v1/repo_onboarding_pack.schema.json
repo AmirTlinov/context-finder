@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/command/v1/repo_onboarding_pack.schema.json",
+  "title": "Repo Onboarding Pack Output (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "root", "map", "docs", "next_actions", "budget"],
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "root": { "type": "string" },
+    "map": { "$ref": "#/$defs/map_output" },
+    "docs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/doc_slice" }
+    },
+    "docs_reason": {
+      "description": "Why docs are empty when no slices were returned.",
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/docs_reason" }
+      ],
+      "default": null
+    },
+    "next_actions": {
+      "type": "array",
+      "description": "Next-step tool/actions for agents (may be empty).",
+      "items": { "$ref": "./next_action.schema.json" },
+      "default": []
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_chars", "used_chars", "truncated"],
+      "properties": {
+        "max_chars": { "type": "integer", "minimum": 0 },
+        "used_chars": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "truncation": { "$ref": "./budget_truncation.schema.json" }
+      }
+    }
+  },
+  "$defs": {
+    "docs_reason": {
+      "type": "string",
+      "enum": ["docs_limit_zero", "no_doc_candidates", "docs_not_found", "max_chars"]
+    },
+    "doc_slice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file",
+        "start_line",
+        "end_line",
+        "returned_lines",
+        "used_chars",
+        "max_lines",
+        "max_chars",
+        "truncated",
+        "file_size_bytes",
+        "file_mtime_ms",
+        "content_sha256",
+        "content"
+      ],
+      "properties": {
+        "file": { "type": "string" },
+        "start_line": { "type": "integer", "minimum": 0 },
+        "end_line": { "type": "integer", "minimum": 0 },
+        "returned_lines": { "type": "integer", "minimum": 0 },
+        "used_chars": { "type": "integer", "minimum": 0 },
+        "max_lines": { "type": "integer", "minimum": 0 },
+        "max_chars": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "truncation": { "$ref": "./budget_truncation.schema.json" },
+        "file_size_bytes": { "type": "integer", "minimum": 0 },
+        "file_mtime_ms": { "type": "integer", "minimum": 0 },
+        "content_sha256": { "type": "string" },
+        "content": { "type": "string" }
+      }
+    },
+    "map_output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "total_files", "total_chunks"],
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/map_node" }
+        },
+        "total_files": { "type": "integer", "minimum": 0 },
+        "total_chunks": { "type": "integer", "minimum": 0 },
+        "coverage_chunks_pct": { "type": "number", "minimum": 0 },
+        "total_lines": { "type": "integer", "minimum": 0 },
+        "coverage_files_pct": { "type": "number", "minimum": 0 },
+        "coverage_lines_pct": { "type": "number", "minimum": 0 }
+      }
+    },
+    "map_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "files", "chunks"],
+      "properties": {
+        "path": { "type": "string" },
+        "files": { "type": "integer", "minimum": 0 },
+        "chunks": { "type": "integer", "minimum": 0 },
+        "coverage_chunks_pct": { "type": "number", "minimum": 0 },
+        "coverage_files_pct": { "type": "number", "minimum": 0 },
+        "coverage_lines_pct": { "type": "number", "minimum": 0 },
+        "top_symbols": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/symbol_info" }
+        },
+        "avg_symbol_coverage": { "type": "number", "minimum": 0 }
+      }
+    },
+    "symbol_info": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "line"],
+      "properties": {
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "parent": { "type": ["string", "null"], "default": null },
+        "line": { "type": "integer", "minimum": 0 },
+        "file": { "type": ["string", "null"], "default": null }
+      }
+    }
+  },
+  "$comment": "Rust source of truth: crates/cli/src/command/domain.rs::RepoOnboardingPackOutput"
+}

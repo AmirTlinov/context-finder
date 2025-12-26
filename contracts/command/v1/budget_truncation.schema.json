@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/command/v1/budget_truncation.schema.json",
+  "title": "Budget Truncation Reason (v1)",
+  "type": "string",
+  "description": "Reason a response was truncated to fit a budget.",
+  "enum": [
+    "max_chars",
+    "max_lines",
+    "max_matches",
+    "max_hunks",
+    "docs_limit",
+    "timeout",
+    "max_items"
+  ]
+}

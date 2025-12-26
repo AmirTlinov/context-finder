@@ -78,8 +78,8 @@ pub struct TextSearchResult {
     pub next_cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_actions: Option<Vec<ToolNextAction>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolMeta>,
+    #[serde(default)]
+    pub meta: ToolMeta,
     pub matches: Vec<TextSearchMatch>,
 }
 

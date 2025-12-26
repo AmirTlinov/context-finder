@@ -1,25 +1,65 @@
 use super::super::{
     compute_used_chars, extract_path_from_input, parse_tool_result_as_json, prepare_item_input,
     push_item_or_truncate, resolve_batch_refs, trim_output_to_budget, BatchBudget, BatchItemResult,
-    BatchItemStatus, BatchRequest, BatchResult, BatchToolName, CallToolResult, Content,
-    ContextFinderService, ContextPackRequest, ContextRequest, DoctorRequest, ExplainRequest,
-    FileSliceRequest, GrepContextRequest, ImpactRequest, IndexRequest, ListFilesRequest,
-    MapRequest, McpError, OverviewRequest, Parameters, SearchRequest, TextSearchRequest,
-    TraceRequest,
+    BatchItemStatus, BatchRequest, BatchResult, BatchToolName, CallToolResult, CapabilitiesRequest,
+    Content, ContextFinderService, ContextPackRequest, ContextRequest, DoctorRequest,
+    ExplainRequest, FileSliceRequest, GrepContextRequest, ImpactRequest, IndexRequest,
+    ListFilesRequest, MapRequest, McpError, OverviewRequest, Parameters, SearchRequest,
+    TextSearchRequest, TraceRequest,
 };
 use crate::tools::schemas::batch::BatchItem;
+use context_protocol::ErrorEnvelope;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use super::error::invalid_request;
+use super::error::{
+    attach_meta, invalid_request, invalid_request_with, invalid_request_with_meta, meta_for_request,
+};
 const DEFAULT_MAX_CHARS: usize = 20_000;
 const MAX_MAX_CHARS: usize = 500_000;
 const MIN_SUPPORTED_VERSION: u32 = 1;
 const LATEST_VERSION: u32 = 2;
 const DEFAULT_VERSION: u32 = LATEST_VERSION;
 
-fn call_error(message: impl Into<String>) -> CallToolResult {
-    invalid_request(message)
+type ToolResult<T> = std::result::Result<T, CallToolResult>;
+
+fn suggest_max_chars(current: usize) -> usize {
+    current
+        .saturating_mul(2)
+        .clamp(DEFAULT_MAX_CHARS, MAX_MAX_CHARS)
+}
+
+fn retry_action(
+    max_chars: usize,
+    path: Option<&str>,
+    version: u32,
+) -> context_protocol::ToolNextAction {
+    let mut args = serde_json::json!({
+        "version": version,
+        "max_chars": max_chars,
+    });
+    if let Some(path) = path {
+        args["path"] = serde_json::Value::String(path.to_string());
+    }
+    context_protocol::ToolNextAction {
+        tool: "batch".to_string(),
+        args,
+        reason: "Increase max_chars to fit the batch response envelope.".to_string(),
+    }
+}
+
+fn budget_error(
+    max_chars: usize,
+    path: Option<&str>,
+    version: u32,
+    err: anyhow::Error,
+) -> CallToolResult {
+    let suggested = suggest_max_chars(max_chars);
+    invalid_request_with(
+        format!("max_chars too small for batch response ({err:#})"),
+        Some(format!("Increase max_chars (suggested: {suggested}).")),
+        vec![retry_action(suggested, path, version)],
+    )
 }
 
 fn validate_batch_version(version: u32) -> Option<String> {
@@ -50,6 +90,9 @@ async fn dispatch_tool(
     }
 
     match tool {
+        BatchToolName::Capabilities => {
+            typed_call!(CapabilitiesRequest, capabilities, "capabilities")
+        }
         BatchToolName::Map => typed_call!(MapRequest, map, "map"),
         BatchToolName::FileSlice => typed_call!(FileSliceRequest, file_slice, "file_slice"),
         BatchToolName::ListFiles => typed_call!(ListFilesRequest, list_files, "list_files"),
@@ -90,8 +133,10 @@ impl<'a> BatchRunner<'a> {
                 max_chars,
                 used_chars: 0,
                 truncated: false,
+                truncation: None,
             },
-            meta: None,
+            next_actions: Vec::new(),
+            meta: context_indexer::ToolMeta { index_state: None },
         };
         let ref_context = (version >= 2).then(|| {
             serde_json::json!({
@@ -163,37 +208,52 @@ impl<'a> BatchRunner<'a> {
         );
     }
 
-    fn push_rejected(&mut self, id: String, tool: BatchToolName, message: String) -> bool {
-        let rejected = BatchItemResult {
-            id,
-            tool,
-            status: BatchItemStatus::Error,
-            message: Some(message),
-            data: serde_json::Value::Null,
-        };
+    fn push_rejected(
+        &mut self,
+        id: String,
+        tool: BatchToolName,
+        message: String,
+    ) -> ToolResult<bool> {
+        let rejected = batch_error_item(id, tool, "invalid_request", message);
 
-        if !push_item_or_truncate(&mut self.output, rejected) {
-            return false;
+        let pushed = push_item_or_truncate(&mut self.output, rejected).map_err(|err| {
+            budget_error(
+                self.output.budget.max_chars,
+                self.inferred_path.as_deref(),
+                self.output.version,
+                err,
+            )
+        })?;
+        if !pushed {
+            return Ok(false);
         }
         self.store_last_item_in_ref_context();
 
-        !self.stop_on_error
+        Ok(!self.stop_on_error)
     }
 
-    fn push_processed(&mut self, item: BatchItemResult) -> bool {
-        if !push_item_or_truncate(&mut self.output, item) {
-            return false;
+    fn push_processed(&mut self, item: BatchItemResult) -> ToolResult<bool> {
+        let pushed = push_item_or_truncate(&mut self.output, item).map_err(|err| {
+            budget_error(
+                self.output.budget.max_chars,
+                self.inferred_path.as_deref(),
+                self.output.version,
+                err,
+            )
+        })?;
+        if !pushed {
+            return Ok(false);
         }
         self.store_last_item_in_ref_context();
-        !(self.stop_on_error
+        Ok(!(self.stop_on_error
             && self
                 .output
                 .items
                 .last()
-                .is_some_and(|v| v.status == BatchItemStatus::Error))
+                .is_some_and(|v| v.status == BatchItemStatus::Error)))
     }
 
-    async fn run_item(&mut self, item: BatchItem) -> bool {
+    async fn run_item(&mut self, item: BatchItem) -> ToolResult<bool> {
         let trimmed_id = item.id.trim().to_string();
         if trimmed_id.is_empty() {
             return self.push_rejected(
@@ -254,19 +314,43 @@ impl<'a> BatchRunner<'a> {
 
     fn finish(self) -> CallToolResult {
         CallToolResult::success(vec![Content::text(
-            serde_json::to_string(&self.output).unwrap_or_default(),
+            context_protocol::serialize_json(&self.output).unwrap_or_default(),
         )])
     }
 
-    async fn apply_meta(&mut self) {
+    async fn apply_meta(&mut self) -> ToolResult<()> {
         let Some(raw_path) = self.inferred_path.as_deref() else {
-            return;
+            return Ok(());
         };
         let Ok(root) = PathBuf::from(raw_path).canonicalize() else {
-            return;
+            return Ok(());
         };
-        self.output.meta = Some(self.service.tool_meta(&root).await);
-        trim_output_to_budget(&mut self.output);
+        self.output.meta = self.service.tool_meta(&root).await;
+        trim_output_to_budget(&mut self.output).map_err(|err| {
+            budget_error(
+                self.output.budget.max_chars,
+                self.inferred_path.as_deref(),
+                self.output.version,
+                err,
+            )
+        })?;
+        if self.output.budget.truncated && self.output.next_actions.is_empty() {
+            let suggested = suggest_max_chars(self.output.budget.max_chars);
+            self.output.next_actions.push(retry_action(
+                suggested,
+                self.inferred_path.as_deref(),
+                self.output.version,
+            ));
+            trim_output_to_budget(&mut self.output).map_err(|err| {
+                budget_error(
+                    self.output.budget.max_chars,
+                    self.inferred_path.as_deref(),
+                    self.output.version,
+                    err,
+                )
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -282,24 +366,77 @@ fn materialize_item_result(
                 tool,
                 status: BatchItemStatus::Ok,
                 message: None,
+                error: None,
                 data,
             },
-            Err(message) => BatchItemResult {
+            Err(message) => {
+                let error = extract_error_envelope(&result).unwrap_or_else(|| ErrorEnvelope {
+                    code: if result.is_error.unwrap_or(false) {
+                        "tool_error".to_string()
+                    } else {
+                        "invalid_response".to_string()
+                    },
+                    message: message.clone(),
+                    details: None,
+                    hint: None,
+                    next_actions: Vec::new(),
+                });
+                BatchItemResult {
+                    id,
+                    tool,
+                    status: BatchItemStatus::Error,
+                    message: Some(error.message.clone()),
+                    error: Some(error),
+                    data: serde_json::Value::Null,
+                }
+            }
+        },
+        Err(err) => {
+            let error = ErrorEnvelope {
+                code: "tool_error".to_string(),
+                message: err.to_string(),
+                details: None,
+                hint: None,
+                next_actions: Vec::new(),
+            };
+            BatchItemResult {
                 id,
                 tool,
                 status: BatchItemStatus::Error,
-                message: Some(message),
+                message: Some(error.message.clone()),
+                error: Some(error),
                 data: serde_json::Value::Null,
-            },
-        },
-        Err(err) => BatchItemResult {
-            id,
-            tool,
-            status: BatchItemStatus::Error,
-            message: Some(err.to_string()),
-            data: serde_json::Value::Null,
-        },
+            }
+        }
     }
+}
+
+fn batch_error_item(
+    id: String,
+    tool: BatchToolName,
+    code: &str,
+    message: String,
+) -> BatchItemResult {
+    BatchItemResult {
+        id,
+        tool,
+        status: BatchItemStatus::Error,
+        message: Some(message.clone()),
+        error: Some(ErrorEnvelope {
+            code: code.to_string(),
+            message,
+            details: None,
+            hint: None,
+            next_actions: Vec::new(),
+        }),
+        data: serde_json::Value::Null,
+    }
+}
+
+fn extract_error_envelope(result: &CallToolResult) -> Option<ErrorEnvelope> {
+    let content = result.structured_content.as_ref()?;
+    let raw = content.get("error")?.clone();
+    serde_json::from_value(raw).ok()
 }
 
 /// Execute multiple Context Finder tools in a single call (agent-friendly batch).
@@ -307,8 +444,14 @@ pub(in crate::tools::dispatch) async fn batch(
     service: &ContextFinderService,
     request: BatchRequest,
 ) -> Result<CallToolResult, McpError> {
+    let mut meta = meta_for_request(service, request.path.as_deref()).await;
     if request.items.is_empty() {
-        return Ok(call_error("Batch items must not be empty"));
+        return Ok(invalid_request_with_meta(
+            "Batch items must not be empty",
+            meta,
+            None,
+            Vec::new(),
+        ));
     }
 
     let max_chars = request
@@ -318,7 +461,7 @@ pub(in crate::tools::dispatch) async fn batch(
 
     let version = request.version.unwrap_or(DEFAULT_VERSION);
     if let Some(message) = validate_batch_version(version) {
-        return Ok(call_error(message));
+        return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
     }
 
     let min_payload = BatchResult {
@@ -328,32 +471,47 @@ pub(in crate::tools::dispatch) async fn batch(
             max_chars,
             used_chars: 0,
             truncated: true,
+            truncation: None,
         },
-        meta: None,
+        next_actions: Vec::new(),
+        meta: context_indexer::ToolMeta { index_state: None },
     };
     if let Ok(min_chars) = compute_used_chars(&min_payload) {
         if min_chars > max_chars {
-            return Ok(call_error(format!(
-                "max_chars too small for batch envelope (min_chars={min_chars})"
-            )));
+            let suggested = suggest_max_chars(max_chars);
+            return Ok(invalid_request_with_meta(
+                format!("max_chars too small for batch envelope (min_chars={min_chars})"),
+                meta,
+                Some(format!("Increase max_chars (suggested: {suggested}).")),
+                vec![retry_action(suggested, request.path.as_deref(), version)],
+            ));
         }
     }
 
     let inferred_path = match service.resolve_root(request.path.as_deref()).await {
-        Ok((_, root_display)) => Some(root_display),
-        Err(message) => return Ok(call_error(message)),
+        Ok((root, root_display)) => {
+            meta = service.tool_meta(&root).await;
+            Some(root_display)
+        }
+        Err(message) => {
+            return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
+        }
     };
     let mut runner = BatchRunner::new(service, version, max_chars, inferred_path)
         .with_stop_on_error(request.stop_on_error);
     runner.update_ref_context_path();
 
     for item in request.items {
-        if !runner.run_item(item).await {
-            break;
+        match runner.run_item(item).await {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(result) => return Ok(attach_meta(result, meta.clone())),
         }
     }
 
-    runner.apply_meta().await;
+    if let Err(result) = runner.apply_meta().await {
+        return Ok(attach_meta(result, meta));
+    }
     Ok(runner.finish())
 }
 

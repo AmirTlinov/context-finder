@@ -8,14 +8,14 @@ use context_graph::CodeGraph;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::error::{internal_error, invalid_request};
+use super::error::{internal_error_with_meta, invalid_request_with_meta, meta_for_request};
 const MAX_ENTRY_POINTS: usize = 10;
 const MAX_KEY_TYPES: usize = 10;
 const HOTSPOT_LIMIT: usize = 20;
 
 fn success_payload(result: &OverviewResult) -> CallToolResult {
     CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(result).unwrap_or_default(),
+        context_protocol::serialize_json(result).unwrap_or_default(),
     )])
 }
 
@@ -131,15 +131,16 @@ pub(in crate::tools::dispatch) async fn overview(
     let root = match service.resolve_root(request.path.as_deref()).await {
         Ok((root, _)) => root,
         Err(message) => {
-            return Ok(invalid_request(message));
+            let meta = meta_for_request(service, request.path.as_deref()).await;
+            return Ok(invalid_request_with_meta(message, meta, None, Vec::new()));
         }
     };
-
     let policy = AutoIndexPolicy::from_request(request.auto_index, request.auto_index_budget_ms);
     let (mut engine, meta) = match service.prepare_semantic_engine(&root, policy).await {
         Ok(engine) => engine,
         Err(e) => {
-            return Ok(internal_error(format!("Error: {e}")));
+            let meta = service.tool_meta(&root).await;
+            return Ok(internal_error_with_meta(format!("Error: {e}"), meta));
         }
     };
 
@@ -155,15 +156,19 @@ pub(in crate::tools::dispatch) async fn overview(
         });
 
     if let Err(e) = engine.engine_mut().ensure_graph(language).await {
-        return Ok(internal_error(format!("Graph build error: {e}")));
+        return Ok(internal_error_with_meta(
+            format!("Graph build error: {e}"),
+            meta.clone(),
+        ));
     }
 
     let result = {
         let engine_ref = engine.engine_mut();
         let chunks = engine_ref.context_search.hybrid().chunks();
         let Some(assembler) = engine_ref.context_search.assembler() else {
-            return Ok(internal_error(
+            return Ok(internal_error_with_meta(
                 "Graph build error: missing assembler after build",
+                meta.clone(),
             ));
         };
         let graph = assembler.graph();
@@ -182,7 +187,7 @@ pub(in crate::tools::dispatch) async fn overview(
             entry_points,
             key_types,
             graph_stats,
-            meta: Some(meta),
+            meta,
         }
     };
 
